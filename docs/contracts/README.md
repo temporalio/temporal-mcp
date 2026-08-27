@@ -142,6 +142,8 @@ grammar, operators, grouping, and ordering support.
 | `inspect_workflow_execution` | evidence composite | [migration guide](../tool-surface-v2.md) | preferred |
 | `inspect_workflow_task_failures` | evidence composite | [sheet](find_workflow_task_failures.md) | preferred |
 | `inspect_activity_queue_dependencies` | evidence composite | [sheet](find_stuck_workflows.md) | preferred |
+| `assess_workflow_recovery` | evidence composite | [sheet](assess_workflow_recovery.md) | preferred |
+| `analyze_incident_impact` | operator intent | [sheet](analyze_incident_impact.md) | preferred |
 | `find_workflow_task_failures` | population reasoning | [sheet](find_workflow_task_failures.md) | proposed |
 | `find_stuck_workflows` | population reasoning | [sheet](find_stuck_workflows.md) | proposed |
 | `plan_workflow_reset` | recommendation | [sheet](plan_workflow_reset.md) | revise existing |

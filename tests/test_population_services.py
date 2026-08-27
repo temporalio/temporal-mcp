@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from ops_mcp.contracts import (
+    AssessWorkflowRecoveryRequest,
     FindStuckWorkflowsRequest,
     FindWorkflowTaskFailuresRequest,
     PopulationLimits,
@@ -185,7 +186,7 @@ def _context() -> RequestContext:
         budget=BasicExecutionBudget(
             deadline=NOW + timedelta(minutes=5),
             limits=BasicBudgetLimits(
-                temporal_calls=100, pages=100, history_events=10_000, output_bytes=1_000_000
+                temporal_calls=300, pages=300, history_events=10_000, output_bytes=1_000_000
             ),
         ),
     )
@@ -332,6 +333,76 @@ def _queue(name: str, kind: TaskQueueKind, *, pollers: bool) -> TaskQueueFact:
         rate_limiting_active=False,
         observed_at=NOW,
     )
+
+
+async def test_recovery_composite_uses_exact_activity_outcomes_and_excludes_failed_run() -> None:
+    rows = tuple(_row(index) for index in range(3))
+
+    def activity_history(index: int, phase: str) -> HistoryReadFact:
+        scheduled = HistoryEventFact(
+            event_id=8,
+            event_type="EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+            event_time=NOW,
+            task_id=1,
+            attributes=ActivityTaskEventAttributes(
+                phase="scheduled",
+                activity_id="activity-1",
+                activity_type="DoWork",
+                task_queue="activities",
+            ),
+        )
+        terminal = HistoryEventFact(
+            event_id=9,
+            event_type=f"EVENT_TYPE_ACTIVITY_TASK_{phase.upper()}",
+            event_time=NOW,
+            task_id=2,
+            attributes=ActivityTaskEventAttributes(
+                phase=phase,
+                scheduled_event_id=8,
+            ),
+        )
+        return HistoryReadFact(
+            workflow_id=f"wf-{index}",
+            run_id=f"run-{index}",
+            events=(scheduled, terminal),
+            reverse=False,
+            pages_read=1,
+            events_scanned=2,
+            next_page_token=None,
+            observed_at=NOW,
+        )
+
+    service = DefaultPopulationDiagnosticService(
+        Catalog(_target()),
+        Visibility(rows, has_more=False, population_count=3),
+        Workflows({}),
+        Histories(
+            {
+                "wf-0": activity_history(0, "failed"),
+                "wf-1": activity_history(1, "completed"),
+                "wf-2": activity_history(2, "completed"),
+            }
+        ),
+        Queues({}),
+    )
+
+    result = await service.assess_workflow_recovery(
+        _context(),
+        AssessWorkflowRecoveryRequest(
+            target_ref="orders-prod",
+            failed_workflow_id="wf-0",
+            failed_run_id="run-0",
+            comparison_query="WorkflowType = 'ExampleWorkflow'",
+            activity_type="DoWork",
+        ),
+    )
+
+    assert result.answer.failed_run_activity_outcome == "failure"
+    assert result.answer.candidate_runs == 2
+    assert result.answer.activity_successes == 2
+    assert result.answer.activity_failures == 0
+    assert result.answer.recovery_assessment == "supported"
+    assert result.inspection.completion == "complete"
 
 
 async def test_failure_population_narrows_before_bounded_history_fanout() -> None:
@@ -483,6 +554,71 @@ async def test_population_resume_starts_at_signed_candidate_frame_cursor() -> No
         query="scope",
     )
     assert state.candidate_page_token == "NA"
+
+
+async def test_three_call_population_chain_reports_230_cumulative_runs() -> None:
+    rows = tuple(_row(index) for index in range(230))
+    service = DefaultPopulationDiagnosticService(
+        Catalog(_target()),
+        Visibility(rows, has_more=False, population_count=230),
+        Workflows({f"wf-{index}": _workflow(index) for index in range(230)}),
+        Histories({f"wf-{index}": _history(index, failure=True) for index in range(230)}),
+        Queues({}),
+    )
+    limits = PopulationLimits(
+        max_candidates=230,
+        max_visibility_pages=10,
+        max_runs=100,
+        max_histories=100,
+        max_history_events_per_run=20,
+        max_task_queues=1,
+        max_concurrency=10,
+    )
+    state = None
+    preferred = None
+    for _ in range(3):
+        result = await service.find_workflow_task_failures(
+            _context(),
+            FindWorkflowTaskFailuresRequest(
+                target_ref="orders-prod",
+                query="WorkflowType = 'ExampleWorkflow'",
+                time_window=_window(),
+                limits=limits,
+                sampling_strategy="deterministic_hash",
+                sample_seed=state.sample_seed if state else "fixed",
+                excluded_run_identities=state.inspected_run_ledger if state else (),
+                candidate_page_token=state.candidate_page_token if state else None,
+            ),
+        )
+        preferred = _with_population_continuation(
+            result,
+            state=state,
+            tool="inspect_workflow_task_failures",
+            target_ref="orders-prod",
+            scope="230-run-scope",
+            sample_seed="fixed",
+            offset=state.inspection_offset if state else 0,
+            started_at=_window().started_at_or_after,
+            ended_at=_window().started_before,
+            confirmed=lambda run: bool(run.findings),
+            candidate_page_token=state.candidate_page_token if state else None,
+        )
+        if preferred.continuation_token:
+            state = _CONTINUATIONS.decode(
+                preferred.continuation_token,
+                tool="inspect_workflow_task_failures",
+                target_ref="orders-prod",
+                query="230-run-scope",
+            )
+
+    assert preferred is not None
+    assert preferred.continuation_token is None
+    assert preferred.next_call is None
+    assert preferred.page.inspected == 30
+    assert preferred.cumulative.inspected == 230
+    assert preferred.cumulative.confirmed == 230
+    assert len(preferred.cumulative_confirmed_identities) == 230
+    assert preferred.inspection.completion == "complete"
 
 
 async def test_stuck_population_deduplicates_current_queue_snapshots() -> None:

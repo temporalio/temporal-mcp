@@ -104,8 +104,9 @@ def test_no_name_can_discover_one_authorized_target(tmp_path: Path) -> None:
         _context(groups=("restricted",)), ResolveTargetRequest()
     )
 
-    assert isinstance(result.answer, TargetCandidatesAnswer)
-    assert [candidate.target_ref for candidate in result.answer.candidates] == ["secret-prod"]
+    assert isinstance(result.answer, ResolvedTargetAnswer)
+    assert result.answer.target_ref == "secret-prod"
+    assert result.answer.resolution == "sole_authorized_target"
 
 
 def test_discovery_is_deterministic_and_deduplicates_across_groups(tmp_path: Path) -> None:

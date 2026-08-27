@@ -61,3 +61,14 @@ def test_continuation_rejects_tampering() -> None:
             target_ref="orders-prod",
             query="WorkflowType = 'OrderWorkflow'",
         )
+
+
+def test_scope_seed_is_stable_and_changes_with_scope() -> None:
+    codec = ContinuationCodec(b"test-secret")
+
+    first = codec.stable_seed(tool="inspect", target_ref="orders-prod", scope="query")
+    second = codec.stable_seed(tool="inspect", target_ref="orders-prod", scope="query")
+    changed = codec.stable_seed(tool="inspect", target_ref="orders-prod", scope="other")
+
+    assert first == second
+    assert first != changed

@@ -30,6 +30,10 @@ class ContinuationState:
     started_at: str | None = None
     ended_at: str | None = None
     discovered_activity_task_queues: tuple[str, ...] = ()
+    cumulative_inspection_failures: int = 0
+    cumulative_histories_inspected: int = 0
+    cumulative_group_counts: tuple[tuple[str, str, int], ...] = ()
+    cumulative_incomplete: bool = False
     # Temporal's native Visibility cursor for the beginning of the current
     # candidate frame. It is protected by the outer HMAC and never exposed as
     # a standalone pagination control.
@@ -63,6 +67,10 @@ class ContinuationCodec:
             ):
                 if name in raw:
                     raw[name] = tuple(raw[name])
+            if "cumulative_group_counts" in raw:
+                raw["cumulative_group_counts"] = tuple(
+                    tuple(item) for item in raw["cumulative_group_counts"]
+                )
             state = ContinuationState(**raw)
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise _invalid_token("Continuation token is invalid or has been tampered with") from exc
@@ -75,6 +83,11 @@ class ContinuationCodec:
         ):
             raise _invalid_token("Continuation token does not match the requested scope")
         return state
+
+    def stable_seed(self, *, tool: str, target_ref: str, scope: str) -> str:
+        payload = f"{tool}\0{target_ref}\0{_normalize_query(scope)}".encode()
+        digest = hmac.new(self._secret, payload, hashlib.sha256).digest()[:12]
+        return _urlsafe(digest)
 
 
 def normalize_query(query: str) -> str:
@@ -90,7 +103,10 @@ def _urlsafe(value: bytes) -> str:
 
 
 def _decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if _urlsafe(decoded) != value:
+        raise ValueError("non-canonical base64")
+    return decoded
 
 
 def _invalid_token(message: str) -> OpsMcpError:

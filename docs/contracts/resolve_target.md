@@ -8,14 +8,16 @@
   `resolved_from`. Discovery or an exact ambiguous match has `kind: candidates`,
   a reason, and deterministically ordered public candidate summaries. Connection
   addresses, TLS configuration, credential configuration, and secrets never cross
-  this boundary.
+  this boundary. If exactly one target is authorized and no name is supplied, the response may
+  resolve it directly with `resolution: sole_authorized_target`.
 - **Facts:** selected configured mapping. **Interpretation:** normalized alias
   matching only; no environment inference beyond configured aliases.
 - **Gateway calls:** none in the POC. Target existence probing belongs to
   `check_connection`.
 - **Completeness:** `complete` for the caller-visible catalog snapshot.
 - **Limits/refusals:** exact normalized target-reference/alias matching only; no
-  fuzzy or partial matching. Omitted names list unique authorized targets,
+  fuzzy or partial matching. Omitted names list unique authorized targets (or resolve the sole
+  authorized target),
   deduplicated across grants. Exact ambiguous matches return authorized candidates
   rather than an error. Matching never scans unauthorized groups.
 - **Errors:** `invalid_argument`, `target_not_found`. Unknown and unauthorized names

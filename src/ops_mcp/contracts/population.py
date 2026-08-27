@@ -10,6 +10,7 @@ from pydantic import Field, field_validator, model_validator
 
 from ops_mcp.contracts.primitives import (
     CURRENT_SCHEMA_VERSION,
+    AnswerConstraints,
     Confidence,
     ContractModel,
     SchemaVersion,
@@ -247,6 +248,24 @@ class PopulationInspection(ContractModel):
     candidate_next_page_token: str | None = Field(default=None, exclude=True)
 
 
+class PopulationProgressGroup(ContractModel):
+    dimension: NonEmptyString
+    values: dict[str, str]
+    confirmed: int = Field(ge=0)
+
+
+class PopulationProgress(ContractModel):
+    inspected: int = Field(ge=0)
+    confirmed: int = Field(ge=0)
+    inspection_failures: int = Field(ge=0)
+    groups: tuple[PopulationProgressGroup, ...] = ()
+
+
+class PopulationNextCall(ContractModel):
+    tool: NonEmptyString
+    continuation_token: NonEmptyString
+
+
 class WorkflowTaskFailuresAnswer(ContractModel):
     effective_query: NonEmptyString
     runs: tuple[InspectedRun, ...]
@@ -267,6 +286,10 @@ class FindWorkflowTaskFailuresResponse(ContractModel):
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
     cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
     cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
+    page: PopulationProgress | None = None
+    cumulative: PopulationProgress | None = None
+    next_call: PopulationNextCall | None = None
+    answer_constraints: AnswerConstraints | None = None
 
 
 class InspectWorkflowTaskFailuresResponse(FindWorkflowTaskFailuresResponse):
@@ -311,6 +334,10 @@ class FindStuckWorkflowsResponse(ContractModel):
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
     cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
     cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
+    page: PopulationProgress | None = None
+    cumulative: PopulationProgress | None = None
+    next_call: PopulationNextCall | None = None
+    answer_constraints: AnswerConstraints | None = None
 
 
 class ActivityQueueDependenciesAnswer(ContractModel):
@@ -336,3 +363,7 @@ class InspectActivityQueueDependenciesResponse(ContractModel):
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
     cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
     cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
+    page: PopulationProgress | None = None
+    cumulative: PopulationProgress | None = None
+    next_call: PopulationNextCall | None = None
+    answer_constraints: AnswerConstraints | None = None

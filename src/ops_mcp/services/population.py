@@ -18,12 +18,16 @@ from ops_mcp.analysis.population import (
 from ops_mcp.contracts.incident import (
     AnalyzeIncidentImpactRequest,
     AnalyzeIncidentImpactResponse,
+    IncidentBusinessGrouping,
+    IncidentCandidatePopulation,
     IncidentImpactAnswer,
     IncidentImpactClassification,
+    IncidentImpactCriteria,
     IncidentImpactFinding,
     IncidentImpactGroup,
     IncidentImpactRun,
     IncidentImpactSummary,
+    IncidentQueueScope,
     IncidentTimeWindow,
 )
 from ops_mcp.contracts.population import (
@@ -47,7 +51,19 @@ from ops_mcp.contracts.population import (
     StuckWorkflowsAnswer,
     WorkflowTaskFailuresAnswer,
 )
-from ops_mcp.contracts.primitives import Completeness, Confidence, ContractModel
+from ops_mcp.contracts.primitives import (
+    AnswerConstraints,
+    Completeness,
+    CompositeInspection,
+    Confidence,
+    ContractModel,
+)
+from ops_mcp.contracts.recovery import (
+    AssessWorkflowRecoveryAnswer,
+    AssessWorkflowRecoveryRequest,
+    AssessWorkflowRecoveryResponse,
+    RecoveryRunOutcome,
+)
 from ops_mcp.facts.history import ActivityTaskEventAttributes, HistoryReadFact
 from ops_mcp.facts.task_queues import TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.visibility import SearchAttributeFieldFact, WorkflowVisibilityFact
@@ -99,11 +115,18 @@ class _ActivityDependencyEvidence:
     history_by_id: dict[str, HistoryReadFact]
     history_errors: dict[str, Exception]
     affected_activity_task_queues: frozenset[str]
+    discovered_activity_task_queues: frozenset[str]
     history_limited: bool
     advanced: AdvancedInspectionBudget
 
 
 class PopulationDiagnosticService(Protocol):
+    async def assess_workflow_recovery(
+        self,
+        context: RequestContext,
+        request: AssessWorkflowRecoveryRequest,
+    ) -> AssessWorkflowRecoveryResponse: ...
+
     async def analyze_incident_impact(
         self,
         context: RequestContext,
@@ -137,6 +160,145 @@ class DefaultPopulationDiagnosticService:
         self._workflows = workflows
         self._history = history
         self._task_queues = task_queues
+
+    async def assess_workflow_recovery(
+        self,
+        context: RequestContext,
+        request: AssessWorkflowRecoveryRequest,
+    ) -> AssessWorkflowRecoveryResponse:
+        """Inspect exact comparison histories for post-failure activity outcomes."""
+
+        target = self._catalog.authorize(context.principal, request.target_ref)
+        limits = PopulationLimits(
+            max_candidates=2_000,
+            max_visibility_pages=10,
+            max_runs=100,
+            max_histories=100,
+            max_history_events_per_run=500,
+            max_task_queues=1,
+            max_concurrency=10,
+        )
+        # Pin the failed execution and verify that the named activity is present in its history.
+        failed_history = await self._history.read(
+            context,
+            target,
+            request.failed_workflow_id,
+            request.failed_run_id,
+            page_size=250,
+            max_events=limits.max_history_events_per_run,
+        )
+        failed_outcome = _activity_outcome(failed_history, request.activity_type)
+        collection = await self._collect_candidates(
+            context,
+            target,
+            request.comparison_query,
+            limits,
+        )
+        collection = _without_inspected(
+            collection,
+            (f"{request.failed_workflow_id}\0{request.failed_run_id}",),
+        )
+        selected = collection.rows[: limits.max_histories]
+        histories = await self._read_histories(
+            context,
+            target,
+            selected,
+            max_events=limits.max_history_events_per_run,
+            concurrency=limits.max_concurrency,
+            reverse=False,
+        )
+        outcomes: list[RecoveryRunOutcome] = []
+        for item in histories:
+            if item.error is not None or item.value is None:
+                outcome = "inspection_failed"
+            else:
+                outcome = _activity_outcome(item.value, request.activity_type)
+            outcomes.append(
+                RecoveryRunOutcome(
+                    workflow_id=item.item.workflow_id,
+                    run_id=item.item.run_id,
+                    outcome=outcome,
+                )
+            )
+        successes = sum(item.outcome == "success" for item in outcomes)
+        failures = sum(item.outcome == "failure" for item in outcomes)
+        inspection_failures = sum(item.outcome == "inspection_failed" for item in outcomes)
+        complete = (
+            collection.complete
+            and len(selected) == len(collection.rows)
+            and inspection_failures == 0
+            and failed_history.complete
+        )
+        if successes:
+            assessment = "supported"
+        elif failures:
+            assessment = "not_supported"
+        else:
+            assessment = "unknown"
+        warnings = []
+        if failed_outcome == "not_observed":
+            warnings.append(
+                "The named activity type was not observed in the bounded failed-run history."
+            )
+        if not complete:
+            warnings.append(
+                "Recovery evidence is bounded; the response does not cover every comparison run."
+            )
+        response = AssessWorkflowRecoveryResponse(
+            target_ref=target.target_ref,
+            answer=AssessWorkflowRecoveryAnswer(
+                failed_workflow_id=request.failed_workflow_id,
+                failed_run_id=request.failed_run_id,
+                activity_type=request.activity_type,
+                comparison_query=request.comparison_query,
+                failed_run_activity_outcome=failed_outcome,
+                candidate_runs=len(collection.rows),
+                histories_inspected=len(histories) - inspection_failures,
+                activity_successes=successes,
+                activity_failures=failures,
+                inspection_failures=inspection_failures,
+                completion="complete" if complete else "sampled",
+                outcomes=tuple(outcomes),
+                recovery_assessment=assessment,
+            ),
+            inspection=CompositeInspection(
+                completion="complete" if complete else "sampled",
+                candidate_count=len(collection.rows),
+                runs_inspected=len(selected),
+                histories_inspected=len(histories) - inspection_failures,
+                inspection_failures=inspection_failures,
+            ),
+            warnings=tuple(warnings),
+            evidence_collected=(
+                "exact_failed_run_history",
+                "comparison_visibility_population",
+                "exact_comparison_run_histories",
+                "activity_success_and_failure_events",
+            ),
+            evidence_unavailable=(
+                () if complete else ("complete_comparison_population",)
+            ),
+            supported_conclusions=(
+                f"activity_successes={successes} within inspected comparison histories",
+                f"recovery_assessment={assessment} within the comparison query scope",
+            ),
+            unsupported_conclusions=(
+                "Temporal activity outcomes do not directly prove dependency health",
+                "recovery evidence does not establish reset safety",
+            ),
+            answer_constraints=AnswerConstraints(
+                may_claim=(
+                    "whether inspected comparison runs contain successful or failed activity "
+                    "outcomes",
+                    "recovery is supported when later exact activity successes are observed",
+                ),
+                must_not_claim=(
+                    "direct dependency health from Temporal activity success alone",
+                    "a reset was planned or executed",
+                ),
+            ),
+        )
+        return _charge_output(context, response)
 
     async def find_workflow_task_failures(
         self,
@@ -516,6 +678,61 @@ class DefaultPopulationDiagnosticService:
                 "workflow names do not establish team ownership or monetary domain",
                 "temporal correlation does not prove incident causation",
             ),
+            candidate_population=IncidentCandidatePopulation(
+                candidate_query=effective_query,
+                candidate_frame_size=len(collection.rows),
+                complete=collection.complete and len(selected) == len(collection.rows),
+            ),
+            impact_criteria=IncidentImpactCriteria(
+                incident_window=request.incident_window,
+                activity_task_queues=tuple(sorted(affected_queues)),
+                evidence_basis=(
+                    "exact pending activity queue membership",
+                    "activity scheduling and failure history within the incident window",
+                ),
+            ),
+            business_grouping=IncidentBusinessGrouping(
+                attributes=request.group_by_custom_search_attributes,
+            ),
+            scope=IncidentQueueScope(
+                candidate_query=effective_query,
+                affected_activity_task_queues=tuple(sorted(affected_queues)),
+                queue_scope_source=(
+                    "explicit" if request.affected_activity_task_queues else "discovered"
+                ),
+                discovered_activity_task_queues=tuple(
+                    sorted(dependency_evidence.discovered_activity_task_queues)
+                ),
+                excluded_discovered_queues=tuple(
+                    sorted(
+                        dependency_evidence.discovered_activity_task_queues
+                        - affected_queues
+                    )
+                ),
+                completion_scope=(
+                    "explicit_queue_subset"
+                    if request.affected_activity_task_queues
+                    else "full_candidate_population"
+                ),
+                candidate_population_complete=exact_confirmed_count,
+                incident_impact_complete=(
+                    exact_confirmed_count
+                    and not (
+                        dependency_evidence.discovered_activity_task_queues - affected_queues
+                    )
+                ),
+            ),
+            answer_constraints=AnswerConstraints(
+                may_claim=(
+                    "confirmed historical impact for returned exact run identities",
+                    "raw grouping totals within the explicitly reported scope",
+                ),
+                must_not_claim=(
+                    "business meaning inferred from workflow names or raw attribute values",
+                    "historical queue health from current queue snapshots",
+                    "complete incident census when scope.incident_impact_complete is false",
+                ),
+            ),
         )
         return _charge_output(context, response)
 
@@ -858,24 +1075,23 @@ class DefaultPopulationDiagnosticService:
             reverse=False,
         )
         history_by_id = _values_by_identity(histories)
-        affected_queues = frozenset(requested_activity_task_queues)
-        if not affected_queues:
-            affected_queues = frozenset(
-                {
+        discovered_queues = frozenset(
+            {
                     activity.activity_task_queue
                     for workflow in description_by_id.values()
                     for activity in workflow.pending_activities
                     if activity.activity_task_queue
-                }
-                | {
+            }
+            | {
                     attrs.task_queue
                     for history in history_by_id.values()
                     for event in history.events
                     if isinstance((attrs := event.attributes), ActivityTaskEventAttributes)
                     and attrs.phase == "scheduled"
                     and attrs.task_queue
-                }
-            )
+            }
+        )
+        affected_queues = frozenset(requested_activity_task_queues) or discovered_queues
         return _ActivityDependencyEvidence(
             population_count=population.count,
             collection=collection,
@@ -887,6 +1103,7 @@ class DefaultPopulationDiagnosticService:
             history_by_id=history_by_id,
             history_errors=_errors_by_identity(histories),
             affected_activity_task_queues=affected_queues,
+            discovered_activity_task_queues=discovered_queues,
             history_limited=history_limited,
             advanced=advanced,
         )
@@ -991,6 +1208,31 @@ def _incident_overlap_query(query: str, window: IncidentTimeWindow) -> str:
 
 def _visibility_identity(row: WorkflowVisibilityFact) -> str:
     return f"{row.workflow_id}\0{row.run_id}"
+
+
+def _activity_outcome(
+    history: HistoryReadFact, activity_type: str
+) -> Literal["success", "failure", "not_observed"]:
+    scheduled_types: dict[int, str] = {}
+    outcomes: list[str] = []
+    for event in history.events:
+        attrs = event.attributes
+        if not isinstance(attrs, ActivityTaskEventAttributes):
+            continue
+        if attrs.phase == "scheduled" and attrs.activity_type:
+            scheduled_types[event.event_id] = attrs.activity_type
+        observed_type = attrs.activity_type or scheduled_types.get(attrs.scheduled_event_id)
+        if observed_type != activity_type:
+            continue
+        if attrs.phase == "completed":
+            outcomes.append("success")
+        elif attrs.phase in {"failed", "timed_out"}:
+            outcomes.append("failure")
+    if "success" in outcomes:
+        return "success"
+    if "failure" in outcomes:
+        return "failure"
+    return "not_observed"
 
 
 def _without_inspected(

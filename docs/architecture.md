@@ -228,6 +228,7 @@ Rules:
 
 1. Dependencies point downward through the canonical layers.
 2. Analysis consumes typed facts and has no SDK dependency.
+
 3. Only gateways make Temporal operations; only the provider constructs clients.
 4. Only adapters import FastMCP.
 5. Target authorization occurs in services before every target-bound operation.
@@ -238,6 +239,23 @@ Rules:
 
 Tests mirror these boundaries: adapter contract tests, service orchestration tests with gateway
 fakes, gateway integration tests against Temporal, and pure analysis tests over a history corpus.
+
+## Auditing and adding a tool
+
+Audit a tool in dependency order: its public sheet in `docs/contracts/`, request and response
+models in `src/ops_mcp/contracts/`, MCP signature and description in
+`src/ops_mcp/mcp/adapters.py`, service orchestration in `src/ops_mcp/services/`, then every gateway
+and deterministic analysis function it calls. Finish at the focused tests and verify that each
+claim in `answer_constraints.may_claim` has exact evidence, while every known overclaim appears in
+`must_not_claim` or a warning.
+
+To add a tool, first write the operator question, evidence boundary, completion scope, and refusal
+rules in a contract sheet. Add strict public models, implement one service method against existing
+gateway protocols, and add a gateway capability only when Temporal data is genuinely missing.
+Register a thin read-only adapter, wire the service in `ServiceBundle`, document its routing tier,
+and add deterministic contract, orchestration, failure, and completeness tests. Do not add
+scenario selectors, backend-specific capability variants, or agent-supplied execution controls to
+the normal schema.
 
 ## Lifecycle boundaries
 

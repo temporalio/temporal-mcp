@@ -26,14 +26,20 @@ def create_mcp(root: CompositionRoot | None = None) -> FastMCP[CompositionRoot]:
     server = FastMCP[CompositionRoot](
         "Temporal Operations",
         instructions=(
-            "Resolve a human target once and reuse target_ref. Use inspect_workflow_execution "
-            "for one workflow's current or terminal condition. Use "
-            "inspect_workflow_task_failures for workflow-task failures across a population. "
-            "Use inspect_activity_queue_dependencies for activity queues, dispatch, delays, or "
-            "blast radius. Use analyze_incident_impact only for an explicit incident window. "
-            "Use plan_workflow_reset only when the operator asks for reset or recovery planning. "
-            "The inspect tools collect their documented evidence; use building blocks for novel "
-            "questions, optional enrichment, or a reported evidence gap. All tools are read-only."
+            "Routing tiers: first resolve a configured target once and reuse target_ref; never "
+            "infer a target from workflow IDs, task queues, namespaces, or query text. Tier 1: "
+            "use inspect_workflow_execution for one exact workflow and stop unless the operator "
+            "asks for blast radius or its response requires population evidence. Tier 2: use "
+            "inspect_workflow_task_failures, inspect_activity_queue_dependencies, or "
+            "analyze_incident_impact for explicit population questions; follow next_call exactly "
+            "and distinguish page from cumulative totals. Tier 3: use building-block reads only "
+            "for novel questions, enrichment, or a reported evidence gap. Use "
+            "assess_workflow_recovery to gather exact later-run activity outcomes. Use "
+            "plan_workflow_reset only after sufficient recovery evidence and only when the "
+            "operator asks for a reset plan. All tools are read-only."
+            " Do not abandon a suitable composite merely because building blocks could reproduce "
+            "it. Do not broaden an exact-run question into population analysis without operator "
+            "intent or a stated evidence requirement."
         ),
         stateless_http=True,
         json_response=True,
@@ -49,9 +55,15 @@ _ARGUMENT_EXAMPLES: dict[str, object] = {
     "human_name": "orders prod",
     "probe_codec": False,
     "query": "WorkflowType = 'OrderWorkflow'",
+    "candidate_query": "WorkflowType = 'OrderWorkflow'",
+    "comparison_query": "WorkflowType = 'OrderWorkflow' AND StartTime > '2026-08-24T15:00:00Z'",
+    "failed_workflow_id": "order-88231",
+    "failed_run_id": "01a0268c-ba90-7f27-ac62-754c4a5c892c",
+    "activity_type": "EnrichProduct",
     "fields": ["WorkflowId", "RunId", "ExecutionStatus"],
     "custom_search_attributes": ["Team"],
     "group_by_custom_search_attributes": ["Team"],
+    "business_grouping": ["Team", "Domain"],
     "page_size": 100,
     "page_token": "deprecated-opaque-token",
     "continuation_token": "signed-opaque-token",
@@ -89,7 +101,6 @@ _ARGUMENT_EXAMPLES: dict[str, object] = {
     "activity_task_queue": "ledger",
     "activity_task_queues": ["ledger"],
     "affected_activity_task_queues": ["ledger"],
-    "advanced_options": {"max_runs": 50},
     "max_candidates": 2000,
     "max_visibility_pages": 10,
     "max_runs": 100,

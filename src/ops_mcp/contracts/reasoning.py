@@ -9,6 +9,7 @@ from pydantic import Field
 
 from ops_mcp.contracts.primitives import (
     CURRENT_SCHEMA_VERSION,
+    AnswerConstraints,
     CompositeInspection,
     ContractModel,
     Finding,
@@ -134,6 +135,11 @@ class InspectWorkflowExecutionAnswer(ContractModel):
     diagnostic_query_value: Any | None = None
 
 
+class RecommendedFollowup(ContractModel):
+    intent: str = Field(min_length=1)
+    tool: str = Field(min_length=1)
+
+
 class InspectWorkflowExecutionResponse(ContractModel):
     schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
     target_ref: str
@@ -146,6 +152,9 @@ class InspectWorkflowExecutionResponse(ContractModel):
     continuation_token: None = None
     warnings: tuple[str, ...] = ()
     observed_at: datetime
+    recommended_followups: tuple[RecommendedFollowup, ...] = ()
+    population_analysis_required: Literal[False] = False
+    answer_constraints: AnswerConstraints | None = None
 
 
 class PlanWorkflowResetRequest(ContractModel):
@@ -200,6 +209,7 @@ class PlanWorkflowResetResponse(ContractModel):
     observed_history_length: int = Field(ge=0)
     observed_at: datetime
     recheck_after: datetime
+    recheck_after_is_advisory: Literal[True] = True
     valid_reset_points: tuple[ResetPoint, ...]
     safety_findings: tuple[Finding, ...] = ()
     recommendation: ResetRecommendation | None = None
@@ -213,3 +223,4 @@ class PlanWorkflowResetResponse(ContractModel):
     supported_conclusions: tuple[str, ...] = ()
     unsupported_conclusions: tuple[str, ...] = ()
     continuation_token: None = None
+    answer_constraints: AnswerConstraints | None = None

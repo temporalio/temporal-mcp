@@ -125,6 +125,10 @@ class _RecordingServices:
         self._record("analyze_incident_impact", context, request)
         self._stop()
 
+    async def assess_workflow_recovery(self, context: RequestContext, request: object) -> Any:
+        self._record("assess_workflow_recovery", context, request)
+        self._stop()
+
     async def list_schedules(self, context: RequestContext, request: object) -> Any:
         self._record("list_schedules", context, request)
         self._stop()
@@ -203,6 +207,7 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
         "inspect_workflow_task_failures",
         "find_stuck_workflows",
         "inspect_activity_queue_dependencies",
+        "assess_workflow_recovery",
         "analyze_incident_impact",
         "list_schedules",
         "describe_schedule",
@@ -232,10 +237,24 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
         assert "continuation_token" in properties
         assert "page_token" not in properties
 
+    for name in (
+        "inspect_workflow_task_failures",
+        "inspect_activity_queue_dependencies",
+        "analyze_incident_impact",
+    ):
+        properties = schemas[name]["properties"]
+        assert "advanced_options" not in properties
+        assert "limits" not in properties
+        assert "sampling_strategy" not in properties
+        assert "sample_seed" not in properties
+    assert "candidate_query" in schemas["analyze_incident_impact"]["properties"]
+    assert "query" not in schemas["analyze_incident_impact"]["properties"]
+
     composites = {
         "inspect_workflow_execution",
         "inspect_workflow_task_failures",
         "inspect_activity_queue_dependencies",
+        "assess_workflow_recovery",
         "analyze_incident_impact",
         "plan_workflow_reset",
     }
@@ -381,23 +400,21 @@ async def test_each_adapter_calls_exactly_one_service_with_fresh_context() -> No
             "analyze_incident_impact",
             {
                 "target_ref": "orders-prod",
-                "query": "WorkflowType = 'OrderWorkflow'",
-                "incident_window": {
-                    "started_at": "2026-08-23T00:00:00Z",
-                    "ended_at": "2026-08-23T00:40:00Z",
-                },
+                "candidate_query": "WorkflowType = 'OrderWorkflow'",
+                "started_at": "2026-08-23T00:00:00Z",
+                "ended_at": "2026-08-23T00:40:00Z",
                 "affected_activity_task_queues": ["ledger-activity"],
                 "expected_duration_seconds": 600,
-                "limits": {
-                    "max_candidates": 10,
-                    "max_runs": 5,
-                    "max_histories": 3,
-                    "max_history_events_per_run": 500,
-                    "max_task_queues": 5,
-                    "max_concurrency": 2,
-                },
-                "sampling_strategy": "deterministic_hash",
-                "sample_seed": "test-seed",
+            },
+        ),
+        (
+            "assess_workflow_recovery",
+            {
+                "target_ref": "orders-prod",
+                "failed_workflow_id": "order-1",
+                "failed_run_id": "run-1",
+                "comparison_query": "WorkflowType = 'OrderWorkflow'",
+                "activity_type": "EnrichProduct",
             },
         ),
         ("list_schedules", {"target_ref": "orders-prod"}),

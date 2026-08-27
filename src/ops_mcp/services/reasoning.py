@@ -18,6 +18,7 @@ from ops_mcp.contracts.namespace_reads import (
     QueryWorkflowRequest,
 )
 from ops_mcp.contracts.primitives import (
+    AnswerConstraints,
     Completeness,
     EvidenceRef,
     EvidenceSource,
@@ -37,6 +38,7 @@ from ops_mcp.contracts.reasoning import (
     PendingActivitySummary,
     PlanWorkflowResetRequest,
     PlanWorkflowResetResponse,
+    RecommendedFollowup,
     ReplayImpact,
     ResetPoint,
     ResetRecommendation,
@@ -220,9 +222,9 @@ class DefaultReasoningService:
         )
         retry_findings = tuple(item for item in diagnosis.findings if "retry" in item.code)
         supported = [
-            f"duration_state={duration_state}",
-            f"workflow_wait_state={wait_state}",
-            f"current_dispatch_state={dispatch_state}",
+            f"duration_state={duration_state} for exact run {request.workflow_id}/{run_id}",
+            f"workflow_wait_state={wait_state} for exact run {request.workflow_id}/{run_id}",
+            f"current_dispatch_state={dispatch_state} for exact run {request.workflow_id}/{run_id}",
         ]
         unsupported = [
             "current queue state does not establish historical outage duration",
@@ -265,6 +267,20 @@ class DefaultReasoningService:
             ),
             warnings=tuple(warnings),
             observed_at=diagnosis.workflow.observed_at or context.budget.deadline,
+            recommended_followups=(
+                RecommendedFollowup(
+                    intent="recheck_exact_run",
+                    tool="inspect_workflow_execution",
+                ),
+            ),
+            population_analysis_required=False,
+            answer_constraints=AnswerConstraints(
+                may_claim=("the exact run's observed wait, failure, and current dispatch state",),
+                must_not_claim=(
+                    "population blast radius unless the operator explicitly requests it",
+                    "historical queue health from a current queue snapshot",
+                ),
+            ),
         )
 
     async def diagnose_workflow(
@@ -443,12 +459,25 @@ class DefaultReasoningService:
             evidence_collected=tuple(evidence_collected),
             evidence_unavailable=tuple(evidence_unavailable),
             supported_conclusions=(
-                "the returned preview was not executed",
-                "the plan must be rechecked if the run history changes",
+                f"the preview for exact run {workflow.workflow_id}/"
+                f"{workflow.run_id} was not executed",
+                f"the plan for exact run {workflow.workflow_id}/"
+                f"{workflow.run_id} must be rechecked if history changes",
             ),
             unsupported_conclusions=(
                 "plan freshness guidance is advisory, not mechanically enforced",
                 "external side-effect safety cannot be proven from Temporal history alone",
+            ),
+            answer_constraints=AnswerConstraints(
+                may_claim=(
+                    "the preview is pinned to the returned exact run and observed history",
+                    "the preview was not executed",
+                ),
+                must_not_claim=(
+                    "the failed dependency has recovered",
+                    "external side effects are safe to repeat",
+                    "the advisory recheck_after is mechanical plan expiration",
+                ),
             ),
         )
         return _charge_output(context, response)

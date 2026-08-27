@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import secrets
+import json
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -13,6 +14,8 @@ from pydantic import Field, ValidationError
 from ops_mcp.contracts import (
     AnalyzeIncidentImpactRequest,
     AnalyzeIncidentImpactResponse,
+    AssessWorkflowRecoveryRequest,
+    AssessWorkflowRecoveryResponse,
     CheckConnectionRequest,
     CheckConnectionResponse,
     CountWorkflowsRequest,
@@ -64,6 +67,12 @@ from ops_mcp.contracts import (
     WorkflowCountGroupBy,
     WorkflowField,
 )
+from ops_mcp.contracts.population import (
+    PopulationNextCall,
+    PopulationProgress,
+    PopulationProgressGroup,
+)
+from ops_mcp.contracts.primitives import AnswerConstraints
 from ops_mcp.contracts.workflow_reads import EventIdRange
 from ops_mcp.mcp.composition import CompositionRoot
 from ops_mcp.mcp.errors import (
@@ -87,6 +96,7 @@ READ_ONLY = ToolAnnotations(
     openWorldHint=True,
 )
 _CONTINUATIONS = ContinuationCodec()
+_SEEN_POPULATION_SCOPES: set[tuple[str, str, str]] = set()
 TargetRefInput = Annotated[
     str, Field(description="Opaque target reference returned by resolve_target.")
 ]
@@ -126,7 +136,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             Field(description="Exact human target name or alias; omit to list authorized targets."),
         ] = None,
     ) -> ResolveTargetResponse:
-        """Resolve once per conversation, then reuse the returned target_ref."""
+        """Use the operator’s explicit environment name when supplied. If no environment or target is supplied, omit human_name and list authorized targets. Do not derive a target name from workflow, service, build, or task-queue names."""  # noqa: E501
         try:
             request = ResolveTargetRequest(human_name=human_name)
         except ValidationError as exc:
@@ -406,7 +416,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             Field(description="Use an approved diagnostic query when configured."),
         ] = True,
     ) -> InspectWorkflowExecutionResponse:
-        """Inspect one run's duration, wait, failure, and current dispatch evidence."""
+        """Inspect one exact workflow execution. This tool provides the workflow’s wait state, failure evidence, pending activities, and current dispatch state. Do not invoke a population tool unless the operator asks for blast radius or the exact-run result explicitly says population evidence is required."""  # noqa: E501
         try:
             request = InspectWorkflowExecutionRequest(
                 target_ref=target_ref,
@@ -465,7 +475,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             ),
         ] = None,
     ) -> PlanWorkflowResetResponse:
-        """Analyze reset points and replay impact for one exact run; never execute a reset."""
+        """Produce a read-only reset plan for one exact run. This tool does not establish dependency recovery and does not execute the reset. Call only after the operator supplies or another tool returns sufficient recovery evidence."""  # noqa: E501
         try:
             request = PlanWorkflowResetRequest(
                 target_ref=target_ref,
@@ -478,6 +488,45 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         context = root.contexts.create()
         try:
             return await root.services.plan_workflow_reset.plan_workflow_reset(context, request)
+        except Exception as exc:
+            raise_service_error(exc)
+
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    async def assess_workflow_recovery(
+        target_ref: TargetRefInput,
+        failed_workflow_id: Annotated[
+            str, Field(description="Exact Workflow ID of the failed execution.")
+        ],
+        failed_run_id: Annotated[str, Field(description="Exact failed Run ID.")],
+        comparison_query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Visibility query for later or otherwise comparable runs whose exact "
+                    "histories should be inspected."
+                )
+            ),
+        ],
+        activity_type: Annotated[
+            str,
+            Field(description="Exact activity type whose outcomes establish recovery evidence."),
+        ],
+    ) -> AssessWorkflowRecoveryResponse:
+        """Assess recovery from exact activity outcomes; never plan or execute a reset."""
+        try:
+            request = AssessWorkflowRecoveryRequest(
+                target_ref=target_ref,
+                failed_workflow_id=failed_workflow_id,
+                failed_run_id=failed_run_id,
+                comparison_query=comparison_query,
+                activity_type=activity_type,
+            )
+        except ValidationError as exc:
+            raise_request_validation_error(exc)
+        limits = PopulationAdvancedOptions().resolved()
+        context = _population_context(root, limits)
+        try:
+            return await root.services.population.assess_workflow_recovery(context, request)
         except Exception as exc:
             raise_service_error(exc)
 
@@ -501,10 +550,6 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             list[str] | None,
             Field(description="Registered custom Search Attributes used for confirmed grouping."),
         ] = None,
-        advanced_options: Annotated[
-            PopulationAdvancedOptions | None,
-            Field(description="Optional expert overrides on server-owned inspection defaults."),
-        ] = None,
         continuation_token: Annotated[
             str | None,
             Field(description="Opaque token returned by a prior call with the same scope."),
@@ -515,7 +560,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             if (started_at is None) != (ended_at is None):
                 raise ValueError("started_at and ended_at must be supplied together")
-            limits = (advanced_options or PopulationAdvancedOptions()).resolved()
+            limits = PopulationAdvancedOptions().resolved()
             scope = _population_scope(
                 query,
                 started_at,
@@ -553,7 +598,15 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 failure_class=failure_class,
                 limits=limits,
                 sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
-                sample_seed=state.sample_seed if state else secrets.token_urlsafe(12),
+                sample_seed=(
+                    state.sample_seed
+                    if state
+                    else _CONTINUATIONS.stable_seed(
+                        tool="inspect_workflow_task_failures",
+                        target_ref=target_ref,
+                        scope=scope,
+                    )
+                ),
                 inspection_offset=0,
                 excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
@@ -652,21 +705,17 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             list[str] | None,
             Field(description="Registered attributes used to group confirmed dependencies."),
         ] = None,
-        advanced_options: Annotated[
-            PopulationAdvancedOptions | None,
-            Field(description="Optional expert overrides on server-owned inspection defaults."),
-        ] = None,
         continuation_token: Annotated[
             str | None,
             Field(description="Opaque token returned by a prior call with the same scope."),
         ] = None,
     ) -> InspectActivityQueueDependenciesResponse:
-        """Inspect activity dependencies, dispatch, delay, retry, and completeness evidence."""
+        """Inspect activity dependencies in two explicit modes: exact confirmation for a run or narrow query, and population blast radius only when the operator requests it. Current queue state is not historical state; backlog tasks are not workflow counts. Report confirmed, inspected, uninspected, and failed-inspection counts separately."""  # noqa: E501
         now = datetime.now(UTC)
         try:
             if (started_at is None) != (ended_at is None):
                 raise ValueError("started_at and ended_at must be supplied together")
-            limits = (advanced_options or PopulationAdvancedOptions()).resolved()
+            limits = PopulationAdvancedOptions().resolved()
             scope = _dependency_scope(
                 query,
                 started_at,
@@ -704,7 +753,15 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 minimum_open_duration_seconds=expected_duration_seconds,
                 limits=limits,
                 sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
-                sample_seed=state.sample_seed if state else secrets.token_urlsafe(12),
+                sample_seed=(
+                    state.sample_seed
+                    if state
+                    else _CONTINUATIONS.stable_seed(
+                        tool="inspect_activity_queue_dependencies",
+                        target_ref=target_ref,
+                        scope=scope,
+                    )
+                ),
                 inspection_offset=0,
                 excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
@@ -779,13 +836,21 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def analyze_incident_impact(
         target_ref: TargetRefInput,
-        query: VisibilityQueryInput,
+        candidate_query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Raw Temporal Visibility query defining the complete candidate population; "
+                    "do not use business grouping attributes to narrow incident discovery."
+                )
+            ),
+        ],
         started_at: Annotated[
-            datetime | None, Field(description="Absolute incident start time.")
-        ] = None,
+            datetime, Field(description="Absolute incident start time.")
+        ],
         ended_at: Annotated[
-            datetime | None, Field(description="Absolute incident end time.")
-        ] = None,
+            datetime, Field(description="Absolute incident end time.")
+        ],
         affected_activity_task_queues: Annotated[
             list[str] | None,
             Field(description="Known affected activity queues; omit for bounded discovery."),
@@ -794,28 +859,14 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             float | None,
             Field(gt=0, description="Optional operator-supplied normal-duration policy."),
         ] = None,
-        group_by_custom_search_attributes: Annotated[
+        business_grouping: Annotated[
             list[str] | None,
-            Field(description="Registered attributes for confirmed-impact grouping."),
-        ] = None,
-        advanced_options: Annotated[
-            PopulationAdvancedOptions | None,
-            Field(description="Optional expert overrides on server-owned inspection defaults."),
-        ] = None,
-        incident_window: Annotated[
-            IncidentTimeWindow | None,
-            Field(description="Deprecated nested window; prefer started_at and ended_at."),
-        ] = None,
-        limits: Annotated[
-            PopulationLimits | None,
-            Field(description="Deprecated execution controls; prefer advanced_options."),
-        ] = None,
-        sampling_strategy: Annotated[
-            SamplingStrategy | None,
-            Field(description="Deprecated; the server selects deterministic sampling."),
-        ] = None,
-        sample_seed: Annotated[
-            str | None, Field(description="Deprecated; the server generates the sample seed.")
+            Field(
+                description=(
+                    "Registered Search Attributes used only to group confirmed results; values "
+                    "are returned raw and never define the candidate boundary."
+                )
+            ),
         ] = None,
         continuation_token: Annotated[
             str | None, Field(description="Opaque token returned by a prior matching call.")
@@ -823,20 +874,19 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
     ) -> AnalyzeIncidentImpactResponse:
         """Correlate candidate runs with bounded, durable historical incident evidence."""
         try:
-            if incident_window is None:
-                if started_at is None or ended_at is None:
-                    raise ValueError("started_at and ended_at are required")
-                incident_window = IncidentTimeWindow(started_at=started_at, ended_at=ended_at)
-            elif started_at is not None or ended_at is not None:
-                raise ValueError("use started_at/ended_at or deprecated incident_window, not both")
-            resolved_limits = limits or (advanced_options or PopulationAdvancedOptions()).resolved()
+            if started_at is None or ended_at is None:
+                raise ValueError("started_at and ended_at are required")
+            incident_window = IncidentTimeWindow(started_at=started_at, ended_at=ended_at)
+            grouping = tuple(business_grouping or ())
+            _reject_business_filters(candidate_query, grouping)
+            resolved_limits = PopulationAdvancedOptions().resolved()
             scope = _dependency_scope(
-                query,
+                candidate_query,
                 incident_window.started_at,
                 incident_window.ended_at,
                 tuple(affected_activity_task_queues or ()),
                 expected_duration_seconds,
-                tuple(group_by_custom_search_attributes or ()),
+                grouping,
                 resolved_limits,
             )
             state = (
@@ -851,19 +901,25 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             )
             request = AnalyzeIncidentImpactRequest(
                 target_ref=target_ref,
-                query=query,
+                query=candidate_query,
                 incident_window=incident_window,
                 affected_activity_task_queues=tuple(affected_activity_task_queues or ()),
                 expected_duration_seconds=expected_duration_seconds,
                 limits=resolved_limits,
-                sampling_strategy=(sampling_strategy or SamplingStrategy.DETERMINISTIC_HASH),
+                sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
                 sample_seed=(
-                    state.sample_seed if state else sample_seed or secrets.token_urlsafe(12)
+                    state.sample_seed
+                    if state
+                    else _CONTINUATIONS.stable_seed(
+                        tool="analyze_incident_impact",
+                        target_ref=target_ref,
+                        scope=scope,
+                    )
                 ),
                 inspection_offset=0,
                 excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
-                group_by_custom_search_attributes=tuple(group_by_custom_search_attributes or ()),
+                group_by_custom_search_attributes=grouping,
             )
         except (ValidationError, ValueError, OpsMcpError) as exc:
             if isinstance(exc, ValidationError):
@@ -885,7 +941,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 started_at=request.incident_window.started_at,
                 ended_at=request.incident_window.ended_at,
                 confirmed=lambda run: run.classification == "confirmed_historical_impact",
-                discovered_activity_task_queues=response.answer.affected_activity_task_queues,
+                discovered_activity_task_queues=(
+                    response.scope.discovered_activity_task_queues if response.scope else ()
+                ),
                 candidate_page_token=request.candidate_page_token,
             )
         except Exception as exc:
@@ -1143,6 +1201,45 @@ def _with_population_continuation(
             )
         )
     )
+    page_groups = _population_progress_groups(response)
+    group_counts: dict[tuple[str, str], int] = {
+        (dimension, values): count
+        for dimension, values, count in (
+            state.cumulative_group_counts if state else ()
+        )
+    }
+    for group in page_groups:
+        serialized = json.dumps(group.values, sort_keys=True, separators=(",", ":"))
+        key = (group.dimension, serialized)
+        group_counts[key] = group_counts.get(key, 0) + group.confirmed
+    cumulative_groups = tuple(
+        PopulationProgressGroup(
+            dimension=dimension,
+            values=json.loads(values),
+            confirmed=count,
+        )
+        for (dimension, values), count in sorted(group_counts.items())
+    )
+    page = PopulationProgress(
+        inspected=len(inspected),
+        confirmed=len(matched),
+        inspection_failures=response.inspection.inspection_failures,
+        groups=page_groups,
+    )
+    cumulative_failures = (
+        (state.cumulative_inspection_failures if state else 0)
+        + response.inspection.inspection_failures
+    )
+    cumulative_histories = (
+        (state.cumulative_histories_inspected if state else 0)
+        + response.inspection.histories_inspected
+    )
+    cumulative = PopulationProgress(
+        inspected=len(inspected_ledger),
+        confirmed=len(confirmed_ledger),
+        inspection_failures=cumulative_failures,
+        groups=cumulative_groups,
+    )
     public_update = {
         "cumulative_inspected_identities": tuple(
             value.replace("\0", "/") for value in inspected_ledger
@@ -1150,13 +1247,69 @@ def _with_population_continuation(
         "cumulative_confirmed_identities": tuple(
             value.replace("\0", "/") for value in confirmed_ledger
         ),
+        "page": page,
+        "cumulative": cumulative,
+        "answer_constraints": AnswerConstraints(
+            may_claim=(
+                "returned exact-run evidence and cumulative totals within the reported scope",
+            ),
+            must_not_claim=(
+                "complete population impact while next_call is present",
+                "counts beyond the explicitly reported candidate and queue scope",
+                "approximate backlog task count as a unique-workflow count",
+            ),
+        ),
     }
     can_advance_frame = (
         not response.inspection.candidate_collection_complete
         and next_candidate_page_token is not None
     )
-    if not remaining_in_frame and not can_advance_frame:
-        return response.model_copy(update=public_update)
+    has_next = remaining_in_frame or can_advance_frame
+    scope_key = (tool, target_ref, normalize_query(scope))
+    warnings = list(response.warnings)
+    if state is None and scope_key in _SEEN_POPULATION_SCOPES:
+        warnings.append(
+            "This scope was started previously without a continuation token; cumulative totals "
+            "restart from this call. Use next_call unchanged to preserve the investigation chain."
+        )
+    _SEEN_POPULATION_SCOPES.add(scope_key)
+    cumulative_incomplete = (state.cumulative_incomplete if state else False) or (
+        response.inspection.completion in {"partial", "truncated", "budget_exhausted"}
+    )
+    completion = response.inspection.completion
+    if has_next:
+        completion = "sampled"
+    elif cumulative_incomplete or cumulative_failures:
+        completion = "partial"
+    else:
+        completion = "complete"
+    public_update["inspection"] = response.inspection.model_copy(
+        update={
+            "completion": completion,
+            "runs_inspected": len(inspected_ledger),
+            "histories_inspected": cumulative_histories,
+            "inspection_failures": cumulative_failures,
+            "candidate_collection_complete": not has_next,
+            "candidate_frame_has_more": has_next,
+        }
+    )
+    public_update["warnings"] = tuple(dict.fromkeys(warnings))
+    completion_scope = "candidate query"
+    response_scope = getattr(response, "scope", None)
+    if response_scope is not None:
+        completion_scope = response_scope.completion_scope.replace("_", " ")
+    public_update["supported_conclusions"] = tuple(
+        dict.fromkeys(
+            (
+                *response.supported_conclusions,
+                f"cumulative_confirmed={len(confirmed_ledger)} within {completion_scope}",
+            )
+        )
+    )
+    if not has_next:
+        return _finalize_incident_scope(
+            response.model_copy(update=public_update), discovered_queues=discovered_queues
+        )
     token = _CONTINUATIONS.encode(
         ContinuationState(
             tool=tool,
@@ -1171,9 +1324,117 @@ def _with_population_continuation(
             started_at=started_at.isoformat(),
             ended_at=ended_at.isoformat(),
             discovered_activity_task_queues=discovered_queues,
+            cumulative_inspection_failures=cumulative_failures,
+            cumulative_histories_inspected=cumulative_histories,
+            cumulative_group_counts=tuple(
+                (dimension, values, count)
+                for (dimension, values), count in sorted(group_counts.items())
+            ),
+            cumulative_incomplete=cumulative_incomplete,
             candidate_page_token=(
                 candidate_page_token if remaining_in_frame else next_candidate_page_token
             ),
         )
     )
-    return response.model_copy(update={**public_update, "continuation_token": token})
+    public_update.update(
+        {
+            "continuation_token": token,
+            "next_call": PopulationNextCall(tool=tool, continuation_token=token),
+        }
+    )
+    return _finalize_incident_scope(
+        response.model_copy(update=public_update), discovered_queues=discovered_queues
+    )
+
+
+def _population_progress_groups(response) -> tuple[PopulationProgressGroup, ...]:
+    groups: list[PopulationProgressGroup] = []
+    answer = response.answer
+    for group in getattr(answer, "failure_groups", ()):
+        groups.append(
+            PopulationProgressGroup(
+                dimension="failure_class",
+                values={"failure_class": group.failure_class.value},
+                confirmed=group.runs,
+            )
+        )
+    aggregation = getattr(answer, "affected_aggregation", None)
+    source = getattr(answer, "confirmed_groups", ())
+    if aggregation is not None:
+        source = aggregation.groups
+    for group in source:
+        values = {"workflow_type": group.workflow_type}
+        values.update(
+            {
+                item.name: json.dumps(item.value, sort_keys=True, default=str)
+                for item in group.custom_search_attributes
+            }
+        )
+        groups.append(
+            PopulationProgressGroup(
+                dimension="confirmed_by_workflow_and_raw_attributes",
+                values=values,
+                confirmed=group.confirmed_runs,
+            )
+        )
+    return tuple(groups)
+
+
+def _finalize_incident_scope(response, *, discovered_queues: tuple[str, ...]):
+    scope = getattr(response, "scope", None)
+    if scope is None:
+        return response
+    excluded = tuple(
+        sorted(set(discovered_queues) - set(scope.affected_activity_task_queues))
+    )
+    candidate_population_complete = response.next_call is None
+    impact_evidence_complete = response.inspection.completion == "complete"
+    updated_scope = scope.model_copy(
+        update={
+            "discovered_activity_task_queues": tuple(sorted(discovered_queues)),
+            "excluded_discovered_queues": excluded,
+            "candidate_population_complete": candidate_population_complete,
+            "incident_impact_complete": (
+                candidate_population_complete and impact_evidence_complete and not excluded
+            ),
+        }
+    )
+    warnings = list(response.warnings)
+    if excluded:
+        warnings.append(
+            "Explicit queue scope excludes discovered candidate dependencies: "
+            + ", ".join(excluded)
+            + ". This is not a complete incident-impact census."
+        )
+    candidate_population = response.candidate_population
+    if candidate_population is not None:
+        candidate_population = candidate_population.model_copy(
+            update={"complete": candidate_population_complete}
+        )
+    constraints = response.answer_constraints
+    if constraints is not None and excluded:
+        constraints = constraints.model_copy(
+            update={
+                "must_not_claim": tuple(
+                    dict.fromkeys(
+                        (*constraints.must_not_claim, "complete incident impact census")
+                    )
+                )
+            }
+        )
+    return response.model_copy(
+        update={
+            "scope": updated_scope,
+            "candidate_population": candidate_population,
+            "warnings": tuple(dict.fromkeys(warnings)),
+            "answer_constraints": constraints,
+        }
+    )
+
+
+def _reject_business_filters(candidate_query: str, grouping: tuple[str, ...]) -> None:
+    for attribute in grouping:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(attribute)}(?![A-Za-z0-9_])", candidate_query):
+            raise ValueError(
+                f"candidate_query must not be narrowed by business grouping attribute {attribute!r}"
+            )

@@ -68,6 +68,13 @@ class CompositeInspection(ContractModel):
     inspection_failures: int = Field(ge=0)
 
 
+class AnswerConstraints(ContractModel):
+    """Claims an agent may and may not make from one composite response."""
+
+    may_claim: tuple[str, ...] = ()
+    must_not_claim: tuple[str, ...] = ()
+
+
 class EvidenceRef(ContractModel):
     """A minimal pointer from a finding to an observed fact.
 

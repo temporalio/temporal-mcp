@@ -35,6 +35,7 @@ class ResolvedTargetAnswer(ContractModel):
     cluster: NonEmptyString
     namespace: NonEmptyString
     resolved_from: NonEmptyString
+    resolution: Literal["exact_name_or_alias", "sole_authorized_target"] = "exact_name_or_alias"
 
 
 class TargetCandidatesAnswer(ContractModel):

@@ -38,10 +38,22 @@ class DefaultTargetService:
         context.budget.ensure_active()
         if request.human_name is None:
             targets = self._target_catalog.list_authorized(context.principal)
-            answer = TargetCandidatesAnswer(
-                reason="discovery",
-                candidates=tuple(_public_candidate(target) for target in targets),
-            )
+            if len(targets) == 1:
+                target = targets[0]
+                answer = ResolvedTargetAnswer(
+                    target_ref=target.target_ref,
+                    display_name=_display_name(target),
+                    account=target.account,
+                    cluster=target.cluster,
+                    namespace=target.namespace,
+                    resolved_from=_display_name(target),
+                    resolution="sole_authorized_target",
+                )
+            else:
+                answer = TargetCandidatesAnswer(
+                    reason="discovery",
+                    candidates=tuple(_public_candidate(target) for target in targets),
+                )
         else:
             targets = self._target_catalog.match_authorized(context.principal, request.human_name)
             if not targets:

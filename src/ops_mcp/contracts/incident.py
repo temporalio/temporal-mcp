@@ -8,8 +8,19 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from ops_mcp.contracts.population import PopulationInspection, PopulationLimits, SamplingStrategy
-from ops_mcp.contracts.primitives import CURRENT_SCHEMA_VERSION, ContractModel, SchemaVersion
+from ops_mcp.contracts.population import (
+    PopulationInspection,
+    PopulationLimits,
+    PopulationNextCall,
+    PopulationProgress,
+    SamplingStrategy,
+)
+from ops_mcp.contracts.primitives import (
+    CURRENT_SCHEMA_VERSION,
+    AnswerConstraints,
+    ContractModel,
+    SchemaVersion,
+)
 from ops_mcp.contracts.visibility import SearchAttributeProjection
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
@@ -103,6 +114,36 @@ class IncidentImpactAnswer(ContractModel):
     confirmed_groups: tuple[IncidentImpactGroup, ...] = ()
 
 
+class IncidentCandidatePopulation(ContractModel):
+    candidate_query: NonEmptyString
+    candidate_frame_size: int = Field(ge=0)
+    complete: bool
+
+
+class IncidentImpactCriteria(ContractModel):
+    incident_window: IncidentTimeWindow
+    activity_task_queues: tuple[NonEmptyString, ...]
+    evidence_basis: tuple[NonEmptyString, ...]
+
+
+class IncidentBusinessGrouping(ContractModel):
+    attributes: tuple[NonEmptyString, ...] = ()
+    value_semantics: Literal["raw_registered_search_attribute_values"] = (
+        "raw_registered_search_attribute_values"
+    )
+
+
+class IncidentQueueScope(ContractModel):
+    candidate_query: NonEmptyString
+    affected_activity_task_queues: tuple[NonEmptyString, ...]
+    queue_scope_source: Literal["explicit", "discovered"]
+    discovered_activity_task_queues: tuple[NonEmptyString, ...] = ()
+    excluded_discovered_queues: tuple[NonEmptyString, ...] = ()
+    completion_scope: Literal["full_candidate_population", "explicit_queue_subset"]
+    candidate_population_complete: bool
+    incident_impact_complete: bool
+
+
 class AnalyzeIncidentImpactResponse(ContractModel):
     schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
     target_ref: NonEmptyString
@@ -116,3 +157,11 @@ class AnalyzeIncidentImpactResponse(ContractModel):
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
     cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
     cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
+    candidate_population: IncidentCandidatePopulation | None = None
+    impact_criteria: IncidentImpactCriteria | None = None
+    business_grouping: IncidentBusinessGrouping | None = None
+    scope: IncidentQueueScope | None = None
+    page: PopulationProgress | None = None
+    cumulative: PopulationProgress | None = None
+    next_call: PopulationNextCall | None = None
+    answer_constraints: AnswerConstraints | None = None

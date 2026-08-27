@@ -24,6 +24,7 @@ from ops_mcp.facts import (
     WorkflowTaskEventAttributes,
     WorkflowVisibilityFact,
 )
+from ops_mcp.mcp.adapters import _CONTINUATIONS, _with_population_continuation
 from ops_mcp.runtime import BasicBudgetLimits, BasicExecutionBudget, Principal, RequestContext
 from ops_mcp.services import DefaultPopulationDiagnosticService
 from ops_mcp.targets import ConnectionDescriptor, ResolvedTarget
@@ -90,6 +91,11 @@ class _Visibility:
                     source=SearchAttributeSource.CUSTOM,
                     value_type=IndexedValueTypeFact(code=2, name="KEYWORD"),
                 ),
+                SearchAttributeFieldFact(
+                    name="Domain",
+                    source=SearchAttributeSource.CUSTOM,
+                    value_type=IndexedValueTypeFact(code=2, name="KEYWORD"),
+                ),
             ),
             storage_schema=(),
         )
@@ -113,7 +119,8 @@ class _Histories:
         context.budget.consume_page("history")
         index = int(workflow_id.removeprefix("ledger-"))
         events: tuple[HistoryEventFact, ...] = ()
-        if index % 4 == 0:
+        if index % 4 in {0, 1}:
+            queue = "ledger-activity" if index % 4 == 0 else "audit-activity"
             events = (
                 HistoryEventFact(
                     event_id=10,
@@ -124,7 +131,7 @@ class _Histories:
                         phase="scheduled",
                         activity_id="post-ledger",
                         activity_type="PostLedger",
-                        task_queue="ledger-activity",
+                        task_queue=queue,
                     ),
                 ),
                 HistoryEventFact(
@@ -149,6 +156,58 @@ class _Histories:
 
     async def closing_event(self, *args, **kwargs):
         raise AssertionError("not used")
+
+
+class _AllImpactedHistories(_Histories):
+    async def read(
+        self,
+        context,
+        target,
+        workflow_id,
+        run_id,
+        *,
+        page_size=250,
+        max_events=None,
+        next_page_token=None,
+        reverse=False,
+    ):
+        del target, page_size, max_events, next_page_token
+        context.budget.reserve_temporal_call("history")
+        context.budget.consume_page("history")
+        index = int(workflow_id.removeprefix("ledger-"))
+        queue = "ledger-activity" if index % 2 == 0 else "audit-activity"
+        events = (
+            HistoryEventFact(
+                event_id=10,
+                event_type="EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+                event_time=INCIDENT_START - timedelta(minutes=1),
+                task_id=10,
+                attributes=ActivityTaskEventAttributes(
+                    phase="scheduled",
+                    activity_id="post-ledger",
+                    activity_type="PostLedger",
+                    task_queue=queue,
+                ),
+            ),
+            HistoryEventFact(
+                event_id=11,
+                event_type="EVENT_TYPE_ACTIVITY_TASK_STARTED",
+                event_time=INCIDENT_END + timedelta(minutes=1),
+                task_id=11,
+                attributes=ActivityTaskEventAttributes(phase="started", scheduled_event_id=10),
+            ),
+        )
+        context.budget.consume_history_events(len(events))
+        return HistoryReadFact(
+            workflow_id=workflow_id,
+            run_id=run_id,
+            events=events,
+            reverse=reverse,
+            pages_read=1,
+            events_scanned=len(events),
+            next_page_token=None,
+            observed_at=NOW,
+        )
 
 
 class _Unused:
@@ -199,7 +258,10 @@ def _row(index: int) -> WorkflowVisibilityFact:
         parent_run_id=None,
         root_workflow_id=f"ledger-{index}",
         root_run_id=f"run-{index}",
-        search_attributes={"Team": "payments" if index % 2 == 0 else "platform"},
+        search_attributes={
+            "Team": "payments" if index % 2 == 0 else "platform",
+            "Domain": "money" if index % 2 == 0 else "operations",
+        },
     )
 
 
@@ -269,6 +331,125 @@ async def test_160_visibility_candidates_are_not_promoted_to_confirmed_impact() 
     assert result.inspection.completion == "sampled"
     assert any("lower bound" in warning for warning in result.warnings)
     assert any("poller" in warning for warning in result.warnings)
+
+
+async def test_incident_queue_discovery_covers_two_queues_across_complete_chain() -> None:
+    rows = tuple(_row(index) for index in range(160))
+    service = DefaultPopulationDiagnosticService(
+        _Catalog(), _Visibility(rows), _Workflows(), _AllImpactedHistories(), _Unused()
+    )
+    limits = PopulationLimits(
+        max_candidates=160,
+        max_visibility_pages=5,
+        max_runs=100,
+        max_histories=100,
+        max_history_events_per_run=100,
+        max_task_queues=2,
+        max_concurrency=10,
+    )
+    state = None
+    preferred = None
+    for _ in range(2):
+        request = AnalyzeIncidentImpactRequest(
+            target_ref="ledger-prod",
+            query="WorkflowType IS NOT NULL",
+            incident_window=IncidentTimeWindow(
+                started_at=INCIDENT_START,
+                ended_at=INCIDENT_END,
+            ),
+            limits=limits,
+            sampling_strategy="deterministic_hash",
+            sample_seed="stable-incident",
+            excluded_run_identities=state.inspected_run_ledger if state else (),
+            candidate_page_token=state.candidate_page_token if state else None,
+            group_by_custom_search_attributes=("Team", "Domain"),
+        )
+        result = await service.analyze_incident_impact(_context(), request)
+        preferred = _with_population_continuation(
+            result,
+            state=state,
+            tool="analyze_incident_impact",
+            target_ref="ledger-prod",
+            scope="two-queue-incident",
+            sample_seed="stable-incident",
+            offset=state.inspection_offset if state else 0,
+            started_at=INCIDENT_START,
+            ended_at=INCIDENT_END,
+            confirmed=lambda run: run.classification == "confirmed_historical_impact",
+            discovered_activity_task_queues=(
+                result.scope.discovered_activity_task_queues if result.scope else ()
+            ),
+            candidate_page_token=state.candidate_page_token if state else None,
+        )
+        if preferred.continuation_token:
+            state = _CONTINUATIONS.decode(
+                preferred.continuation_token,
+                tool="analyze_incident_impact",
+                target_ref="ledger-prod",
+                query="two-queue-incident",
+            )
+
+    assert preferred is not None
+    assert preferred.cumulative.inspected == 160
+    assert preferred.cumulative.confirmed == 160
+    assert preferred.scope.candidate_population_complete is True
+    assert preferred.scope.incident_impact_complete is True
+    assert set(preferred.scope.affected_activity_task_queues) == {
+        "audit-activity",
+        "ledger-activity",
+    }
+    assert {key for group in preferred.cumulative.groups for key in group.values} >= {
+        "Team",
+        "Domain",
+    }
+
+
+async def test_explicit_incident_queue_reports_excluded_dependency_and_subset_scope() -> None:
+    rows = tuple(_row(index) for index in range(2))
+    service = DefaultPopulationDiagnosticService(
+        _Catalog(), _Visibility(rows), _Workflows(), _AllImpactedHistories(), _Unused()
+    )
+    request = AnalyzeIncidentImpactRequest(
+        target_ref="ledger-prod",
+        query="WorkflowType IS NOT NULL",
+        incident_window=IncidentTimeWindow(
+            started_at=INCIDENT_START,
+            ended_at=INCIDENT_END,
+        ),
+        affected_activity_task_queues=("ledger-activity",),
+        limits=PopulationLimits(
+            max_candidates=2,
+            max_visibility_pages=1,
+            max_runs=2,
+            max_histories=2,
+            max_history_events_per_run=100,
+            max_task_queues=2,
+            max_concurrency=2,
+        ),
+        sampling_strategy="deterministic_hash",
+        sample_seed="explicit-subset",
+    )
+    result = await service.analyze_incident_impact(_context(), request)
+    preferred = _with_population_continuation(
+        result,
+        state=None,
+        tool="analyze_incident_impact",
+        target_ref="ledger-prod",
+        scope="explicit-subset",
+        sample_seed="explicit-subset",
+        offset=0,
+        started_at=INCIDENT_START,
+        ended_at=INCIDENT_END,
+        confirmed=lambda run: run.classification == "confirmed_historical_impact",
+        discovered_activity_task_queues=result.scope.discovered_activity_task_queues,
+        candidate_page_token=None,
+    )
+
+    assert preferred.scope.completion_scope == "explicit_queue_subset"
+    assert preferred.scope.candidate_population_complete is True
+    assert preferred.scope.incident_impact_complete is False
+    assert preferred.scope.excluded_discovered_queues == ("audit-activity",)
+    assert any("not a complete incident-impact census" in item for item in preferred.warnings)
 
 
 def test_only_affected_queue_failure_promotes_timing_evidence() -> None:

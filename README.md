@@ -42,7 +42,8 @@ is available as `ops-mcp-session-one` for the migration cycle.
 The preferred read-only surface is layered around routing, building blocks, evidence composites,
 and operator intent. Its key additions are `search_workflow_runs`,
 `list_approved_workflow_queries`, `inspect_workflow_execution`,
-`inspect_workflow_task_failures`, and `inspect_activity_queue_dependencies`.
+`inspect_workflow_task_failures`, `inspect_activity_queue_dependencies`,
+`analyze_incident_impact`, and `assess_workflow_recovery`.
 `filter_workflows`, `diagnose_workflow`, `find_workflow_task_failures`, and
 `find_stuck_workflows` remain deprecated compatibility aliases for one migration cycle. See
 [`docs/tool-surface-v2.md`](docs/tool-surface-v2.md) for routing and continuation behavior.

@@ -1,0 +1,24 @@
+# The auth adapter supplies a group. During the unauthenticated demo only,
+# OPS_MCP_DEMO_GROUP selects one of these groups.
+groups:
+  demo-support:
+    targets:
+      orders-prod:
+        aliases:
+          - orders prod
+          - production orders
+        account: local-demo
+        cluster: temporal-dev
+        namespace: default
+        address: 127.0.0.1:7233
+        tls: false
+  demo-platform:
+    targets:
+      orders-prod:
+        aliases:
+          - orders prod
+        account: local-demo
+        cluster: temporal-dev
+        namespace: default
+        address: 127.0.0.1:7233
+        tls: false

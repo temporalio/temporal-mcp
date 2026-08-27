@@ -1,0 +1,17 @@
+schema_version: "1"
+captured_at: "2026-08-23"
+python:
+  version: "3.13.7"
+temporal:
+  cli_version: "1.7.0"
+  dev_server_version: "1.31.0"
+  python_sdk_version: "1.31.0"
+mcp:
+  python_sdk_version: "1.29.0"
+fixture:
+  namespace: default
+  search_attributes:
+    OrderId: Keyword
+compatibility_claims:
+  temporal_cloud: false
+  other_server_versions: false

@@ -165,9 +165,7 @@ def classify_progress_evidence(
                     confidence=Confidence.HIGH,
                     evidence=(f"workflow:pending_activity:{activity.activity_id}",),
                     failure_messages=_failure_messages(activity.last_failure),
-                    caveats=(
-                        "Retry state does not prove that the external dependency recovered.",
-                    ),
+                    caveats=("Retry state does not prove that the external dependency recovered.",),
                 )
             )
 

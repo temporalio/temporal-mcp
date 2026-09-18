@@ -6,9 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ops_mcp.analysis.reasoning import DiagnosisAnalyzer
-from ops_mcp.contracts.primitives import Completeness
 from ops_mcp.contracts.reasoning import (
-    DiagnoseWorkflowRequest,
     InspectWorkflowExecutionRequest,
     PlanWorkflowResetRequest,
 )
@@ -24,6 +22,7 @@ from ops_mcp.facts.task_queues import PollerFact, TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.workflows import PendingActivityFact, WorkflowExecutionFact
 from ops_mcp.runtime.budget import BasicExecutionBudget
 from ops_mcp.runtime.context import Principal, RequestContext
+from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.services.reasoning import DefaultReasoningService
 from ops_mcp.targets.models import ConnectionDescriptor, ResolvedTarget
 
@@ -158,7 +157,11 @@ class _Catalog:
 
 
 class _WorkflowGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def describe(self, *args: object, **kwargs: object) -> WorkflowExecutionFact:
+        self.calls += 1
         args[0].budget.reserve_temporal_call("DescribeWorkflowExecution")  # type: ignore[union-attr]
         return _workflow()
 
@@ -217,24 +220,27 @@ def _context() -> RequestContext:
 
 
 @pytest.mark.asyncio
-async def test_diagnosis_service_authorizes_and_inspects_both_queue_types() -> None:
+async def test_execution_inspection_authorizes_and_inspects_both_queue_types() -> None:
     queues = _QueueGateway()
-    service = DefaultReasoningService(_Catalog(), _WorkflowGateway(), _HistoryGateway(), queues)
+    workflows = _WorkflowGateway()
+    service = DefaultReasoningService(_Catalog(), workflows, _HistoryGateway(), queues)
 
-    result = await service.diagnose_workflow(
+    result = await service.inspect_workflow_execution(
         _context(),
-        DiagnoseWorkflowRequest(
-            target_ref="orders-prod", workflow_id="order-88231", run_id="run-1"
+        InspectWorkflowExecutionRequest(
+            target_ref="orders-prod",
+            workflow_id="order-88231",
+            include_diagnostic_query=False,
         ),
     )
 
-    assert result.retry_assessment.assessment == "unknown"
-    assert result.history_inspection.completion is Completeness.COMPLETE
+    assert workflows.calls == 1
+    assert result.inspection.completion == "complete"
     assert set(queues.calls) == {
         ("orders", TaskQueueKind.WORKFLOW),
         ("catalog", TaskQueueKind.ACTIVITY),
     }
-    assert any(item.code == "activity_retry_exhausted" for item in result.findings)
+    assert any(item.code == "activity_retry_exhausted" for item in result.answer.retry_findings)
 
 
 @pytest.mark.asyncio
@@ -257,6 +263,62 @@ async def test_inspect_execution_resolves_run_and_separates_current_dispatch() -
     assert result.answer.current_dispatch_state == "dispatch_available_now"
     assert "diagnostic_query:not_requested" in result.evidence_unavailable
     assert any("historical outage" in item for item in result.unsupported_conclusions)
+
+
+async def test_queue_specific_failure_preserves_other_exact_run_evidence() -> None:
+    class PartiallyFailingQueues(_QueueGateway):
+        async def describe(self, context, target, task_queue, task_type):
+            if task_queue == "catalog":
+                raise OpsMcpError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "queue disappeared",
+                    retryable=False,
+                )
+            return await super().describe(context, target, task_queue, task_type)
+
+    result = await DefaultReasoningService(
+        _Catalog(), _WorkflowGateway(), _HistoryGateway(), PartiallyFailingQueues()
+    ).inspect_workflow_execution(
+        _context(),
+        InspectWorkflowExecutionRequest(
+            target_ref="orders-prod",
+            workflow_id="order-88231",
+            run_id="run-1",
+            include_diagnostic_query=False,
+        ),
+    )
+
+    assert result.answer.workflow.run_id == "run-1"
+    assert result.answer.task_queues
+    assert result.inspection.completion == "partial"
+    assert "task_queue_snapshot:activity:catalog" in result.evidence_unavailable
+
+
+async def test_systemic_queue_failure_propagates() -> None:
+    class SystemicFailure(_QueueGateway):
+        async def describe(self, context, target, task_queue, task_type):
+            raise OpsMcpError(
+                ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
+                "credentials rejected",
+                retryable=False,
+            )
+
+    service = DefaultReasoningService(
+        _Catalog(), _WorkflowGateway(), _HistoryGateway(), SystemicFailure()
+    )
+
+    with pytest.raises(OpsMcpError) as exc_info:
+        await service.inspect_workflow_execution(
+            _context(),
+            InspectWorkflowExecutionRequest(
+                target_ref="orders-prod",
+                workflow_id="order-88231",
+                run_id="run-1",
+                include_diagnostic_query=False,
+            ),
+        )
+
+    assert exc_info.value.code is ErrorCode.TEMPORAL_AUTHENTICATION_FAILED
 
 
 def test_diagnosis_distinguishes_delay_from_current_activity_dispatch_blocker() -> None:

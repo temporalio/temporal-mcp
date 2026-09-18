@@ -26,4 +26,11 @@ async def run_worker() -> None:
 
 
 def main() -> None:
-    asyncio.run(run_worker())
+    try:
+        asyncio.run(run_worker())
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

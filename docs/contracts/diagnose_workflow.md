@@ -1,13 +1,15 @@
-# `diagnose_workflow`
+# `inspect_workflow_execution`
+
+This file retains its legacy filename as a historical documentation link; the retired pre-release
+alias is not present in production code.
 
 - **Operator question:** What Temporal evidence explains this run's current or
   terminal condition, and what remains unknown?
 - **Inputs:** exact `target_ref`, `workflow_id`, `run_id`; optional bounded
   `history_event_limit` and optional positive caller-supplied
   `expected_duration_seconds`.
-- **Output:** workflow facts, pending/wait-state facts, failure chain, task queues
-  inspected, evidence-backed findings, and `retry_assessment: advisable |
-  inadvisable | unknown` with rationale. No single unqualified `likely_cause`.
+- **Output:** workflow facts, pending/wait-state facts, failure and retry findings, task queues
+  inspected, evidence availability, supported/unsupported conclusions, and current dispatch state.
 - **Facts:** describe/history/current queue snapshots. **Interpretation:** portable
   Temporal-semantic findings only. Dependency recovery and company policy are
   external conclusions.

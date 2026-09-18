@@ -64,9 +64,8 @@ histories_inspected: integer
 inspection_failures: integer
 ```
 
-Preferred paginated tools accept and return only `continuation_token`; deprecated aliases may
-retain legacy token names for one migration cycle. See the
-[layered tool surface](../tool-surface-v2.md) for routing and migration rules.
+Paginated tools accept and return only `continuation_token`. See the
+[layered tool surface](../tool-surface-v2.md) for routing rules and the retired alias record.
 
 ## Schema v1 compatibility
 
@@ -127,7 +126,6 @@ grammar, operators, grouping, and ordering support.
 | `resolve_target` | setup | [sheet](resolve_target.md) | proposed |
 | `get_visibility_schema` | direct read | [sheet](get_visibility_schema.md) | proposed |
 | `search_workflow_runs` | paged read | [compatibility sheet](filter_workflows.md) | preferred |
-| `filter_workflows` | paged read | [sheet](filter_workflows.md) | proposed |
 | `count_workflows` | aggregate read | [sheet](count_workflows.md) | proposed |
 | `describe_workflow` | direct read | [sheet](describe_workflow.md) | proposed |
 | `get_workflow_history_slice` | bounded read | [sheet](get_workflow_history_slice.md) | proposed |
@@ -138,14 +136,11 @@ grammar, operators, grouping, and ordering support.
 | `query_workflow` | direct read | [sheet](query_workflow.md) | proposed |
 | `list_approved_workflow_queries` | discovery | [migration guide](../tool-surface-v2.md) | preferred |
 | `list_batch_operations` | bounded join | [sheet](list_batch_operations.md) | proposed |
-| `diagnose_workflow` | reasoning | [sheet](diagnose_workflow.md) | revise existing |
 | `inspect_workflow_execution` | evidence composite | [migration guide](../tool-surface-v2.md) | preferred |
 | `inspect_workflow_task_failures` | evidence composite | [sheet](find_workflow_task_failures.md) | preferred |
 | `inspect_activity_queue_dependencies` | evidence composite | [sheet](find_stuck_workflows.md) | preferred |
 | `assess_workflow_recovery` | evidence composite | [sheet](assess_workflow_recovery.md) | preferred |
 | `analyze_incident_impact` | operator intent | [sheet](analyze_incident_impact.md) | preferred |
-| `find_workflow_task_failures` | population reasoning | [sheet](find_workflow_task_failures.md) | proposed |
-| `find_stuck_workflows` | population reasoning | [sheet](find_stuck_workflows.md) | proposed |
 | `plan_workflow_reset` | recommendation | [sheet](plan_workflow_reset.md) | revise existing |
 
 ## Contract change rule

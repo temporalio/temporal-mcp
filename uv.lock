@@ -357,6 +357,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "protobuf" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "temporalio" },
 ]
@@ -370,9 +372,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.27.2,<2" },
+    { name = "mcp", specifier = ">=1.29,<1.30" },
+    { name = "protobuf", specifier = ">=7.35,<8" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
-    { name = "temporalio", specifier = ">=1.18.0,<2" },
+    { name = "temporalio", specifier = ">=1.31,<1.32" },
 ]
 
 [package.metadata.requires-dev]

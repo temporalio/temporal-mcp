@@ -19,7 +19,7 @@ Legend:
 | `check_connection` | Reach pinned server and namespace; classify server, namespace, and controlled codec reachability separately | Wrong address, missing namespace, bad credential-shaped response, codec timeout/malformed response; never infer a capability limit from an auth failure | D, G, A | Runtime + namespace/visibility |
 | `resolve_target` | Resolve an authorized exact alias such as `orders prod`, or discover caller-authorized targets when omitted | Unknown and unauthorized names are indistinguishable; exact ambiguity returns authorized candidates; duplicates across grants collapse; response never leaks address, TLS, key env name, or credentials | D, A | Runtime foundation |
 | `get_visibility_schema` | Return registered custom and built-in searchable fields, sources, and indexed types | Unknown indexed type is explicit; capability/API unavailable returns structured unsupported result; no query-operator capability matrix is claimed | D, G, A | Namespace/visibility |
-| `filter_workflows` | Pass a Temporal Visibility query to the target; return requested fields and stable opaque pagination | Invalid or target-unsupported query returns bounded sanitized rejection feedback; unknown requested field, invalid token, page/output ceiling; partial page is not `complete`; no local sorting fallback | D, G, A | Namespace/visibility |
+| `search_workflow_runs` | Pass a Temporal Visibility query to the target; return requested fields and stable opaque pagination | Invalid or target-unsupported query returns bounded sanitized rejection feedback; unknown requested field, invalid token, page/output ceiling; partial page is not `complete`; no local sorting fallback | D, G, A | Namespace/visibility |
 | `count_workflows` | Exact count and grouping by approved status/type dimensions | Invalid grouping/query and server capability difference; count meaning is labeled and never confused with inspected sample | D, G, A | Namespace/visibility |
 | `describe_workflow` | Closed and running runs expose status/type/queue/timing/pending activity/retry/parent-child/memo/search facts | Missing/ambiguous run, undecodable payload, redacted field, payload/output ceiling; partial decoding is explicit | D, G, A | Workflow inspection |
 | `get_workflow_history_slice` | Failures-only, event range, and reverse last-N return bounded events with correct cursors | Invalid range/filter/token, ceiling hit, decode failure, history mutation between pages; truncation is explicit | D, G, H, A | Workflow inspection |
@@ -29,21 +29,21 @@ Legend:
 | `describe_schedule` | Return definition, pause state, recent actions, and bounded upcoming matching times | Missing schedule, invalid time window, matching-times unavailable, decode/output limit | D, G, A | Namespace/visibility |
 | `query_workflow` | Run an approved no-argument query against a compatible running workflow | Unapproved name, arguments supplied, closed/unavailable workflow, handler error, timeout, oversized/undecodable result | D, G, A | Namespace/visibility + workflow fixture |
 | `list_batch_operations` | List jobs then enrich a bounded page with progress details | Describe failure for one item, pagination/budget exhaustion, unavailable API; partial enrichment is explicit | D, G, A | Namespace/visibility |
-| `diagnose_workflow` | Classify retry exhaustion with nested cause and separate current workflow/activity queue evidence | Incomplete history; conflicting failures; separate queue absent; timeout/cancel/child/nondeterminism; insufficient evidence returns findings, not a guess | D, G, H, A | Single-workflow reasoning |
-| `find_workflow_task_failures` | Narrow a population, inspect bounded histories, identify workflow-task failures/non-determinism, and report sampling ledger | 100k simulation, biased/too-small sample, injected describe/history failures, budget/deadline exhaustion; no claim of complete population | D, G, H, A | Population inspection |
-| `find_stuck_workflows` | Join long-running candidates with one queue description per queue and bounded workflow descriptions | Timer/signal waits not mislabeled; workflow versus activity pollers; queue reused; current health cannot prove historical cause; budget refusal | D, G, H, A | Population inspection |
+| `inspect_workflow_execution` | Classify retry exhaustion with nested cause and separate current workflow/activity queue evidence | Incomplete history; conflicting failures; separate queue absent; timeout/cancel/child/nondeterminism; insufficient evidence returns findings, not a guess | D, G, H, A | Single-workflow reasoning |
+| `inspect_workflow_task_failures` | Narrow a population, inspect bounded histories, identify workflow-task failures/non-determinism, and report bounded progress | 100k simulation, biased/too-small sample, injected describe/history failures, budget/deadline exhaustion; no claim of complete population | D, G, H, A | Population inspection |
+| `inspect_activity_queue_dependencies` | Join long-running candidates with one queue description per queue and bounded workflow descriptions | Timer/signal waits not mislabeled; workflow versus activity pollers; queue reused; current health cannot prove historical cause; budget refusal | D, G, H, A | Population inspection |
 | `plan_workflow_reset` | Linear failed order yields valid points, preserved/replayed activities, reapplied signal, exact run/history pin, and non-executed preview | Incomplete history, parallel activities, child/external interactions, continue-as-new, unknown events, versioning/side-effect ambiguity; valid points may still produce no recommendation | D, G, H, A | Single-workflow reasoning |
 
 ## Cross-capability deterministic scenarios
 
 | Scenario ID | Operator question or purpose | Required capabilities | Core acceptance | Layers |
 |---|---|---|---|---|
-| X-01 | Can a caller move from a human target name to a paged workflow population? | `resolve_target`, `get_visibility_schema`, `filter_workflows`, `count_workflows` | Query uses registered fields and is validated by the selected Temporal target; rejection feedback supports revision; page and server-reported approximate count remain distinct; target reference is reused | D, G, A |
+| X-01 | Can a caller move from a human target name to a paged workflow population? | `resolve_target`, `get_visibility_schema`, `search_workflow_runs`, `count_workflows` | Query uses registered fields and is validated by the selected Temporal target; rejection feedback supports revision; page and server-reported approximate count remain distinct; target reference is reused | D, G, A |
 | X-02 | What is one workflow doing now? | `describe_workflow`, `get_workflow_history_slice`, `describe_task_queue`, `query_workflow` | Current state, history, dispatch state, and workflow-defined state remain separately attributed | D, G, H, A |
 | X-03 | How did a closed workflow end? | `describe_workflow`, `get_workflow_result`, `get_workflow_history_slice` | Closing event drives result/failure; bounded history supplies context without dumping full history | D, G, H, A |
-| X-04 | Is apparent stuckness a queue problem or an expected wait? | `find_stuck_workflows`, `describe_task_queue`, `query_workflow` | Timer/signal/query-visible waits and missing activity pollers prevent simplistic worker/code conclusions | D, G, H, A |
-| X-05 | Which workflows show workflow-task failure in a large population? | `count_workflows`, `filter_workflows`, `find_workflow_task_failures` | Candidate narrowing precedes fan-out; 100k simulation stays bounded; sample/population meanings are explicit | D, G, H, A |
-| X-06 | What read-only recovery analysis is safe? | `diagnose_workflow`, `plan_workflow_reset` | Diagnosis does not imply reset safety; plan may refuse recommendation; no write occurs | D, G, H, A |
+| X-04 | Is apparent stuckness a queue problem or an expected wait? | `inspect_activity_queue_dependencies`, `describe_task_queue`, `query_workflow` | Timer/signal/query-visible waits and missing activity pollers prevent simplistic worker/code conclusions | D, G, H, A |
+| X-05 | Which workflows show workflow-task failure in a large population? | `count_workflows`, `search_workflow_runs`, `inspect_workflow_task_failures` | Candidate narrowing precedes fan-out; 100k simulation stays bounded; sample/population meanings are explicit | D, G, H, A |
+| X-06 | What read-only recovery analysis is safe? | `inspect_workflow_execution`, `plan_workflow_reset` | Diagnosis does not imply reset safety; plan may refuse recommendation; no write occurs | D, G, H, A |
 | X-07 | What namespace-managed work exists? | `list_schedules`, `describe_schedule`, `list_batch_operations` | Paging, local filtering, and per-item enrichment report exact completeness and cost | D, G, A |
 | X-08 | What happens when the request budget ends? | All collection/reasoning capabilities | Work stops, outstanding calls cancel, completed work and exhausted dimension are reported, no partial answer is labeled complete | D |
 
@@ -56,8 +56,8 @@ Status: supplied and eligible for deterministic acceptance.
 | Turn | Capability | Required evidence/assertion |
 |---|---|---|
 | Initial target | `resolve_target` | `orders prod` resolves to the authorized target without connection material |
-| Find run | `filter_workflows` | `OrderId = '88231'` returns exactly one failed run and its run ID |
-| Diagnose | `diagnose_workflow` | `EnrichProduct`, three attempts over the fixture interval, terminal catalog 503; current queue health is time-qualified |
+| Find run | `search_workflow_runs` | `OrderId = '88231'` returns exactly one failed run and its run ID |
+| Diagnose | `inspect_workflow_execution` | `EnrichProduct`, three attempts over the fixture interval, terminal catalog 503; current queue health is time-qualified |
 | Recovery evidence | `count_workflows` | Twelve comparable completed workflows in the defined ten-minute window; this supports but does not prove dependency recovery |
 | Follow-up plan | `plan_workflow_reset` | Exact run/history pin; valid points; payment preserved; enrichment replayed; one address-change signal reapplied; no write |
 | Ambiguous variant | `plan_workflow_reset` | Adding parallel/unsupported reset-relevant work causes a safe no-recommendation result |
@@ -80,7 +80,7 @@ by the operator or configured policy; it is not a Temporal fact.
 | Turn | Capability | Required evidence/assertion |
 |---|---|---|
 | Initial target | `resolve_target` | `orders prod` resolves without exposing connection material |
-| Identify exact run | `filter_workflows`, `describe_workflow` | Preserve the run ID; compare observed duration with the supplied expectation; expose pending activity type, activity task queue, attempt, and heartbeat evidence |
+| Identify exact run | `search_workflow_runs`, `describe_workflow` | Preserve the run ID; compare observed duration with the supplied expectation; expose pending activity type, activity task queue, attempt, and heartbeat evidence |
 | Workflow wait state | `query_workflow` | Approved Python SDK built-in `__stack_trace` corroborates the workflow code's current await point while a compatible workflow worker is available |
 | Dispatch state | `describe_task_queue` | Inspect `ledger` with `task_type=activity`; zero current pollers and approximate backlog are time-qualified |
 | Agent response | Agent only | Conclude whether this exact run can currently dispatch its pending activity; distinguish current inability to progress from how long the outage has existed |
@@ -106,8 +106,8 @@ sample within explicit budgets and maintain a deterministic inspection ledger.
 
 | Turn | Capability | Required evidence/assertion |
 |---|---|---|
-| Candidate population | `filter_workflows`, optionally `count_workflows` | Visibility results/counts are labeled candidates, not affected workflows; pagination state is explicit |
-| Confirm runs | `find_stuck_workflows` or a renamed blast-radius capability | Inspect each selected exact run; join its pending activity queue to the current activity-queue snapshot |
+| Candidate population | `search_workflow_runs`, optionally `count_workflows` | Visibility results/counts are labeled candidates, not affected workflows; pagination state is explicit |
+| Confirm runs | `inspect_activity_queue_dependencies` | Inspect each selected exact run; join its pending activity queue to the current activity-queue snapshot |
 | Group result | Population capability | Group only confirmed runs by workflow type; report candidate, confirmed, unknown/uninspected, failed-to-inspect, and completeness/sample metadata |
 | Agent response | Agent only | State an exact affected total only after exhaustive confirmation; otherwise state a confirmed lower bound or sampled result |
 
@@ -125,7 +125,7 @@ Prohibited claims:
 | Pending activity task queue was dropped | Map `PendingActivityInfo.activity_options.task_queue` into exact-run facts and `describe_workflow` output; never substitute the workflow task queue when absent | Add an always-present nullable pending-activity field; deliberate strict-v1 prototype break |
 | Heartbeat evidence was dropped | Map last heartbeat time and bounded/decoded heartbeat details with decode/redaction status; absence remains unknown/not reported | Add always-present pending-activity fields; deliberate strict-v1 prototype break |
 | The agent could not know the diagnostic query name | Omitted `query_name` returns deterministic target-approved query metadata without an RPC; explicitly allowlist `__stack_trace` where desired | Deliberate v1 discovery/result union break; execution result meanings unchanged |
-| Population paging stopped before all workflow types were seen | The existing bounded population operation emits an inspection ledger and marks incomplete candidate frames; direct `filter_workflows` remains one explicitly paged read | Add optional blast-radius fields; never extrapolate beyond the inspected frame |
+| Population paging stopped before all workflow types were seen | The bounded population operation emits scalar progress and marks incomplete candidate frames; direct `search_workflow_runs` remains one explicitly paged read | Add optional blast-radius fields; never extrapolate beyond the inspected frame |
 | Workflow-task-queue membership was treated as an activity dependency | Confirm each run through pending-activity queue evidence before grouping/counting it as affected; unknown and failed inspections remain separate | Evidence-rule tightening; never reinterpret an existing count |
 | Current zero pollers was backdated to the workflow runtime | Preserve observation timestamps and describe the finding as current dispatch state only | No schema change when timestamps already exist; optional observation metadata is compatible |
 

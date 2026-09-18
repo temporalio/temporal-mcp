@@ -11,7 +11,7 @@ from temporalio.api.operatorservice.v1 import ListSearchAttributesRequest
 from temporalio.client import Client, WorkflowExecution
 from temporalio.service import RPCError, RPCStatusCode
 
-from ops_mcp.clients import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.visibility import (
     CountPrecision,
     IndexedValueTypeFact,
@@ -193,7 +193,7 @@ class SdkVisibilityGateway:
         operation: str,
     ) -> Client:
         context.budget.reserve_temporal_call(operation)
-        return await self._client_provider.get_client(target.target_ref, target.connection)
+        return await acquire_client(self._client_provider, context, target)
 
 
 def _workflow_fact(item: WorkflowExecution) -> WorkflowVisibilityFact:

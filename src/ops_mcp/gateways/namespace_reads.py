@@ -18,7 +18,7 @@ from temporalio.client import (
 )
 from temporalio.service import RPCError
 
-from ops_mcp.clients.provider import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.history import JsonValue
 from ops_mcp.facts.namespace_reads import (
     BatchOperationDetailFact,
@@ -98,7 +98,7 @@ class SdkScheduleGateway:
         page_size: int,
         page_token: bytes | None,
     ) -> tuple[tuple[ScheduleSummaryFact, ...], bytes | None]:
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         iterator = client.list_schedules(
             page_size=page_size,
             next_page_token=page_token,
@@ -123,7 +123,7 @@ class SdkScheduleGateway:
         upcoming_end: datetime | None,
         upcoming_count: int,
     ) -> ScheduleDescriptionFact:
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("DescribeSchedule")
         try:
             description = await client.get_schedule_handle(schedule_id).describe(
@@ -191,7 +191,7 @@ class SdkQueryGateway:
         run_id: str,
         query_name: str,
     ) -> QueryResultFact:
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("QueryWorkflow")
         try:
             value = await client.get_workflow_handle(workflow_id, run_id=run_id).query(
@@ -243,7 +243,7 @@ class SdkBatchGateway:
         page_size: int,
         page_token: bytes | None,
     ) -> BatchOperationPageFact:
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("ListBatchOperations")
         try:
             response = await client.workflow_service.list_batch_operations(
@@ -270,7 +270,7 @@ class SdkBatchGateway:
         target: ResolvedTarget,
         job_id: str,
     ) -> BatchOperationDetailFact:
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("DescribeBatchOperation")
         try:
             value = await client.workflow_service.describe_batch_operation(

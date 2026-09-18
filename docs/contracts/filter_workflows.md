@@ -1,10 +1,10 @@
-# `filter_workflows`
+# `search_workflow_runs`
 
 - **Operator question:** Which workflow runs match this visibility query?
 - **Inputs:** `target_ref`, `query: str`, `fields: list[WorkflowField]`,
   `custom_search_attributes?: list[str]`, `page_size: 1..200`,
-  `page_token?: opaque str`. Custom attributes must be registered and are opt-in.
-- **Output:** projected workflow rows, `returned`, and opaque `next_page_token`.
+  `continuation_token?: opaque str`. Custom attributes must be registered and are opt-in.
+- **Output:** projected workflow rows, `returned`, and opaque `continuation_token`.
 - **Facts:** visibility records only. **Interpretation:** none.
 - **Gateway calls:** one visibility-schema read only when custom attributes are
   requested, then one page of `ListWorkflowExecutions`; `query` is passed to Temporal unchanged.

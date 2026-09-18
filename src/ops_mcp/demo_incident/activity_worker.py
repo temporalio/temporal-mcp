@@ -33,3 +33,7 @@ def main() -> None:
         asyncio.run(run_workers())
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    main()

@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ops_mcp.mcp.adapters import register_direct_read_tools
 from ops_mcp.mcp.composition import CompositionRoot, build_composition_root
+from ops_mcp.runtime import InvalidConfigurationError
 
 
 def create_mcp(root: CompositionRoot | None = None) -> FastMCP[CompositionRoot]:
@@ -31,7 +32,7 @@ def create_mcp(root: CompositionRoot | None = None) -> FastMCP[CompositionRoot]:
             "use inspect_workflow_execution for one exact workflow and stop unless the operator "
             "asks for blast radius or its response requires population evidence. Tier 2: use "
             "inspect_workflow_task_failures, inspect_activity_queue_dependencies, or "
-            "analyze_incident_impact for explicit population questions; follow next_call exactly "
+            "analyze_incident_impact for explicit population questions; follow continuation_token "
             "and distinguish page from cumulative totals. Tier 3: use building-block reads only "
             "for novel questions, enrichment, or a reported evidence gap. Use "
             "assess_workflow_recovery to gather exact later-run activity outcomes. Use "
@@ -65,7 +66,6 @@ _ARGUMENT_EXAMPLES: dict[str, object] = {
     "group_by_custom_search_attributes": ["Team"],
     "business_grouping": ["Team", "Domain"],
     "page_size": 100,
-    "page_token": "deprecated-opaque-token",
     "continuation_token": "signed-opaque-token",
     "workflow_id": "order-88231",
     "run_id": "01a0268c-ba90-7f27-ac62-754c4a5c892c",
@@ -165,14 +165,28 @@ def _enrich_schema_node(node: object) -> None:
             _enrich_schema_node(schema)
 
 
-mcp = create_mcp()
-
-
 def main() -> None:
     transport = os.getenv("OPS_MCP_TRANSPORT", "stdio")
     if transport not in {"stdio", "streamable-http"}:
         raise SystemExit("OPS_MCP_TRANSPORT must be 'stdio' or 'streamable-http'")
-    mcp.run(transport=cast(Literal["stdio", "streamable-http"], transport))
+    if transport == "streamable-http" and os.getenv("OPS_MCP_ALLOW_INSECURE_HTTP") != "1":
+        raise SystemExit(
+            "streamable-http is unauthenticated in this prototype; set "
+            "OPS_MCP_ALLOW_INSECURE_HTTP=1 only for a loopback-only demo"
+        )
+    continuation_secret = os.getenv("OPS_MCP_CONTINUATION_SECRET")
+    if transport == "streamable-http" and (
+        continuation_secret is None or len(continuation_secret.encode()) < 32
+    ):
+        raise SystemExit(
+            "OPS_MCP_CONTINUATION_SECRET must contain at least 32 bytes for stable "
+            "streamable-http continuations"
+        )
+    try:
+        server = create_mcp()
+    except (InvalidConfigurationError, ValueError) as exc:
+        raise SystemExit(str(exc)) from None
+    server.run(transport=cast(Literal["stdio", "streamable-http"], transport))
 
 
 if __name__ == "__main__":

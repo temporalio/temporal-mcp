@@ -1,6 +1,8 @@
 # `inspect_workflow_task_failures`
 
-`find_workflow_task_failures` remains a deprecated compatibility alias for one migration cycle.
+`find_workflow_task_failures` was a pre-release compatibility alias. The public tool is now
+`inspect_workflow_task_failures`; this sheet remains as contract history for the underlying
+service semantics.
 
 - **Operator question:** Within a defined workflow population, which inspected runs
   show workflow-task failures such as non-determinism?

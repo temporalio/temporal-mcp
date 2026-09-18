@@ -8,9 +8,9 @@ from pydantic import ValidationError
 
 from ops_mcp.contracts import (
     CountWorkflowsRequest,
-    FilterWorkflowsRequest,
     GetVisibilitySchemaRequest,
     ResolveTargetRequest,
+    SearchWorkflowRunsRequest,
     WorkflowCountGroupBy,
     WorkflowField,
 )
@@ -184,9 +184,9 @@ async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_token()
     )
     context = _context()
 
-    result = await DefaultVisibilityService(catalog, gateway).filter_workflows(
+    result = await DefaultVisibilityService(catalog, gateway).search_workflow_runs(
         context,
-        FilterWorkflowsRequest(
+        SearchWorkflowRunsRequest(
             target_ref="orders-prod",
             query="OrderId = '88231'",
             fields=(
@@ -195,13 +195,13 @@ async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_token()
                 WorkflowField.CLOSE_TIME,
             ),
             page_size=10,
-            page_token="cHJldmlvdXM=",
+            continuation_token="cHJldmlvdXM=",
         ),
     )
 
     assert catalog.authorizations == [(context.principal, "orders-prod")]
     assert gateway.list_args[0][3] == b"previous"
-    assert result.answer.next_page_token == "AG9wYXF1Zf8="
+    assert result.answer.continuation_token == "AG9wYXF1Zf8="
     assert result.answer.returned == 1
     assert result.answer.workflows[0].model_dump() == {
         "workflow_id": "order-88231",
@@ -239,9 +239,9 @@ async def test_filter_projects_only_requested_registered_custom_search_attribute
         ),
     )
 
-    result = await DefaultVisibilityService(catalog, gateway).filter_workflows(
+    result = await DefaultVisibilityService(catalog, gateway).search_workflow_runs(
         _context(),
-        FilterWorkflowsRequest(
+        SearchWorkflowRunsRequest(
             target_ref="orders-prod",
             query="",
             fields=(WorkflowField.WORKFLOW_ID,),
@@ -270,9 +270,9 @@ async def test_filter_rejects_unknown_custom_projection_before_listing() -> None
     )
 
     with pytest.raises(OpsMcpError) as exc_info:
-        await DefaultVisibilityService(RecordingCatalog(_target()), gateway).filter_workflows(
+        await DefaultVisibilityService(RecordingCatalog(_target()), gateway).search_workflow_runs(
             _context(),
-            FilterWorkflowsRequest(
+            SearchWorkflowRunsRequest(
                 target_ref="orders-prod",
                 query="",
                 fields=(WorkflowField.WORKFLOW_ID,),
@@ -291,13 +291,13 @@ async def test_filter_rejects_invalid_public_token_after_reauthorization() -> No
     context = _context()
 
     with pytest.raises(OpsMcpError) as exc_info:
-        await DefaultVisibilityService(catalog, gateway).filter_workflows(
+        await DefaultVisibilityService(catalog, gateway).search_workflow_runs(
             context,
-            FilterWorkflowsRequest(
+            SearchWorkflowRunsRequest(
                 target_ref="orders-prod",
                 query="",
                 fields=(WorkflowField.WORKFLOW_ID,),
-                page_token="not base64!",
+                continuation_token="not base64!",
             ),
         )
 
@@ -319,9 +319,9 @@ async def test_filter_enforces_request_output_budget() -> None:
     context = _context(output_bytes=1)
 
     with pytest.raises(ResultTooLargeError):
-        await DefaultVisibilityService(catalog, gateway).filter_workflows(
+        await DefaultVisibilityService(catalog, gateway).search_workflow_runs(
             context,
-            FilterWorkflowsRequest(
+            SearchWorkflowRunsRequest(
                 target_ref="orders-prod",
                 query="",
                 fields=(WorkflowField.WORKFLOW_ID,),
@@ -333,7 +333,7 @@ async def test_filter_enforces_request_output_budget() -> None:
 
 def test_filter_contract_rejects_duplicate_fields() -> None:
     with pytest.raises(ValidationError, match="duplicates"):
-        FilterWorkflowsRequest(
+        SearchWorkflowRunsRequest(
             target_ref="orders-prod",
             query="",
             fields=(WorkflowField.RUN_ID, WorkflowField.RUN_ID),

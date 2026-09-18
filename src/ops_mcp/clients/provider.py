@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Protocol, cast
 
 from temporalio.client import Client
-from temporalio.service import TLSConfig
+from temporalio.service import RPCError, RPCStatusCode, TLSConfig
 
-from ops_mcp.runtime.errors import MissingCredentialError, ProviderClosedError
+from ops_mcp.runtime.errors import (
+    ErrorCode,
+    MissingCredentialError,
+    OpsMcpError,
+    ProviderClosedError,
+)
 from ops_mcp.targets.models import ConnectionDescriptor
 
 ClientConnector = Callable[..., Awaitable[Client]]
@@ -42,11 +48,16 @@ class CachingTemporalClientProvider:
         connector: ClientConnector | None = None,
         credential_resolver: CredentialResolver = os.getenv,
         identity: str = "ops-mcp",
+        connection_attempt_timeout: float = 15.0,
     ) -> None:
+        if connection_attempt_timeout <= 0:
+            raise ValueError("connection_attempt_timeout must be positive")
         self._connector = connector or cast(ClientConnector, Client.connect)
         self._credential_resolver = credential_resolver
         self._identity = identity
+        self._connection_attempt_timeout = connection_attempt_timeout
         self._clients: dict[ConnectionDescriptor, Client] = {}
+        self._connections: dict[ConnectionDescriptor, asyncio.Task[Client]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -57,31 +68,38 @@ class CachingTemporalClientProvider:
             cached = self._clients.get(descriptor)
             if cached is not None:
                 return cached
-            api_key = self._resolve_api_key(target_ref, descriptor)
-            tls: bool | TLSConfig = descriptor.tls
-            if descriptor.server_name:
-                tls = TLSConfig(domain=descriptor.server_name)
-            client = await self._connector(
-                descriptor.address,
-                namespace=descriptor.namespace,
-                tls=tls,
-                api_key=api_key,
-                identity=self._identity,
-            )
-            self._clients[descriptor] = client
-            return client
+            connection = self._connections.get(descriptor)
+            if connection is None:
+                connection = asyncio.create_task(self._connection_attempt(target_ref, descriptor))
+                connection.add_done_callback(_consume_task_exception)
+                self._connections[descriptor] = connection
+
+        client = await asyncio.shield(connection)
+
+        async with self._lock:
+            if self._closed:
+                raise ProviderClosedError
+            return self._clients.get(descriptor, client)
 
     async def invalidate(self, descriptor: ConnectionDescriptor | None = None) -> None:
         async with self._lock:
             if descriptor is None:
                 self._clients.clear()
+                pending = tuple(self._connections.values())
+                self._connections.clear()
             else:
                 self._clients.pop(descriptor, None)
+                connection = self._connections.pop(descriptor, None)
+                pending = (connection,) if connection is not None else ()
+        await _cancel_all(pending)
 
     async def shutdown(self) -> None:
         async with self._lock:
             self._closed = True
             self._clients.clear()
+            pending = tuple(self._connections.values())
+            self._connections.clear()
+        await _cancel_all(pending)
 
     @property
     def closed(self) -> bool:
@@ -94,3 +112,91 @@ class CachingTemporalClientProvider:
         if not api_key:
             raise MissingCredentialError(target_ref)
         return api_key
+
+    async def _connect(self, target_ref: str, descriptor: ConnectionDescriptor) -> Client:
+        api_key = self._resolve_api_key(target_ref, descriptor)
+        tls: bool | TLSConfig = descriptor.tls
+        if descriptor.server_name:
+            tls = TLSConfig(domain=descriptor.server_name)
+        return await self._connector(
+            descriptor.address,
+            namespace=descriptor.namespace,
+            tls=tls,
+            api_key=api_key,
+            identity=self._identity,
+        )
+
+    async def _connection_attempt(
+        self, target_ref: str, descriptor: ConnectionDescriptor
+    ) -> Client:
+        current = asyncio.current_task()
+        client: Client | None = None
+        try:
+            try:
+                async with asyncio.timeout(self._connection_attempt_timeout):
+                    client = await self._connect(target_ref, descriptor)
+            except TimeoutError as exc:
+                raise OpsMcpError(
+                    ErrorCode.TEMPORAL_UNREACHABLE,
+                    "The Temporal connection attempt timed out",
+                    retryable=True,
+                    details={"reason": "connection_attempt_timeout"},
+                ) from exc
+            except OpsMcpError:
+                raise
+            except Exception as exc:
+                raise _translate_connection_error(exc) from exc
+            return client
+        finally:
+            async with self._lock:
+                if self._connections.get(descriptor) is current:
+                    self._connections.pop(descriptor, None)
+                    if client is not None and not self._closed:
+                        self._clients[descriptor] = client
+
+
+async def _cancel_all(tasks: tuple[asyncio.Task[Client], ...]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _consume_task_exception(task: asyncio.Task[Client]) -> None:
+    """Retrieve provider-owned task failures after all request waiters have left."""
+    if not task.cancelled():
+        with suppress(BaseException):
+            task.exception()
+
+
+def _translate_connection_error(exc: Exception) -> OpsMcpError:
+    if isinstance(exc, OpsMcpError):
+        return exc
+    if isinstance(exc, RPCError):
+        if exc.status in {RPCStatusCode.UNAUTHENTICATED, RPCStatusCode.PERMISSION_DENIED}:
+            return OpsMcpError(
+                ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
+                "Temporal rejected the configured target credentials",
+                retryable=False,
+            )
+        if exc.status in {
+            RPCStatusCode.UNAVAILABLE,
+            RPCStatusCode.DEADLINE_EXCEEDED,
+            RPCStatusCode.CANCELLED,
+        }:
+            return OpsMcpError(
+                ErrorCode.TEMPORAL_UNREACHABLE,
+                "The configured Temporal target is unavailable",
+                retryable=True,
+            )
+    if isinstance(exc, (ConnectionError, OSError)):
+        return OpsMcpError(
+            ErrorCode.TEMPORAL_UNREACHABLE,
+            "The configured Temporal target is unavailable",
+            retryable=True,
+        )
+    return OpsMcpError(
+        ErrorCode.INTERNAL_ERROR,
+        "Temporal client setup failed unexpectedly",
+        retryable=False,
+    )

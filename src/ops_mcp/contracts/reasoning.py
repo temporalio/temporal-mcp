@@ -19,14 +19,6 @@ from ops_mcp.contracts.primitives import (
 from ops_mcp.contracts.workflow_reads import DecodedPayloadsOutput
 
 
-class DiagnoseWorkflowRequest(ContractModel):
-    target_ref: str = Field(min_length=1)
-    workflow_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-    history_event_limit: int = Field(default=2_000, ge=1, le=20_000)
-    expected_duration_seconds: float | None = Field(default=None, gt=0)
-
-
 class WorkflowSummary(ContractModel):
     workflow_id: str
     run_id: str
@@ -52,17 +44,6 @@ class PendingActivitySummary(ContractModel):
     heartbeat_details: DecodedPayloadsOutput
 
 
-class FailureSummary(ContractModel):
-    event_id: int = Field(ge=1)
-    event_type: str
-    activity_id: str | None = None
-    activity_type: str | None = None
-    attempt: int | None = Field(default=None, ge=0)
-    retry_state: str | None = None
-    messages: tuple[str, ...] = ()
-    application_type: str | None = None
-
-
 class TaskQueueSnapshot(ContractModel):
     task_queue: str
     task_type: Literal["workflow", "activity"]
@@ -71,25 +52,6 @@ class TaskQueueSnapshot(ContractModel):
     approximate_backlog_age_seconds: float = Field(ge=0)
     observed_at: datetime
     historical_health_known: Literal[False] = False
-
-
-class RetryAssessment(ContractModel):
-    assessment: Literal["advisable", "inadvisable", "unknown"]
-    rationale: str
-    missing_evidence: tuple[str, ...] = ()
-
-
-class DiagnoseWorkflowResponse(ContractModel):
-    schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
-    target_ref: str
-    workflow: WorkflowSummary
-    pending_activities: tuple[PendingActivitySummary, ...] = ()
-    failures: tuple[FailureSummary, ...] = ()
-    task_queues: tuple[TaskQueueSnapshot, ...] = ()
-    findings: tuple[Finding, ...] = ()
-    retry_assessment: RetryAssessment
-    history_inspection: Inspection
-    warnings: tuple[str, ...] = ()
 
 
 class InspectWorkflowExecutionRequest(ContractModel):

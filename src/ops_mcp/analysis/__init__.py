@@ -1,19 +1,9 @@
-"""Deterministic analysis plus legacy compatibility exports."""
+"""Deterministic analysis over typed Temporal facts."""
 
 from ops_mcp.analysis.incident import (
     IncidentAnalysisFinding,
     IncidentRunAnalysis,
     classify_incident_impact,
-)
-from ops_mcp.analysis.legacy import (
-    build_reset_plan,
-    duration_seconds,
-    enum_label,
-    extract_failures,
-    flatten_failure,
-    isoformat,
-    likely_cause,
-    workflow_status_label,
 )
 from ops_mcp.analysis.population import (
     PopulationAnalysisFinding,
@@ -41,14 +31,6 @@ __all__ = [
     "ResetAnalyzer",
     "ResetPointAnalysis",
     "RetryAnalysis",
-    "build_reset_plan",
-    "duration_seconds",
-    "enum_label",
-    "extract_failures",
-    "flatten_failure",
-    "isoformat",
-    "likely_cause",
-    "workflow_status_label",
     "classify_progress_evidence",
     "classify_incident_impact",
     "classify_workflow_task_failures",

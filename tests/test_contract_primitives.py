@@ -10,7 +10,7 @@ from ops_mcp.contracts import (
     Finding,
     Inspection,
 )
-from ops_mcp.contracts.visibility import FilterWorkflowsRequest, WorkflowField
+from ops_mcp.contracts.visibility import SearchWorkflowRunsRequest, WorkflowField
 
 
 def test_shared_contract_values_are_strict_and_versioned() -> None:
@@ -36,7 +36,7 @@ def test_shared_contract_values_are_strict_and_versioned() -> None:
 
 
 def test_search_projection_defaults_and_temporal_field_aliases() -> None:
-    request = FilterWorkflowsRequest(target_ref="orders-prod", query="")
+    request = SearchWorkflowRunsRequest(target_ref="orders-prod", query="")
 
     assert request.fields[:2] == (WorkflowField.WORKFLOW_ID, WorkflowField.RUN_ID)
     assert WorkflowField("WorkflowId") is WorkflowField.WORKFLOW_ID

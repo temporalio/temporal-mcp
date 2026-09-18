@@ -1,4 +1,4 @@
-# `find_stuck_workflows`
+# `inspect_activity_queue_dependencies`
 
 - **Operator question:** Which long-running workflows in a defined population look
   unable to make progress, and does current dispatch evidence suggest worker or

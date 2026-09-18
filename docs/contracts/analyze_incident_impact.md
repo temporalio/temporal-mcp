@@ -52,4 +52,4 @@ The response separates `candidate_population`, `impact_criteria`, and `business_
 any discovered queues excluded by an explicit selection, and two independent completeness flags.
 `candidate_population_complete=true` never implies `incident_impact_complete=true` for an
 explicit queue subset. `page` reports the current call; `cumulative` reports the uninterrupted
-continuation chain; `next_call` is the only supported resume instruction.
+continuation chain; the top-level `continuation_token` is the only supported resume instruction.

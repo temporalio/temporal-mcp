@@ -44,3 +44,7 @@ async def expose() -> None:
 
 def main() -> None:
     asyncio.run(expose())
+
+
+if __name__ == "__main__":
+    main()

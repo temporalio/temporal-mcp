@@ -57,7 +57,7 @@ class WorkflowField(StrEnum):
         return aliases.get(normalized.replace("_", ""))
 
 
-class FilterWorkflowsRequest(ContractModel):
+class SearchWorkflowRunsRequest(ContractModel):
     target_ref: NonEmptyString
     query: str
     fields: tuple[WorkflowField, ...] = Field(
@@ -72,7 +72,7 @@ class FilterWorkflowsRequest(ContractModel):
     )
     custom_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=10)
     page_size: int = Field(default=100, ge=1, le=200)
-    page_token: str | None = Field(default=None, min_length=1)
+    continuation_token: str | None = Field(default=None, min_length=1)
 
     @field_validator("fields")
     @classmethod
@@ -123,22 +123,6 @@ class WorkflowProjectionRow(ContractModel):
         # `model_fields_set` distinguishes an unrequested field from a requested null value.
         serialized = handler(self)
         return {name: serialized[name] for name in self.model_fields_set}
-
-
-class FilterWorkflowsAnswer(ContractModel):
-    query: str
-    custom_search_attributes: tuple[NonEmptyString, ...] = ()
-    workflows: tuple[WorkflowProjectionRow, ...]
-    returned: int = Field(ge=0)
-    next_page_token: str | None = None
-
-
-class FilterWorkflowsResponse(ContractModel):
-    schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
-    target_ref: NonEmptyString
-    answer: FilterWorkflowsAnswer
-    inspection: Inspection
-    warnings: tuple[WarningMessage, ...] = ()
 
 
 class SearchWorkflowRunsAnswer(ContractModel):

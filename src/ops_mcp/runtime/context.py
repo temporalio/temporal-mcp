@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Protocol
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ class RequestContext:
     request_id: str
     principal: Principal
     budget: ExecutionBudget
+    started_monotonic: float = field(default_factory=monotonic)
 
     @property
     def deadline(self) -> datetime:
@@ -77,4 +79,5 @@ class RequestContextFactory:
             request_id=request_id or str(uuid4()),
             principal=self._identity_provider.current_principal(),
             budget=budget,
+            started_monotonic=monotonic(),
         )

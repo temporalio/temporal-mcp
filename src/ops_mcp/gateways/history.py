@@ -20,7 +20,7 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 
-from ops_mcp.clients.provider import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.history import (
     ActivityTaskEventAttributes,
     ContinueAsNewEventAttributes,
@@ -90,7 +90,7 @@ class SdkHistoryGateway:
         if max_events is not None and max_events <= 0:
             raise ValueError("max_events must be positive when provided")
 
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         token = next_page_token or b""
         events: list[HistoryEventFact] = []
         pages_read = 0
@@ -161,7 +161,7 @@ class SdkHistoryGateway:
     ) -> HistoryEventFact | None:
         if not workflow_id or not run_id:
             raise ValueError("workflow_id and run_id are required")
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call(
             "GetWorkflowExecutionHistory" if wait else "GetWorkflowExecutionHistoryReverse"
         )

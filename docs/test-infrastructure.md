@@ -14,7 +14,7 @@ Pass the agent invocation after `--`. The invocation inherits `TEMPORAL_ADDRESS`
 `orders prod`, `temporal dev`, or `acceptance local` to the ephemeral server.
 
 ```bash
-uv run ops-mcp-acceptance --mode isolated --session 2 -- \
+uv run python -m ops_mcp.acceptance.runner --mode isolated --session 2 -- \
   claude -p 'Is session2-payment-reconciliation-main stuck? Investigate with temporal-ops.'
 ```
 
@@ -33,7 +33,7 @@ The noisy mode starts one fresh server and seeds the ordinary fixtures for Sessi
 the same `default` namespace before running the focused investigation:
 
 ```bash
-uv run ops-mcp-acceptance --mode noisy --session 4 -- \
+uv run python -m ops_mcp.acceptance.runner --mode noisy --session 4 -- \
   claude -p 'Analyze the ledger incident impact. Separate candidates from confirmed impact.'
 ```
 

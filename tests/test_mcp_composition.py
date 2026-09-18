@@ -73,8 +73,8 @@ class _RecordingServices:
         self._record("check_connection", context, request)
         self._stop()
 
-    async def filter_workflows(self, context: RequestContext, request: object) -> Any:
-        self._record("filter_workflows", context, request)
+    async def search_workflow_runs(self, context: RequestContext, request: object) -> Any:
+        self._record("search_workflow_runs", context, request)
         self._stop()
 
     async def count_workflows(self, context: RequestContext, request: object) -> Any:
@@ -101,10 +101,6 @@ class _RecordingServices:
         self._record("describe_task_queue", context, request)
         self._stop()
 
-    async def diagnose_workflow(self, context: RequestContext, request: object) -> Any:
-        self._record("diagnose_workflow", context, request)
-        self._stop()
-
     async def inspect_workflow_execution(self, context: RequestContext, request: object) -> Any:
         self._record("inspect_workflow_execution", context, request)
         self._stop()
@@ -113,12 +109,14 @@ class _RecordingServices:
         self._record("plan_workflow_reset", context, request)
         self._stop()
 
-    async def find_workflow_task_failures(self, context: RequestContext, request: object) -> Any:
-        self._record("find_workflow_task_failures", context, request)
+    async def inspect_workflow_task_failures(self, context: RequestContext, request: object) -> Any:
+        self._record("inspect_workflow_task_failures", context, request)
         self._stop()
 
-    async def find_stuck_workflows(self, context: RequestContext, request: object) -> Any:
-        self._record("find_stuck_workflows", context, request)
+    async def inspect_activity_queue_dependencies(
+        self, context: RequestContext, request: object
+    ) -> Any:
+        self._record("inspect_activity_queue_dependencies", context, request)
         self._stop()
 
     async def analyze_incident_impact(self, context: RequestContext, request: object) -> Any:
@@ -166,13 +164,9 @@ def _root(services: _RecordingServices) -> tuple[CompositionRoot, _Provider]:
         connection=services,
         targets=services,
         visibility=services,
-        describe_workflow=services,
-        workflow_history=services,
-        workflow_result=services,
-        task_queue=services,
+        workflow_reads=services,
         namespace_reads=services,
-        diagnose_workflow=services,
-        plan_workflow_reset=services,
+        reasoning=services,
         population=services,
     )
     root = CompositionRoot(
@@ -192,7 +186,6 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
     assert {tool.name for tool in tools} == {
         "check_connection",
         "resolve_target",
-        "filter_workflows",
         "search_workflow_runs",
         "count_workflows",
         "get_visibility_schema",
@@ -200,12 +193,9 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
         "get_workflow_history_slice",
         "get_workflow_result",
         "describe_task_queue",
-        "diagnose_workflow",
         "inspect_workflow_execution",
         "plan_workflow_reset",
-        "find_workflow_task_failures",
         "inspect_workflow_task_failures",
-        "find_stuck_workflows",
         "inspect_activity_queue_dependencies",
         "assess_workflow_recovery",
         "analyze_incident_impact",
@@ -249,6 +239,21 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
         assert "sample_seed" not in properties
     assert "candidate_query" in schemas["analyze_incident_impact"]["properties"]
     assert "query" not in schemas["analyze_incident_impact"]["properties"]
+    for name in (
+        "inspect_workflow_task_failures",
+        "inspect_activity_queue_dependencies",
+        "analyze_incident_impact",
+    ):
+        output = json.dumps(next(tool.outputSchema for tool in tools if tool.name == name))
+        assert "cumulative_inspected_identities" not in output
+        assert "cumulative_confirmed_identities" not in output
+        assert "next_call" not in output
+        assert output.count('"continuation_token"') == 1
+
+    query_output = json.dumps(
+        next(tool.outputSchema for tool in tools if tool.name == "query_workflow")
+    )
+    assert "QueryWorkflowDiscoveryAnswer" in query_output
 
     composites = {
         "inspect_workflow_execution",
@@ -282,14 +287,6 @@ async def test_each_adapter_calls_exactly_one_service_with_fresh_context() -> No
     calls = (
         ("check_connection", {"target_ref": "orders-prod"}),
         ("resolve_target", {"human_name": "orders prod"}),
-        (
-            "filter_workflows",
-            {
-                "target_ref": "orders-prod",
-                "query": "",
-                "fields": ["workflow_id"],
-            },
-        ),
         (
             "search_workflow_runs",
             {"target_ref": "orders-prod", "query": ""},
@@ -326,14 +323,6 @@ async def test_each_adapter_calls_exactly_one_service_with_fresh_context() -> No
             },
         ),
         (
-            "diagnose_workflow",
-            {
-                "target_ref": "orders-prod",
-                "workflow_id": "order-1",
-                "run_id": "run-1",
-            },
-        ),
-        (
             "inspect_workflow_execution",
             {"target_ref": "orders-prod", "workflow_id": "order-1"},
         ),
@@ -346,51 +335,8 @@ async def test_each_adapter_calls_exactly_one_service_with_fresh_context() -> No
             },
         ),
         (
-            "find_workflow_task_failures",
-            {
-                "target_ref": "orders-prod",
-                "query": "WorkflowType = 'OrderWorkflow'",
-                "time_window": {
-                    "started_at_or_after": "2026-08-23T00:00:00Z",
-                    "started_before": "2026-08-24T00:00:00Z",
-                },
-                "limits": {
-                    "max_candidates": 10,
-                    "max_runs": 5,
-                    "max_histories": 3,
-                    "max_history_events_per_run": 500,
-                    "max_task_queues": 5,
-                    "max_concurrency": 2,
-                },
-                "sampling_strategy": "deterministic_hash",
-                "sample_seed": "test-seed",
-            },
-        ),
-        (
             "inspect_workflow_task_failures",
             {"target_ref": "orders-prod", "query": "WorkflowType = 'OrderWorkflow'"},
-        ),
-        (
-            "find_stuck_workflows",
-            {
-                "target_ref": "orders-prod",
-                "query": "WorkflowType = 'OrderWorkflow'",
-                "time_window": {
-                    "started_at_or_after": "2026-08-23T00:00:00Z",
-                    "started_before": "2026-08-24T00:00:00Z",
-                },
-                "minimum_open_duration_seconds": 300,
-                "limits": {
-                    "max_candidates": 10,
-                    "max_runs": 5,
-                    "max_histories": 3,
-                    "max_history_events_per_run": 500,
-                    "max_task_queues": 5,
-                    "max_concurrency": 2,
-                },
-                "sampling_strategy": "deterministic_hash",
-                "sample_seed": "test-seed",
-            },
         ),
         (
             "inspect_activity_queue_dependencies",
@@ -441,14 +387,7 @@ async def test_each_adapter_calls_exactly_one_service_with_fresh_context() -> No
         payload = _error_payload(exc_info.value)
         assert payload["code"] == "target_not_authorized"
 
-    expected_services = [
-        {
-            "search_workflow_runs": "filter_workflows",
-            "inspect_workflow_task_failures": "find_workflow_task_failures",
-            "inspect_activity_queue_dependencies": "find_stuck_workflows",
-        }.get(name, name)
-        for name, _ in calls
-    ]
+    expected_services = [name for name, _ in calls]
     assert [call[0] for call in services.calls] == expected_services
     assert len({call[1].request_id for call in services.calls}) == len(calls)
     assert all(call[1].principal.subject == "demo-user" for call in services.calls)
@@ -574,14 +513,14 @@ async def test_explicit_query_allowlist_overrides_environment(
     await root.shutdown()
 
 
-def test_generalized_entrypoint_is_default_and_session_one_remains_explicit() -> None:
+def test_consumer_entrypoint_has_no_legacy_aliases() -> None:
     project = Path("pyproject.toml").read_text(encoding="utf-8")
 
     assert 'ops-mcp = "ops_mcp.mcp:main"' in project
-    assert 'ops-mcp-session-one = "ops_mcp.server:main"' in project
-    assert 'ops-mcp-generalized = "ops_mcp.mcp:main"' in project
-    assert 'ops-mcp-direct-reads = "ops_mcp.mcp:main"' in project
-    assert 'ops-mcp-poc = "ops_mcp.mcp:main"' in project
+    assert "ops-mcp-session-one" not in project
+    assert "ops-mcp-generalized" not in project
+    assert "ops-mcp-direct-reads" not in project
+    assert "ops-mcp-poc" not in project
 
 
 def test_invalid_transport_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -589,6 +528,29 @@ def test_invalid_transport_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("OPS_MCP_TRANSPORT", "websocket")
     with pytest.raises(SystemExit, match="OPS_MCP_TRANSPORT"):
+        app.main()
+
+
+def test_unauthenticated_http_requires_explicit_demo_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ops_mcp.mcp import app
+
+    monkeypatch.setenv("OPS_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.delenv("OPS_MCP_ALLOW_INSECURE_HTTP", raising=False)
+
+    with pytest.raises(SystemExit, match="unauthenticated"):
+        app.main()
+
+
+def test_http_requires_stable_continuation_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops_mcp.mcp import app
+
+    monkeypatch.setenv("OPS_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("OPS_MCP_ALLOW_INSECURE_HTTP", "1")
+    monkeypatch.setenv("OPS_MCP_CONTINUATION_SECRET", "too-short")
+
+    with pytest.raises(SystemExit, match="at least 32 bytes"):
         app.main()
 
 

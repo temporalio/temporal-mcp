@@ -1,4 +1,9 @@
-# Migration plan for the current five tools
+# Migration plan for the original five tools (completed)
+
+> Historical record. The layered migration and compatibility-shell removal described here were
+> completed before the first consumer-facing release. References to `server.py`, the catch-all
+> `TemporalGateway`, and legacy analysis below describe the removed starting point, not the current
+> architecture.
 
 ## Goal
 

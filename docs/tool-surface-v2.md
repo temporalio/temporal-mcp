@@ -34,11 +34,11 @@ Do not abandon a suitable composite merely because building blocks could reprodu
 broaden an exact-run question into population analysis without operator intent or a stated
 evidence requirement.
 
-## Migration aliases
+## Retired migration aliases
 
-The following aliases remain for one migration cycle:
+The pre-release migration aliases were removed before consumers could depend on them:
 
-| Preferred | Deprecated compatibility alias |
+| Current tool | Retired pre-release alias |
 |---|---|
 | `search_workflow_runs` | `filter_workflows` |
 | `inspect_workflow_execution` | `diagnose_workflow` |
@@ -51,23 +51,20 @@ RPC. Configuration does not prove that a particular worker supports a query.
 
 ## Defaults and resumability
 
-Preferred population tools own sampling seeds, concurrency, page limits, candidate limits, and
-history limits. These controls are intentionally absent from their normal MCP schemas; deprecated
-expert aliases retain explicit controls during migration. Time fields use `started_at` and
+Population tools own sampling seeds, concurrency, page limits, candidate limits, and history
+limits. These controls are intentionally absent from their normal MCP schemas. Time fields use `started_at` and
 `ended_at`; omitted population windows default to the server's broad bounded window.
 
-Population composites return a signed opaque `continuation_token` while runs remain in the current
-frame or Temporal has another Visibility page. The token binds the target, normalized scope,
-effective time window, sampling seed, schema version, native candidate-frame cursor, and
-inspected/confirmed identity ledgers and cumulative group totals. Tampered tokens or reuse with
-changed scope are rejected. Each response separates `page` from `cumulative` progress and returns
-a compact `next_call`. Only a terminal response may describe its stated scope as complete.
-Continuation advances through arbitrarily large query populations without asking the caller to
-invent timestamp partitions; each response still reports whether its current candidate collection
-was complete.
+Population composites return one signed opaque `continuation_token` when Temporal has another
+Visibility frame. The bounded token contains a keyed scope digest, effective time window, sampling
+seed, schema version, next native cursor, scalar progress counters, and fixed-size group summaries;
+it never contains raw queries or workflow/run identity ledgers. Each call reads a non-overlapping
+frame and advances directly to its next native cursor. Sampling, truncation, failures, or group
+overflow in any frame survive in terminal completeness semantics. Tokens are capped below 8 KiB;
+an oversized opaque native cursor produces a typed safe error. Tampered tokens or reuse with a
+changed target, tool, scope, or time window are rejected.
 
-All preferred paginated tools use only `continuation_token`. Compatibility aliases retain their
-older pagination fields for one migration cycle.
+All paginated tools use only `continuation_token`.
 
 ## Evidence rules
 

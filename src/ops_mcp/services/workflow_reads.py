@@ -52,25 +52,21 @@ from ops_mcp.targets.catalog import TargetCatalog
 from ops_mcp.targets.models import ResolvedTarget
 
 
-class DescribeWorkflowService(Protocol):
+class WorkflowReadService(Protocol):
+    """Cohesive direct-read surface implemented by one service object."""
+
     async def describe_workflow(
         self, context: RequestContext, request: DescribeWorkflowRequest
     ) -> DescribeWorkflowResponse: ...
 
-
-class WorkflowHistorySliceService(Protocol):
     async def get_workflow_history_slice(
         self, context: RequestContext, request: HistorySliceRequest
     ) -> HistorySliceResponse: ...
 
-
-class WorkflowResultService(Protocol):
     async def get_workflow_result(
         self, context: RequestContext, request: GetWorkflowResultRequest
     ) -> GetWorkflowResultResponse: ...
 
-
-class DescribeTaskQueueService(Protocol):
     async def describe_task_queue(
         self, context: RequestContext, request: DescribeTaskQueueRequest
     ) -> DescribeTaskQueueResponse: ...

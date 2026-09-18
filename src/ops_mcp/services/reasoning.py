@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 
 from ops_mcp.analysis.reasoning import (
     AnalysisFinding,
+    DiagnosisAnalysis,
     DiagnosisAnalyzer,
     ResetAnalyzer,
 )
@@ -29,9 +31,6 @@ from ops_mcp.contracts.reasoning import (
     ActivityReplayImpact,
     CommandPreview,
     CompositeInspection,
-    DiagnoseWorkflowRequest,
-    DiagnoseWorkflowResponse,
-    FailureSummary,
     InspectWorkflowExecutionAnswer,
     InspectWorkflowExecutionRequest,
     InspectWorkflowExecutionResponse,
@@ -42,42 +41,46 @@ from ops_mcp.contracts.reasoning import (
     ReplayImpact,
     ResetPoint,
     ResetRecommendation,
-    RetryAssessment,
     TaskQueueSnapshot,
     WorkflowSummary,
 )
-from ops_mcp.facts.history import (
-    ActivityTaskEventAttributes,
-    FailureFact,
-    HistoryReadFact,
-    WorkflowCloseEventAttributes,
-    WorkflowTaskEventAttributes,
-)
+from ops_mcp.facts.history import FailureFact, HistoryReadFact
 from ops_mcp.facts.task_queues import TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.workflows import WorkflowExecutionFact
 from ops_mcp.gateways.history import TemporalHistoryGateway
 from ops_mcp.gateways.task_queues import TemporalTaskQueueGateway
 from ops_mcp.gateways.workflows import TemporalWorkflowGateway
+from ops_mcp.runtime.advanced_budget import FanoutResult, bounded_fanout
 from ops_mcp.runtime.budget import BudgetSnapshot
 from ops_mcp.runtime.context import RequestContext
+from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.services.namespace_reads import NamespaceReadService
 from ops_mcp.targets.catalog import TargetCatalog
 from ops_mcp.targets.models import ResolvedTarget
 
-
-class DiagnoseWorkflowService(Protocol):
-    async def diagnose_workflow(
-        self, context: RequestContext, request: DiagnoseWorkflowRequest
-    ) -> DiagnoseWorkflowResponse: ...
+DIAGNOSTIC_QUEUE_CONCURRENCY = 10
 
 
-class InspectWorkflowExecutionService(Protocol):
+@dataclass(frozen=True)
+class _DiagnosisEvidence:
+    workflow: WorkflowExecutionFact
+    history: HistoryReadFact
+    queue_results: tuple[FanoutResult[tuple[str, TaskQueueKind], TaskQueueFact], ...]
+    queues: tuple[TaskQueueFact, ...]
+    analysis: DiagnosisAnalysis
+
+    @property
+    def queue_errors(self) -> int:
+        return sum(item.error is not None for item in self.queue_results)
+
+
+class ReasoningService(Protocol):
+    """Cohesive single-execution analysis surface."""
+
     async def inspect_workflow_execution(
         self, context: RequestContext, request: InspectWorkflowExecutionRequest
     ) -> InspectWorkflowExecutionResponse: ...
 
-
-class PlanWorkflowResetService(Protocol):
     async def plan_workflow_reset(
         self, context: RequestContext, request: PlanWorkflowResetRequest
     ) -> PlanWorkflowResetResponse: ...
@@ -109,20 +112,32 @@ class DefaultReasoningService:
         self, context: RequestContext, request: InspectWorkflowExecutionRequest
     ) -> InspectWorkflowExecutionResponse:
         """Collect the documented single-run evidence set in one read-only call."""
-        run_id = request.run_id
-        if run_id is None:
-            target = self._catalog.authorize(context.principal, request.target_ref)
-            resolved = await self._workflows.describe(context, target, request.workflow_id, None)
-            run_id = resolved.run_id
-        diagnosis = await self.diagnose_workflow(
+        target = self._catalog.authorize(context.principal, request.target_ref)
+        before = context.budget.snapshot()
+        workflow = await self._workflows.describe(
+            context, target, request.workflow_id, request.run_id
+        )
+        evidence = await self._collect_diagnosis(
             context,
-            DiagnoseWorkflowRequest(
-                target_ref=request.target_ref,
-                workflow_id=request.workflow_id,
-                run_id=run_id,
-                history_event_limit=request.history_event_limit,
-                expected_duration_seconds=request.expected_duration_seconds,
-            ),
+            target,
+            workflow,
+            history_event_limit=request.history_event_limit,
+            expected_duration_seconds=request.expected_duration_seconds,
+        )
+        run_id = workflow.run_id
+        workflow_summary = _workflow_summary(workflow, request.expected_duration_seconds)
+        pending_activities = tuple(_pending_activity(item) for item in workflow.pending_activities)
+        task_queues = tuple(_queue_snapshot(item) for item in evidence.queues)
+        findings = tuple(_public_finding(item) for item in evidence.analysis.findings)
+        history_completion = (
+            Completeness.COMPLETE if evidence.history.complete else Completeness.TRUNCATED
+        )
+        history_inspection = _inspection(
+            context,
+            before,
+            history_completion,
+            events_read=evidence.history.events_scanned,
+            limit=request.history_event_limit,
         )
         unavailable: list[str] = []
         collected = [
@@ -134,7 +149,14 @@ class DefaultReasoningService:
         ]
         query_name = None
         query_value = None
-        warnings = list(diagnosis.warnings)
+        warnings = (
+            []
+            if evidence.history.complete
+            else ["History is truncated; findings apply only to inspected events."]
+        )
+        for item in evidence.queue_results:
+            if item.error is not None:
+                unavailable.append(f"task_queue_snapshot:{item.item[1].value}:{item.item[0]}")
         if request.include_diagnostic_query:
             if self._namespace_reads is None:
                 unavailable.append("diagnostic_query:service_not_configured")
@@ -175,39 +197,37 @@ class DefaultReasoningService:
             collected.append("duration_comparison")
             duration_state = (
                 "exceeds_expected_duration"
-                if diagnosis.workflow.observed_duration_seconds > request.expected_duration_seconds
+                if workflow_summary.observed_duration_seconds > request.expected_duration_seconds
                 else "within_expected_duration"
             )
         else:
             unavailable.append("duration_comparison:no_policy_supplied")
-        if diagnosis.history_inspection.completion is not Completeness.COMPLETE:
+        if history_inspection.completion is not Completeness.COMPLETE:
             unavailable.append("complete_workflow_history:bounded_or_truncated")
 
-        expected_queue_keys = {(diagnosis.workflow.task_queue, "workflow")}
+        expected_queue_keys = {(workflow_summary.task_queue, "workflow")}
         expected_queue_keys.update(
             (activity.activity_task_queue, "activity")
-            for activity in diagnosis.pending_activities
+            for activity in pending_activities
             if activity.activity_task_queue
         )
-        observed_queue_keys = {
-            (queue.task_queue, queue.task_type) for queue in diagnosis.task_queues
-        }
+        observed_queue_keys = {(queue.task_queue, queue.task_type) for queue in task_queues}
         for queue_name, queue_type in sorted(expected_queue_keys - observed_queue_keys):
             unavailable.append(f"task_queue_snapshot:{queue_type}:{queue_name}")
         wait_state = "no_wait_observed"
-        if diagnosis.pending_activities:
+        if pending_activities:
             wait_state = "pending_activity"
-        elif any(item.code == "waiting_on_timer" for item in diagnosis.findings):
+        elif any(item.code == "waiting_on_timer" for item in findings):
             wait_state = "durable_wait"
-        elif diagnosis.workflow.pending_workflow_task:
+        elif workflow_summary.pending_workflow_task:
             wait_state = "pending_workflow_task"
         relevant = tuple(
             item
-            for item in diagnosis.task_queues
-            if (item.task_type == "activity" and diagnosis.pending_activities)
-            or (item.task_type == "workflow" and diagnosis.workflow.pending_workflow_task)
+            for item in task_queues
+            if (item.task_type == "activity" and pending_activities)
+            or (item.task_type == "workflow" and workflow_summary.pending_workflow_task)
         )
-        if not diagnosis.pending_activities and not diagnosis.workflow.pending_workflow_task:
+        if not pending_activities and not workflow_summary.pending_workflow_task:
             dispatch_state = "no_pending_dispatch"
         elif any(item.poller_count == 0 for item in relevant):
             dispatch_state = "dispatch_blocked_now"
@@ -217,10 +237,10 @@ class DefaultReasoningService:
             dispatch_state = "unknown"
         failures = tuple(
             item
-            for item in diagnosis.findings
+            for item in findings
             if any(word in item.code for word in ("fail", "timeout", "nondetermin", "deadlock"))
         )
-        retry_findings = tuple(item for item in diagnosis.findings if "retry" in item.code)
+        retry_findings = tuple(item for item in findings if "retry" in item.code)
         supported = [
             f"duration_state={duration_state} for exact run {request.workflow_id}/{run_id}",
             f"workflow_wait_state={wait_state} for exact run {request.workflow_id}/{run_id}",
@@ -230,21 +250,24 @@ class DefaultReasoningService:
             "current queue state does not establish historical outage duration",
             "Temporal timing evidence alone does not establish root cause",
         ]
-        completion = diagnosis.history_inspection.completion.value
+        completion = history_inspection.completion.value
         if completion == "unknown":
             completion = "partial"
+        if evidence.queue_errors and completion == "complete":
+            completion = "partial"
+        unavailable = list(dict.fromkeys(unavailable))
         return InspectWorkflowExecutionResponse(
-            target_ref=diagnosis.target_ref,
+            target_ref=target.target_ref,
             answer=InspectWorkflowExecutionAnswer(
-                workflow=diagnosis.workflow,
+                workflow=workflow_summary,
                 duration_state=duration_state,
                 progress_state=(
-                    "running" if diagnosis.workflow.status.casefold() == "running" else "terminal"
+                    "running" if workflow_summary.status.casefold() == "running" else "terminal"
                 ),
                 workflow_wait_state=wait_state,
                 current_dispatch_state=dispatch_state,
-                pending_activities=diagnosis.pending_activities,
-                task_queues=diagnosis.task_queues,
+                pending_activities=pending_activities,
+                task_queues=task_queues,
                 failure_findings=failures,
                 retry_findings=retry_findings,
                 diagnostic_query_name=query_name,
@@ -266,7 +289,7 @@ class DefaultReasoningService:
                 ),
             ),
             warnings=tuple(warnings),
-            observed_at=diagnosis.workflow.observed_at or context.budget.deadline,
+            observed_at=workflow_summary.observed_at or context.budget.deadline,
             recommended_followups=(
                 RecommendedFollowup(
                     intent="recheck_exact_run",
@@ -283,70 +306,41 @@ class DefaultReasoningService:
             ),
         )
 
-    async def diagnose_workflow(
-        self, context: RequestContext, request: DiagnoseWorkflowRequest
-    ) -> DiagnoseWorkflowResponse:
-        target = self._catalog.authorize(context.principal, request.target_ref)
-        before = context.budget.snapshot()
-        workflow = await self._workflows.describe(
-            context, target, request.workflow_id, request.run_id
-        )
+    async def _collect_diagnosis(
+        self,
+        context: RequestContext,
+        target: ResolvedTarget,
+        workflow: WorkflowExecutionFact,
+        *,
+        history_event_limit: int,
+        expected_duration_seconds: float | None,
+    ) -> _DiagnosisEvidence:
         history = await self._history.read(
             context,
             target,
-            request.workflow_id,
-            request.run_id,
-            page_size=min(250, request.history_event_limit),
-            max_events=request.history_event_limit,
+            workflow.workflow_id,
+            workflow.run_id,
+            page_size=min(250, history_event_limit),
+            max_events=history_event_limit,
         )
-        queues = await self._diagnostic_queues(context, target, workflow, history)
+        queue_results = await self._diagnostic_queues(context, target, workflow, history)
+        for item in queue_results:
+            if item.error is not None and _systemic_queue_error(item.error):
+                raise item.error
+        queues = tuple(item.value for item in queue_results if item.value is not None)
         analysis = self._diagnosis.analyze(
             workflow,
             history,
             queues,
-            expected_duration_seconds=request.expected_duration_seconds,
+            expected_duration_seconds=expected_duration_seconds,
         )
-        completion = Completeness.COMPLETE if history.complete else Completeness.TRUNCATED
-        warnings = (
-            ()
-            if history.complete
-            else ("History is truncated; findings apply only to inspected events.",)
+        return _DiagnosisEvidence(
+            workflow=workflow,
+            history=history,
+            queue_results=queue_results,
+            queues=queues,
+            analysis=analysis,
         )
-        response = DiagnoseWorkflowResponse(
-            target_ref=target.target_ref,
-            workflow=_workflow_summary(workflow, request.expected_duration_seconds),
-            pending_activities=tuple(
-                PendingActivitySummary(
-                    activity_id=item.activity_id,
-                    activity_type=item.activity_type,
-                    state=item.state,
-                    attempt=item.attempt,
-                    maximum_attempts=item.maximum_attempts,
-                    last_failure=_failure_text(item.last_failure),
-                    activity_task_queue=item.activity_task_queue,
-                    last_heartbeat_time=item.last_heartbeat_time,
-                    heartbeat_details=_decoded_payloads(item.heartbeat_details),
-                )
-                for item in workflow.pending_activities
-            ),
-            failures=_failure_summaries(history),
-            task_queues=tuple(_queue_snapshot(item) for item in queues),
-            findings=tuple(_public_finding(item) for item in analysis.findings),
-            retry_assessment=RetryAssessment(
-                assessment=analysis.retry.assessment,
-                rationale=analysis.retry.rationale,
-                missing_evidence=analysis.retry.missing_evidence,
-            ),
-            history_inspection=_inspection(
-                context,
-                before,
-                completion,
-                events_read=history.events_scanned,
-                limit=request.history_event_limit,
-            ),
-            warnings=warnings,
-        )
-        return _charge_output(context, response)
 
     async def plan_workflow_reset(
         self, context: RequestContext, request: PlanWorkflowResetRequest
@@ -488,7 +482,7 @@ class DefaultReasoningService:
         target: ResolvedTarget,
         workflow: WorkflowExecutionFact,
         history: HistoryReadFact,
-    ) -> tuple[TaskQueueFact, ...]:
+    ) -> tuple[FanoutResult[tuple[str, TaskQueueKind], TaskQueueFact], ...]:
         del history
         queue_keys: set[tuple[str, TaskQueueKind]] = {(workflow.task_queue, TaskQueueKind.WORKFLOW)}
         queue_keys.update(
@@ -496,10 +490,16 @@ class DefaultReasoningService:
             for item in workflow.pending_activities
             if item.activity_task_queue
         )
-        snapshots = []
-        for queue, kind in sorted(queue_keys, key=lambda item: (item[0], item[1].value)):
-            snapshots.append(await self._task_queues.describe(context, target, queue, kind))
-        return tuple(snapshots)
+        ordered = tuple(sorted(queue_keys, key=lambda item: (item[0], item[1].value)))
+
+        async def describe(key: tuple[str, TaskQueueKind]) -> TaskQueueFact:
+            return await self._task_queues.describe(context, target, key[0], key[1])
+
+        return await bounded_fanout(
+            ordered,
+            concurrency=DIAGNOSTIC_QUEUE_CONCURRENCY,
+            operation=describe,
+        )
 
 
 def _workflow_summary(
@@ -520,6 +520,32 @@ def _workflow_summary(
     )
 
 
+def _pending_activity(item) -> PendingActivitySummary:
+    return PendingActivitySummary(
+        activity_id=item.activity_id,
+        activity_type=item.activity_type,
+        state=item.state,
+        attempt=item.attempt,
+        maximum_attempts=item.maximum_attempts,
+        last_failure=_failure_text(item.last_failure),
+        activity_task_queue=item.activity_task_queue,
+        last_heartbeat_time=item.last_heartbeat_time,
+        heartbeat_details=_decoded_payloads(item.heartbeat_details),
+    )
+
+
+def _systemic_queue_error(error: Exception) -> bool:
+    if not isinstance(error, OpsMcpError):
+        return False
+    return error.code in {
+        ErrorCode.TARGET_NOT_AUTHORIZED,
+        ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
+        ErrorCode.TEMPORAL_UNREACHABLE,
+        ErrorCode.DEADLINE_EXCEEDED,
+        ErrorCode.BUDGET_EXHAUSTED,
+    }
+
+
 def _decoded_payloads(value):
     from ops_mcp.contracts.workflow_reads import DecodedPayloadsOutput
 
@@ -529,59 +555,6 @@ def _decoded_payloads(value):
     )
 
 
-def _failure_summaries(history: HistoryReadFact) -> tuple[FailureSummary, ...]:
-    scheduled: dict[int, ActivityTaskEventAttributes] = {}
-    started: dict[int, ActivityTaskEventAttributes] = {}
-    result: list[FailureSummary] = []
-    for event in history.events:
-        attrs = event.attributes
-        if isinstance(attrs, ActivityTaskEventAttributes):
-            if attrs.phase == "scheduled":
-                scheduled[event.event_id] = attrs
-            elif attrs.phase == "started":
-                started[event.event_id] = attrs
-            elif attrs.phase in {"failed", "timed_out"}:
-                schedule = scheduled.get(attrs.scheduled_event_id)
-                start = started.get(attrs.started_event_id)
-                result.append(
-                    FailureSummary(
-                        event_id=event.event_id,
-                        event_type=event.event_type,
-                        activity_id=attrs.activity_id
-                        or (schedule.activity_id if schedule else None),
-                        activity_type=attrs.activity_type
-                        or (schedule.activity_type if schedule else None),
-                        attempt=attrs.attempt or (start.attempt if start else None),
-                        retry_state=attrs.retry_state,
-                        messages=_failure_messages(attrs.failure),
-                        application_type=_failure_type(attrs.failure),
-                    )
-                )
-        elif isinstance(attrs, WorkflowTaskEventAttributes) and attrs.phase in {
-            "failed",
-            "timed_out",
-        }:
-            result.append(
-                FailureSummary(
-                    event_id=event.event_id,
-                    event_type=event.event_type,
-                    messages=_failure_messages(attrs.failure),
-                    application_type=_failure_type(attrs.failure),
-                )
-            )
-        elif isinstance(attrs, WorkflowCloseEventAttributes) and attrs.state != "completed":
-            result.append(
-                FailureSummary(
-                    event_id=event.event_id,
-                    event_type=event.event_type,
-                    retry_state=attrs.retry_state,
-                    messages=_failure_messages(attrs.failure),
-                    application_type=_failure_type(attrs.failure),
-                )
-            )
-    return tuple(result)
-
-
 def _failure_messages(failure: FailureFact | None) -> tuple[str, ...]:
     result: list[str] = []
     while failure is not None:
@@ -589,14 +562,6 @@ def _failure_messages(failure: FailureFact | None) -> tuple[str, ...]:
             result.append(failure.message)
         failure = failure.cause
     return tuple(result)
-
-
-def _failure_type(failure: FailureFact | None) -> str | None:
-    while failure is not None:
-        if failure.application_type:
-            return failure.application_type
-        failure = failure.cause
-    return None
 
 
 def _failure_text(failure: FailureFact | None) -> str | None:

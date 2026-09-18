@@ -5,30 +5,15 @@ description = "Read-only Temporal operations MCP prototype"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.27.2,<2",
+  "mcp>=1.29,<1.30",
+  "protobuf>=7.35,<8",
+  "pydantic>=2.13,<3",
   "pyyaml>=6.0,<7",
-  "temporalio>=1.18.0,<2",
+  "temporalio>=1.31,<1.32",
 ]
 
 [project.scripts]
 ops-mcp = "ops_mcp.mcp:main"
-ops-mcp-generalized = "ops_mcp.mcp:main"
-ops-mcp-direct-reads = "ops_mcp.mcp:main"
-ops-mcp-poc = "ops_mcp.mcp:main"
-ops-mcp-session-one = "ops_mcp.server:main"
-ops-mcp-demo-worker = "ops_mcp.demo.worker:main"
-ops-mcp-demo-seed = "ops_mcp.demo.seed:main"
-ops-mcp-demo-session = "ops_mcp.demo.session:main"
-ops-mcp-stuck-worker = "ops_mcp.demo_stuck.worker:main"
-ops-mcp-stuck-seed = "ops_mcp.demo_stuck.seed:main"
-ops-mcp-nondeterminism-v1-worker = "ops_mcp.demo_nondeterminism.worker_v1:main"
-ops-mcp-nondeterminism-v2-worker = "ops_mcp.demo_nondeterminism.worker_v2:main"
-ops-mcp-nondeterminism-seed = "ops_mcp.demo_nondeterminism.seed:main"
-ops-mcp-nondeterminism-expose = "ops_mcp.demo_nondeterminism.expose:main"
-ops-mcp-incident-workflow-worker = "ops_mcp.demo_incident.workflow_worker:main"
-ops-mcp-incident-activity-worker = "ops_mcp.demo_incident.activity_worker:main"
-ops-mcp-incident-seed = "ops_mcp.demo_incident.seed:main"
-ops-mcp-acceptance = "ops_mcp.acceptance.runner:main"
 
 [dependency-groups]
 dev = [

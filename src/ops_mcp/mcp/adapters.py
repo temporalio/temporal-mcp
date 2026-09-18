@@ -26,15 +26,7 @@ from ops_mcp.contracts import (
     DescribeTaskQueueResponse,
     DescribeWorkflowRequest,
     DescribeWorkflowResponse,
-    DiagnoseWorkflowRequest,
-    DiagnoseWorkflowResponse,
     FailureClass,
-    FilterWorkflowsRequest,
-    FilterWorkflowsResponse,
-    FindStuckWorkflowsRequest,
-    FindStuckWorkflowsResponse,
-    FindWorkflowTaskFailuresRequest,
-    FindWorkflowTaskFailuresResponse,
     GetVisibilitySchemaRequest,
     GetVisibilitySchemaResponse,
     GetWorkflowResultRequest,
@@ -42,9 +34,11 @@ from ops_mcp.contracts import (
     HistorySliceRequest,
     HistorySliceResponse,
     IncidentTimeWindow,
+    InspectActivityQueueDependenciesRequest,
     InspectActivityQueueDependenciesResponse,
     InspectWorkflowExecutionRequest,
     InspectWorkflowExecutionResponse,
+    InspectWorkflowTaskFailuresRequest,
     InspectWorkflowTaskFailuresResponse,
     ListApprovedWorkflowQueriesRequest,
     ListApprovedWorkflowQueriesResponse,
@@ -62,16 +56,12 @@ from ops_mcp.contracts import (
     ResolveTargetRequest,
     ResolveTargetResponse,
     SamplingStrategy,
-    SearchWorkflowRunsAnswer,
+    SearchWorkflowRunsRequest,
     SearchWorkflowRunsResponse,
     WorkflowCountGroupBy,
     WorkflowField,
 )
-from ops_mcp.contracts.population import (
-    PopulationNextCall,
-    PopulationProgress,
-    PopulationProgressGroup,
-)
+from ops_mcp.contracts.population import PopulationProgress, PopulationProgressGroup
 from ops_mcp.contracts.primitives import AnswerConstraints
 from ops_mcp.contracts.workflow_reads import EventIdRange
 from ops_mcp.mcp.composition import CompositionRoot
@@ -81,6 +71,8 @@ from ops_mcp.mcp.errors import (
     raise_service_error,
 )
 from ops_mcp.runtime import (
+    MAX_CUMULATIVE_GROUPS,
+    MAX_DISCOVERED_ACTIVITY_QUEUES,
     BasicBudgetLimits,
     ContinuationCodec,
     ContinuationState,
@@ -95,8 +87,6 @@ READ_ONLY = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=True,
 )
-_CONTINUATIONS = ContinuationCodec()
-_SEEN_POPULATION_SCOPES: set[tuple[str, str, str]] = set()
 TargetRefInput = Annotated[
     str, Field(description="Opaque target reference returned by resolve_target.")
 ]
@@ -108,6 +98,8 @@ VisibilityQueryInput = Annotated[
 
 
 def register_direct_read_tools(server: FastMCP[CompositionRoot], root: CompositionRoot) -> None:
+    continuations = ContinuationCodec()
+
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def check_connection(
         target_ref: TargetRefInput,
@@ -127,7 +119,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.connection.check_connection(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="check_connection", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def resolve_target(
@@ -145,7 +139,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return root.services.targets.resolve_target(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(exc, context=context, tool_name="resolve_target")
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def search_workflow_runs(
@@ -173,64 +167,27 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
     ) -> SearchWorkflowRunsResponse:
         """Search one bounded page of workflow runs; use count_workflows for population size."""
         try:
-            request = FilterWorkflowsRequest(
+            request = SearchWorkflowRunsRequest(
                 target_ref=target_ref,
                 query=query,
                 fields=(
                     tuple(fields)
                     if fields
-                    else FilterWorkflowsRequest.model_fields["fields"].default
+                    else SearchWorkflowRunsRequest.model_fields["fields"].default
                 ),
                 custom_search_attributes=tuple(custom_search_attributes or ()),
                 page_size=page_size,
-                page_token=continuation_token,
+                continuation_token=continuation_token,
             )
         except ValidationError as exc:
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            response = await root.services.visibility.filter_workflows(context, request)
-            return SearchWorkflowRunsResponse(
-                target_ref=response.target_ref,
-                answer=SearchWorkflowRunsAnswer(
-                    query=response.answer.query,
-                    custom_search_attributes=response.answer.custom_search_attributes,
-                    workflows=response.answer.workflows,
-                    returned=response.answer.returned,
-                    continuation_token=response.answer.next_page_token,
-                ),
-                inspection=response.inspection,
-                warnings=response.warnings,
-            )
+            return await root.services.visibility.search_workflow_runs(context, request)
         except Exception as exc:
-            raise_service_error(exc)
-
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def filter_workflows(
-        target_ref: str,
-        query: str,
-        fields: list[WorkflowField],
-        custom_search_attributes: list[str] | None = None,
-        page_size: Annotated[int, Field(ge=1, le=200)] = 100,
-        page_token: str | None = None,
-    ) -> FilterWorkflowsResponse:
-        """Deprecated alias: use search_workflow_runs for Visibility searches."""
-        try:
-            request = FilterWorkflowsRequest(
-                target_ref=target_ref,
-                query=query,
-                fields=tuple(fields),
-                custom_search_attributes=tuple(custom_search_attributes or ()),
-                page_size=page_size,
-                page_token=page_token,
+            raise_service_error(
+                exc, context=context, tool_name="search_workflow_runs", target_ref=target_ref
             )
-        except ValidationError as exc:
-            raise_request_validation_error(exc)
-        context = root.contexts.create()
-        try:
-            return await root.services.visibility.filter_workflows(context, request)
-        except Exception as exc:
-            raise_service_error(exc)
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def count_workflows(
@@ -254,7 +211,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.visibility.count_workflows(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="count_workflows", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def get_visibility_schema(target_ref: TargetRefInput) -> GetVisibilitySchemaResponse:
@@ -267,7 +226,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.visibility.get_visibility_schema(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="get_visibility_schema", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def describe_workflow(
@@ -288,9 +249,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            return await root.services.describe_workflow.describe_workflow(context, request)
+            return await root.services.workflow_reads.describe_workflow(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="describe_workflow", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def get_workflow_history_slice(
@@ -337,9 +300,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            return await root.services.workflow_history.get_workflow_history_slice(context, request)
+            return await root.services.workflow_reads.get_workflow_history_slice(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="get_workflow_history_slice", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def get_workflow_result(
@@ -367,9 +332,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            return await root.services.workflow_result.get_workflow_result(context, request)
+            return await root.services.workflow_reads.get_workflow_result(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="get_workflow_result", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def describe_task_queue(
@@ -391,9 +358,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            return await root.services.task_queue.describe_task_queue(context, request)
+            return await root.services.workflow_reads.describe_task_queue(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="describe_task_queue", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def inspect_workflow_execution(
@@ -430,36 +399,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create(limits=BasicBudgetLimits(history_events=history_event_limit))
         try:
-            return await root.services.diagnose_workflow.inspect_workflow_execution(
-                context, request
-            )
+            return await root.services.reasoning.inspect_workflow_execution(context, request)
         except Exception as exc:
-            raise_service_error(exc)
-
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def diagnose_workflow(
-        target_ref: str,
-        workflow_id: str,
-        run_id: str,
-        history_event_limit: Annotated[int, Field(ge=1, le=20_000)] = 2_000,
-        expected_duration_seconds: Annotated[float | None, Field(gt=0)] = None,
-    ) -> DiagnoseWorkflowResponse:
-        """Deprecated alias: use inspect_workflow_execution for one-run diagnosis."""
-        try:
-            request = DiagnoseWorkflowRequest(
-                target_ref=target_ref,
-                workflow_id=workflow_id,
-                run_id=run_id,
-                history_event_limit=history_event_limit,
-                expected_duration_seconds=expected_duration_seconds,
+            raise_service_error(
+                exc, context=context, tool_name="inspect_workflow_execution", target_ref=target_ref
             )
-        except ValidationError as exc:
-            raise_request_validation_error(exc)
-        context = root.contexts.create(limits=BasicBudgetLimits(history_events=history_event_limit))
-        try:
-            return await root.services.diagnose_workflow.diagnose_workflow(context, request)
-        except Exception as exc:
-            raise_service_error(exc)
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def plan_workflow_reset(
@@ -487,9 +431,11 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_request_validation_error(exc)
         context = root.contexts.create()
         try:
-            return await root.services.plan_workflow_reset.plan_workflow_reset(context, request)
+            return await root.services.reasoning.plan_workflow_reset(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="plan_workflow_reset", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def assess_workflow_recovery(
@@ -528,7 +474,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.population.assess_workflow_recovery(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="assess_workflow_recovery", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def inspect_workflow_task_failures(
@@ -570,7 +518,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 limits,
             )
             state = (
-                _CONTINUATIONS.decode(
+                continuations.decode(
                     continuation_token,
                     tool="inspect_workflow_task_failures",
                     target_ref=target_ref,
@@ -591,7 +539,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 started_at_or_after=effective_started_at,
                 started_before=effective_ended_at,
             )
-            request = FindWorkflowTaskFailuresRequest(
+            request = InspectWorkflowTaskFailuresRequest(
                 target_ref=target_ref,
                 query=query,
                 time_window=window,
@@ -601,14 +549,12 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 sample_seed=(
                     state.sample_seed
                     if state
-                    else _CONTINUATIONS.stable_seed(
+                    else continuations.stable_seed(
                         tool="inspect_workflow_task_failures",
                         target_ref=target_ref,
                         scope=scope,
                     )
                 ),
-                inspection_offset=0,
-                excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
                 group_by_custom_search_attributes=tuple(group_by_custom_search_attributes or ()),
             )
@@ -620,15 +566,18 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_invalid_argument(str(exc))
         context = _population_context(root, request.limits)
         try:
-            response = await root.services.population.find_workflow_task_failures(context, request)
+            response = await root.services.population.inspect_workflow_task_failures(
+                context, request
+            )
             preferred = _with_population_continuation(
                 response,
+                context=context,
                 state=state,
+                continuations=continuations,
                 tool="inspect_workflow_task_failures",
                 target_ref=target_ref,
                 scope=scope,
                 sample_seed=request.sample_seed,
-                offset=state.inspection_offset if state else 0,
                 started_at=request.time_window.started_at_or_after,
                 ended_at=request.time_window.started_before,
                 confirmed=lambda run: any(
@@ -641,42 +590,15 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                     }
                     for finding in run.findings
                 ),
-                candidate_page_token=request.candidate_page_token,
             )
-            return InspectWorkflowTaskFailuresResponse.model_validate(preferred.model_dump())
+            return preferred
         except Exception as exc:
-            raise_service_error(exc)
-
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def find_workflow_task_failures(
-        target_ref: str,
-        query: str,
-        time_window: PopulationTimeWindow,
-        limits: PopulationLimits,
-        sampling_strategy: SamplingStrategy,
-        sample_seed: str,
-        failure_class: FailureClass | None = None,
-        group_by_custom_search_attributes: list[str] | None = None,
-    ) -> FindWorkflowTaskFailuresResponse:
-        """Compatibility alias; prefer inspect_workflow_task_failures."""
-        try:
-            request = FindWorkflowTaskFailuresRequest(
+            raise_service_error(
+                exc,
+                context=context,
+                tool_name="inspect_workflow_task_failures",
                 target_ref=target_ref,
-                query=query,
-                time_window=time_window,
-                failure_class=failure_class,
-                limits=limits,
-                sampling_strategy=sampling_strategy,
-                sample_seed=sample_seed,
-                group_by_custom_search_attributes=tuple(group_by_custom_search_attributes or ()),
             )
-        except ValidationError as exc:
-            raise_request_validation_error(exc)
-        context = _population_context(root, request.limits)
-        try:
-            return await root.services.population.find_workflow_task_failures(context, request)
-        except Exception as exc:
-            raise_service_error(exc)
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def inspect_activity_queue_dependencies(
@@ -726,7 +648,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 limits,
             )
             state = (
-                _CONTINUATIONS.decode(
+                continuations.decode(
                     continuation_token,
                     tool="inspect_activity_queue_dependencies",
                     target_ref=target_ref,
@@ -743,7 +665,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             effective_ended_at = (
                 datetime.fromisoformat(state.ended_at) if state and state.ended_at else ended_at
             ) or now
-            request = FindStuckWorkflowsRequest(
+            request = InspectActivityQueueDependenciesRequest(
                 target_ref=target_ref,
                 query=query,
                 time_window=PopulationTimeWindow(
@@ -756,14 +678,12 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 sample_seed=(
                     state.sample_seed
                     if state
-                    else _CONTINUATIONS.stable_seed(
+                    else continuations.stable_seed(
                         tool="inspect_activity_queue_dependencies",
                         target_ref=target_ref,
                         scope=scope,
                     )
                 ),
-                inspection_offset=0,
-                excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
                 require_running_and_duration=False,
                 activity_task_queues=tuple(activity_task_queues or ()),
@@ -777,15 +697,18 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_invalid_argument(str(exc))
         context = _population_context(root, request.limits)
         try:
-            response = await root.services.population.find_stuck_workflows(context, request)
+            response = await root.services.population.inspect_activity_queue_dependencies(
+                context, request
+            )
             preferred = _with_population_continuation(
                 response,
+                context=context,
                 state=state,
+                continuations=continuations,
                 tool="inspect_activity_queue_dependencies",
                 target_ref=target_ref,
                 scope=scope,
                 sample_seed=request.sample_seed,
-                offset=request.inspection_offset,
                 started_at=request.time_window.started_at_or_after,
                 ended_at=request.time_window.started_before,
                 confirmed=lambda run: run.activity_queue_membership == "confirmed",
@@ -794,44 +717,15 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                     for snapshot in response.answer.task_queues
                     if snapshot.task_type == "activity"
                 ),
-                candidate_page_token=request.candidate_page_token,
             )
-            return InspectActivityQueueDependenciesResponse.model_validate(preferred.model_dump())
+            return preferred
         except Exception as exc:
-            raise_service_error(exc)
-
-    @server.tool(annotations=READ_ONLY, structured_output=True)
-    async def find_stuck_workflows(
-        target_ref: str,
-        query: str,
-        time_window: PopulationTimeWindow,
-        minimum_open_duration_seconds: Annotated[float, Field(gt=0)],
-        limits: PopulationLimits,
-        sampling_strategy: SamplingStrategy,
-        sample_seed: str,
-        activity_task_queue: str | None = None,
-        group_by_custom_search_attributes: list[str] | None = None,
-    ) -> FindStuckWorkflowsResponse:
-        """Deprecated alias; prefer inspect_activity_queue_dependencies."""
-        try:
-            request = FindStuckWorkflowsRequest(
+            raise_service_error(
+                exc,
+                context=context,
+                tool_name="inspect_activity_queue_dependencies",
                 target_ref=target_ref,
-                query=query,
-                time_window=time_window,
-                minimum_open_duration_seconds=minimum_open_duration_seconds,
-                limits=limits,
-                sampling_strategy=sampling_strategy,
-                sample_seed=sample_seed,
-                activity_task_queue=activity_task_queue,
-                group_by_custom_search_attributes=tuple(group_by_custom_search_attributes or ()),
             )
-        except ValidationError as exc:
-            raise_request_validation_error(exc)
-        context = _population_context(root, request.limits)
-        try:
-            return await root.services.population.find_stuck_workflows(context, request)
-        except Exception as exc:
-            raise_service_error(exc)
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def analyze_incident_impact(
@@ -845,12 +739,8 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 )
             ),
         ],
-        started_at: Annotated[
-            datetime, Field(description="Absolute incident start time.")
-        ],
-        ended_at: Annotated[
-            datetime, Field(description="Absolute incident end time.")
-        ],
+        started_at: Annotated[datetime, Field(description="Absolute incident start time.")],
+        ended_at: Annotated[datetime, Field(description="Absolute incident end time.")],
         affected_activity_task_queues: Annotated[
             list[str] | None,
             Field(description="Known affected activity queues; omit for bounded discovery."),
@@ -890,7 +780,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 resolved_limits,
             )
             state = (
-                _CONTINUATIONS.decode(
+                continuations.decode(
                     continuation_token,
                     tool="analyze_incident_impact",
                     target_ref=target_ref,
@@ -910,14 +800,12 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 sample_seed=(
                     state.sample_seed
                     if state
-                    else _CONTINUATIONS.stable_seed(
+                    else continuations.stable_seed(
                         tool="analyze_incident_impact",
                         target_ref=target_ref,
                         scope=scope,
                     )
                 ),
-                inspection_offset=0,
-                excluded_run_identities=state.inspected_run_ledger if state else (),
                 candidate_page_token=state.candidate_page_token if state else None,
                 group_by_custom_search_attributes=grouping,
             )
@@ -932,22 +820,24 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             response = await root.services.population.analyze_incident_impact(context, request)
             return _with_population_continuation(
                 response,
+                context=context,
                 state=state,
+                continuations=continuations,
                 tool="analyze_incident_impact",
                 target_ref=target_ref,
                 scope=scope,
                 sample_seed=request.sample_seed,
-                offset=request.inspection_offset,
                 started_at=request.incident_window.started_at,
                 ended_at=request.incident_window.ended_at,
                 confirmed=lambda run: run.classification == "confirmed_historical_impact",
                 discovered_activity_task_queues=(
                     response.scope.discovered_activity_task_queues if response.scope else ()
                 ),
-                candidate_page_token=request.candidate_page_token,
             )
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="analyze_incident_impact", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def list_schedules(
@@ -983,7 +873,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.namespace_reads.list_schedules(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="list_schedules", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def describe_schedule(
@@ -1014,7 +906,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.namespace_reads.describe_schedule(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="describe_schedule", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def list_approved_workflow_queries(
@@ -1035,7 +929,12 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return root.services.namespace_reads.list_approved_workflow_queries(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc,
+                context=context,
+                tool_name="list_approved_workflow_queries",
+                target_ref=target_ref,
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def query_workflow(
@@ -1060,7 +959,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.namespace_reads.query_workflow(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="query_workflow", target_ref=target_ref
+            )
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def list_batch_operations(
@@ -1097,7 +998,9 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         try:
             return await root.services.namespace_reads.list_batch_operations(context, request)
         except Exception as exc:
-            raise_service_error(exc)
+            raise_service_error(
+                exc, context=context, tool_name="list_batch_operations", target_ref=target_ref
+            )
 
 
 def _population_context(root: CompositionRoot, limits: PopulationLimits) -> RequestContext:
@@ -1169,84 +1072,109 @@ def _dependency_scope(
 def _with_population_continuation(
     response,
     *,
+    context: RequestContext | None = None,
     state: ContinuationState | None,
+    continuations: ContinuationCodec,
     tool: str,
     target_ref: str,
     scope: str,
     sample_seed: str,
-    offset: int,
     started_at: datetime,
     ended_at: datetime,
     confirmed,
     discovered_activity_task_queues: tuple[str, ...] = (),
-    candidate_page_token: str | None,
 ):
-    inspected_this_call = response.inspection.sample_size
-    next_offset = offset + inspected_this_call
-    remaining_in_frame = inspected_this_call < response.inspection.candidate_frame_size
+    original_size = len(response.model_dump_json().encode("utf-8"))
     next_candidate_page_token = response.inspection.candidate_next_page_token
-    prior_inspected = state.inspected_run_ledger if state else ()
-    prior_confirmed = state.confirmed_run_ledger if state else ()
-    inspected = tuple(f"{run.workflow_id}\0{run.run_id}" for run in response.answer.runs)
-    matched = tuple(
-        f"{run.workflow_id}\0{run.run_id}" for run in response.answer.runs if confirmed(run)
+    stalled_cursor = (
+        response.inspection.candidate_collection_stop_reason == "stalled_page_token"
     )
-    inspected_ledger = tuple(dict.fromkeys((*prior_inspected, *inspected)))
-    confirmed_ledger = tuple(dict.fromkeys((*prior_confirmed, *matched)))
-    discovered_queues = tuple(
-        dict.fromkeys(
-            (
-                *((state.discovered_activity_task_queues if state else ())),
-                *discovered_activity_task_queues,
-            )
-        )
+    raw_has_more = next_candidate_page_token is not None
+    has_next = raw_has_more and not stalled_cursor
+    inspected = len(response.answer.runs)
+    matched = sum(confirmed(run) for run in response.answer.runs)
+    discovered = sorted(
+        set(state.discovered_activity_task_queues if state else ())
+        | set(discovered_activity_task_queues)
+    )
+    discovered_queues = tuple(discovered[:MAX_DISCOVERED_ACTIVITY_QUEUES])
+    discovered_overflow = (state.discovered_activity_task_queues_overflow if state else 0) + max(
+        0, len(discovered) - MAX_DISCOVERED_ACTIVITY_QUEUES
     )
     page_groups = _population_progress_groups(response)
     group_counts: dict[tuple[str, str], int] = {
         (dimension, values): count
-        for dimension, values, count in (
-            state.cumulative_group_counts if state else ()
-        )
+        for dimension, values, count in (state.cumulative_group_counts if state else ())
     }
     for group in page_groups:
         serialized = json.dumps(group.values, sort_keys=True, separators=(",", ":"))
         key = (group.dimension, serialized)
         group_counts[key] = group_counts.get(key, 0) + group.confirmed
+    sorted_group_counts = sorted(group_counts.items())
+    group_overflow = (state.cumulative_group_overflow if state else 0) + max(
+        0, len(sorted_group_counts) - MAX_CUMULATIVE_GROUPS
+    )
+    bounded_group_counts = dict(sorted_group_counts[:MAX_CUMULATIVE_GROUPS])
     cumulative_groups = tuple(
         PopulationProgressGroup(
             dimension=dimension,
             values=json.loads(values),
             confirmed=count,
         )
-        for (dimension, values), count in sorted(group_counts.items())
+        for (dimension, values), count in bounded_group_counts.items()
     )
     page = PopulationProgress(
-        inspected=len(inspected),
-        confirmed=len(matched),
+        inspected=inspected,
+        confirmed=matched,
         inspection_failures=response.inspection.inspection_failures,
         groups=page_groups,
     )
     cumulative_failures = (
-        (state.cumulative_inspection_failures if state else 0)
-        + response.inspection.inspection_failures
-    )
+        state.cumulative_inspection_failures if state else 0
+    ) + response.inspection.inspection_failures
     cumulative_histories = (
-        (state.cumulative_histories_inspected if state else 0)
-        + response.inspection.histories_inspected
+        state.cumulative_histories_inspected if state else 0
+    ) + response.inspection.histories_inspected
+    cumulative_candidates_observed = (
+        state.cumulative_candidates_observed if state else 0
+    ) + response.inspection.candidate_frame_size
+    cumulative_candidates_selected = (
+        state.cumulative_candidates_selected if state else 0
+    ) + response.inspection.sample_size
+    cumulative_runs_attempted = (
+        state.cumulative_runs_attempted if state else 0
+    ) + response.inspection.sample_size
+    cumulative_inspected = (state.cumulative_runs_inspected if state else 0) + inspected
+    cumulative_confirmed = (state.cumulative_confirmed if state else 0) + matched
+    cumulative_temporal_calls = (
+        state.cumulative_temporal_calls if state else 0
+    ) + response.inspection.temporal_calls
+    cumulative_pages_read = (
+        state.cumulative_pages_read if state else 0
+    ) + response.inspection.pages_read
+    cumulative_history_events_read = (
+        state.cumulative_history_events_read if state else 0
+    ) + response.inspection.history_events_read
+    cumulative_candidate_collection_pages = (
+        state.cumulative_candidate_collection_pages if state else 0
+    ) + response.inspection.candidate_collection_pages
+    cumulative_task_queues_inspected = (
+        state.cumulative_task_queues_inspected if state else 0
+    ) + response.inspection.task_queues_inspected
+    cumulative_history_window_truncated = (
+        state.cumulative_history_window_truncated if state else False
+    ) or response.inspection.history_window_truncated
+    cumulative_exhausted_dimension = (
+        (state.cumulative_exhausted_dimension if state else None)
+        or response.inspection.exhausted_dimension
     )
     cumulative = PopulationProgress(
-        inspected=len(inspected_ledger),
-        confirmed=len(confirmed_ledger),
+        inspected=cumulative_inspected,
+        confirmed=cumulative_confirmed,
         inspection_failures=cumulative_failures,
         groups=cumulative_groups,
     )
     public_update = {
-        "cumulative_inspected_identities": tuple(
-            value.replace("\0", "/") for value in inspected_ledger
-        ),
-        "cumulative_confirmed_identities": tuple(
-            value.replace("\0", "/") for value in confirmed_ledger
-        ),
         "page": page,
         "cumulative": cumulative,
         "answer_constraints": AnswerConstraints(
@@ -1254,43 +1182,76 @@ def _with_population_continuation(
                 "returned exact-run evidence and cumulative totals within the reported scope",
             ),
             must_not_claim=(
-                "complete population impact while next_call is present",
+                "complete population impact while continuation_token is present",
                 "counts beyond the explicitly reported candidate and queue scope",
                 "approximate backlog task count as a unique-workflow count",
             ),
         ),
     }
-    can_advance_frame = (
-        not response.inspection.candidate_collection_complete
-        and next_candidate_page_token is not None
-    )
-    has_next = remaining_in_frame or can_advance_frame
-    scope_key = (tool, target_ref, normalize_query(scope))
     warnings = list(response.warnings)
-    if state is None and scope_key in _SEEN_POPULATION_SCOPES:
-        warnings.append(
-            "This scope was started previously without a continuation token; cumulative totals "
-            "restart from this call. Use next_call unchanged to preserve the investigation chain."
-        )
-    _SEEN_POPULATION_SCOPES.add(scope_key)
+    page_sampled = response.inspection.sample_size < response.inspection.candidate_frame_size
+    cumulative_sampled = (state.cumulative_sampled if state else False) or page_sampled
     cumulative_incomplete = (state.cumulative_incomplete if state else False) or (
         response.inspection.completion in {"partial", "truncated", "budget_exhausted"}
-    )
+    ) or stalled_cursor
+    if stalled_cursor:
+        warnings.append(
+            "Visibility pagination returned an unchanged cursor; continuation stopped to avoid "
+            "repeating the same candidate frame."
+        )
+    if group_overflow:
+        warnings.append(
+            "Cumulative group details exceeded the bounded continuation limit; scalar totals "
+            "remain accurate but the group breakdown is truncated."
+        )
+        cumulative_incomplete = True
+    if discovered_overflow:
+        warnings.append(
+            "Discovered activity-task queues exceeded the bounded continuation limit; "
+            "the cumulative queue breakdown is truncated."
+        )
+        cumulative_incomplete = True
     completion = response.inspection.completion
     if has_next:
         completion = "sampled"
     elif cumulative_incomplete or cumulative_failures:
         completion = "partial"
+    elif cumulative_sampled:
+        completion = "sampled"
     else:
         completion = "complete"
+    if state is None:
+        estimate_eligible = response.inspection.estimate_eligible
+        estimate_reason = response.inspection.estimate_eligibility_reason
+    elif cumulative_candidates_selected == cumulative_candidates_observed:
+        estimate_eligible = False
+        estimate_reason = "candidate_frame_census"
+    else:
+        estimate_eligible = False
+        estimate_reason = (
+            "truncated_candidate_frame" if raw_has_more else "incomplete_sample_inspection"
+        )
     public_update["inspection"] = response.inspection.model_copy(
         update={
             "completion": completion,
-            "runs_inspected": len(inspected_ledger),
+            "temporal_calls": cumulative_temporal_calls,
+            "pages_read": cumulative_pages_read,
+            "history_events_read": cumulative_history_events_read,
+            "candidate_frame_size": cumulative_candidates_observed,
+            "candidate_count": cumulative_candidates_observed,
+            "candidate_collection_pages": cumulative_candidate_collection_pages,
+            "sample_size": cumulative_candidates_selected,
+            "runs_inspected": cumulative_inspected,
             "histories_inspected": cumulative_histories,
+            "task_queues_inspected": cumulative_task_queues_inspected,
+            "estimate_eligible": estimate_eligible,
+            "estimate_eligibility_reason": estimate_reason,
+            "history_window_truncated": cumulative_history_window_truncated,
+            "partial_failures": cumulative_failures,
             "inspection_failures": cumulative_failures,
-            "candidate_collection_complete": not has_next,
-            "candidate_frame_has_more": has_next,
+            "exhausted_dimension": cumulative_exhausted_dimension,
+            "candidate_collection_complete": not raw_has_more,
+            "candidate_frame_has_more": raw_has_more,
         }
     )
     public_update["warnings"] = tuple(dict.fromkeys(warnings))
@@ -1302,49 +1263,57 @@ def _with_population_continuation(
         dict.fromkeys(
             (
                 *response.supported_conclusions,
-                f"cumulative_confirmed={len(confirmed_ledger)} within {completion_scope}",
+                f"cumulative_confirmed={cumulative_confirmed} within {completion_scope}",
             )
         )
     )
     if not has_next:
-        return _finalize_incident_scope(
+        result = _finalize_incident_scope(
             response.model_copy(update=public_update), discovered_queues=discovered_queues
         )
-    token = _CONTINUATIONS.encode(
-        ContinuationState(
-            tool=tool,
-            target_ref=target_ref,
-            query=normalize_query(scope),
-            sample_seed=sample_seed,
-            inspection_offset=next_offset,
-            candidate_frame_size=response.inspection.candidate_frame_size,
-            candidate_collection_complete=response.inspection.candidate_collection_complete,
-            inspected_run_ledger=inspected_ledger,
-            confirmed_run_ledger=confirmed_ledger,
-            started_at=started_at.isoformat(),
-            ended_at=ended_at.isoformat(),
-            discovered_activity_task_queues=discovered_queues,
-            cumulative_inspection_failures=cumulative_failures,
-            cumulative_histories_inspected=cumulative_histories,
-            cumulative_group_counts=tuple(
-                (dimension, values, count)
-                for (dimension, values), count in sorted(group_counts.items())
-            ),
-            cumulative_incomplete=cumulative_incomplete,
-            candidate_page_token=(
-                candidate_page_token if remaining_in_frame else next_candidate_page_token
-            ),
+    else:
+        token = continuations.encode(
+            ContinuationState(
+                tool=tool,
+                target_ref=target_ref,
+                scope_digest=continuations.scope_digest(scope),
+                sample_seed=sample_seed,
+                candidate_page_token=next_candidate_page_token,
+                started_at=started_at.isoformat(),
+                ended_at=ended_at.isoformat(),
+                discovered_activity_task_queues=discovered_queues,
+                discovered_activity_task_queues_overflow=discovered_overflow,
+                cumulative_candidates_observed=cumulative_candidates_observed,
+                cumulative_candidates_selected=cumulative_candidates_selected,
+                cumulative_runs_attempted=cumulative_runs_attempted,
+                cumulative_runs_inspected=cumulative_inspected,
+                cumulative_inspection_failures=cumulative_failures,
+                cumulative_histories_inspected=cumulative_histories,
+                cumulative_temporal_calls=cumulative_temporal_calls,
+                cumulative_pages_read=cumulative_pages_read,
+                cumulative_history_events_read=cumulative_history_events_read,
+                cumulative_candidate_collection_pages=cumulative_candidate_collection_pages,
+                cumulative_task_queues_inspected=cumulative_task_queues_inspected,
+                cumulative_confirmed=cumulative_confirmed,
+                cumulative_group_counts=tuple(
+                    (dimension, values, count)
+                    for (dimension, values), count in bounded_group_counts.items()
+                ),
+                cumulative_group_overflow=group_overflow,
+                cumulative_incomplete=cumulative_incomplete,
+                cumulative_sampled=cumulative_sampled,
+                cumulative_history_window_truncated=cumulative_history_window_truncated,
+                cumulative_exhausted_dimension=cumulative_exhausted_dimension,
+            )
         )
-    )
-    public_update.update(
-        {
-            "continuation_token": token,
-            "next_call": PopulationNextCall(tool=tool, continuation_token=token),
-        }
-    )
-    return _finalize_incident_scope(
-        response.model_copy(update=public_update), discovered_queues=discovered_queues
-    )
+        public_update["continuation_token"] = token
+        result = _finalize_incident_scope(
+            response.model_copy(update=public_update), discovered_queues=discovered_queues
+        )
+    if context is not None:
+        final_size = len(result.model_dump_json().encode("utf-8"))
+        context.budget.consume_output_bytes(max(0, final_size - original_size))
+    return result
 
 
 def _population_progress_groups(response) -> tuple[PopulationProgressGroup, ...]:
@@ -1384,11 +1353,9 @@ def _finalize_incident_scope(response, *, discovered_queues: tuple[str, ...]):
     scope = getattr(response, "scope", None)
     if scope is None:
         return response
-    excluded = tuple(
-        sorted(set(discovered_queues) - set(scope.affected_activity_task_queues))
-    )
-    candidate_population_complete = response.next_call is None
+    excluded = tuple(sorted(set(discovered_queues) - set(scope.affected_activity_task_queues)))
     impact_evidence_complete = response.inspection.completion == "complete"
+    candidate_population_complete = response.continuation_token is None and impact_evidence_complete
     updated_scope = scope.model_copy(
         update={
             "discovered_activity_task_queues": tuple(sorted(discovered_queues)),
@@ -1416,9 +1383,7 @@ def _finalize_incident_scope(response, *, discovered_queues: tuple[str, ...]):
         constraints = constraints.model_copy(
             update={
                 "must_not_claim": tuple(
-                    dict.fromkeys(
-                        (*constraints.must_not_claim, "complete incident impact census")
-                    )
+                    dict.fromkeys((*constraints.must_not_claim, "complete incident impact census"))
                 )
             }
         )

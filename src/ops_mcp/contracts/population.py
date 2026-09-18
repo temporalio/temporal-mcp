@@ -91,7 +91,7 @@ class FailureClass(StrEnum):
     OTHER = "other"
 
 
-class FindWorkflowTaskFailuresRequest(ContractModel):
+class InspectWorkflowTaskFailuresRequest(ContractModel):
     target_ref: NonEmptyString
     query: NonEmptyString
     time_window: PopulationTimeWindow
@@ -99,8 +99,6 @@ class FindWorkflowTaskFailuresRequest(ContractModel):
     limits: PopulationLimits
     sampling_strategy: Literal[SamplingStrategy.DETERMINISTIC_HASH]
     sample_seed: NonEmptyString
-    inspection_offset: int = Field(default=0, ge=0, exclude=True)
-    excluded_run_identities: tuple[str, ...] = Field(default=(), exclude=True)
     candidate_page_token: str | None = Field(default=None, exclude=True)
     group_by_custom_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=4)
 
@@ -112,7 +110,7 @@ class FindWorkflowTaskFailuresRequest(ContractModel):
         return names
 
 
-class FindStuckWorkflowsRequest(ContractModel):
+class InspectActivityQueueDependenciesRequest(ContractModel):
     target_ref: NonEmptyString
     query: NonEmptyString
     time_window: PopulationTimeWindow
@@ -120,8 +118,6 @@ class FindStuckWorkflowsRequest(ContractModel):
     limits: PopulationLimits
     sampling_strategy: Literal[SamplingStrategy.DETERMINISTIC_HASH]
     sample_seed: NonEmptyString
-    inspection_offset: int = Field(default=0, ge=0, exclude=True)
-    excluded_run_identities: tuple[str, ...] = Field(default=(), exclude=True)
     candidate_page_token: str | None = Field(default=None, exclude=True)
     require_running_and_duration: bool = Field(default=True, exclude=True)
     activity_task_queue: NonEmptyString | None = None
@@ -136,7 +132,7 @@ class FindStuckWorkflowsRequest(ContractModel):
         return names
 
     @model_validator(mode="after")
-    def queue_inputs_do_not_conflict(self) -> FindStuckWorkflowsRequest:
+    def queue_inputs_do_not_conflict(self) -> InspectActivityQueueDependenciesRequest:
         if self.require_running_and_duration and self.minimum_open_duration_seconds is None:
             raise ValueError(
                 "minimum_open_duration_seconds is required for the deprecated running-duration mode"
@@ -261,11 +257,6 @@ class PopulationProgress(ContractModel):
     groups: tuple[PopulationProgressGroup, ...] = ()
 
 
-class PopulationNextCall(ContractModel):
-    tool: NonEmptyString
-    continuation_token: NonEmptyString
-
-
 class WorkflowTaskFailuresAnswer(ContractModel):
     effective_query: NonEmptyString
     runs: tuple[InspectedRun, ...]
@@ -273,7 +264,7 @@ class WorkflowTaskFailuresAnswer(ContractModel):
     affected_aggregation: AffectedPopulationAggregation
 
 
-class FindWorkflowTaskFailuresResponse(ContractModel):
+class InspectWorkflowTaskFailuresResponse(ContractModel):
     schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
     target_ref: NonEmptyString
     answer: WorkflowTaskFailuresAnswer
@@ -284,24 +275,9 @@ class FindWorkflowTaskFailuresResponse(ContractModel):
     evidence_unavailable: tuple[NonEmptyString, ...] = ()
     supported_conclusions: tuple[NonEmptyString, ...] = ()
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
-    cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
-    cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
     page: PopulationProgress | None = None
     cumulative: PopulationProgress | None = None
-    next_call: PopulationNextCall | None = None
     answer_constraints: AnswerConstraints | None = None
-
-
-class InspectWorkflowTaskFailuresResponse(FindWorkflowTaskFailuresResponse):
-    """Preferred composite contract; the parent remains the compatibility wire shape."""
-
-
-class StuckWorkflowsAnswer(ContractModel):
-    effective_query: NonEmptyString
-    runs: tuple[InspectedRun, ...]
-    task_queues: tuple[QueueSnapshot, ...]
-    blast_radius: BlastRadiusSummary | None = None
-    affected_aggregation: AffectedPopulationAggregation | None = None
 
 
 class ConfirmedWorkflowTypeGroup(ContractModel):
@@ -319,25 +295,6 @@ class BlastRadiusSummary(ContractModel):
     uninspected: int = Field(ge=0)
     collection_complete: bool
     confirmed_groups: tuple[ConfirmedWorkflowTypeGroup, ...] = ()
-
-
-class FindStuckWorkflowsResponse(ContractModel):
-    schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
-    target_ref: NonEmptyString
-    answer: StuckWorkflowsAnswer
-    inspection: PopulationInspection
-    warnings: tuple[NonEmptyString, ...] = ()
-    continuation_token: str | None = None
-    evidence_collected: tuple[NonEmptyString, ...] = ()
-    evidence_unavailable: tuple[NonEmptyString, ...] = ()
-    supported_conclusions: tuple[NonEmptyString, ...] = ()
-    unsupported_conclusions: tuple[NonEmptyString, ...] = ()
-    cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
-    cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
-    page: PopulationProgress | None = None
-    cumulative: PopulationProgress | None = None
-    next_call: PopulationNextCall | None = None
-    answer_constraints: AnswerConstraints | None = None
 
 
 class ActivityQueueDependenciesAnswer(ContractModel):
@@ -361,9 +318,6 @@ class InspectActivityQueueDependenciesResponse(ContractModel):
     evidence_unavailable: tuple[NonEmptyString, ...] = ()
     supported_conclusions: tuple[NonEmptyString, ...] = ()
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
-    cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
-    cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
     page: PopulationProgress | None = None
     cumulative: PopulationProgress | None = None
-    next_call: PopulationNextCall | None = None
     answer_constraints: AnswerConstraints | None = None

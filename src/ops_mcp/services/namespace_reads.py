@@ -37,10 +37,13 @@ from ops_mcp.facts.namespace_reads import (
     ScheduleSummaryFact,
 )
 from ops_mcp.gateways.namespace_reads import BatchGateway, QueryGateway, ScheduleGateway
+from ops_mcp.runtime.advanced_budget import bounded_fanout
 from ops_mcp.runtime.budget import BudgetSnapshot
 from ops_mcp.runtime.context import RequestContext
 from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.targets.catalog import TargetCatalog
+
+BATCH_DETAIL_CONCURRENCY = 10
 
 
 class QueryApprovalPolicy(Protocol):
@@ -250,39 +253,40 @@ class DefaultNamespaceReadService:
         )
         selected = tuple(row for row in page.operations if _batch_matches(row, request))
         outputs: list[BatchOperationOutput] = []
-        detail_budget_exhausted = False
         detail_unknown = False
-        for row in selected:
-            if not request.include_details:
-                outputs.append(_batch_output(row, None, "not_requested"))
-                continue
-            if detail_budget_exhausted:
-                outputs.append(_batch_output(row, None, "budget_exhausted"))
-                continue
-            try:
-                detail = await self._batches.describe(context, target, row.job_id)
-            except OpsMcpError as exc:
-                if exc.code is ErrorCode.BUDGET_EXHAUSTED:
-                    detail_budget_exhausted = True
-                    outputs.append(_batch_output(row, None, "budget_exhausted"))
-                else:
-                    detail_unknown = True
-                    outputs.append(_batch_output(row, None, "unknown"))
-            else:
-                outputs.append(_batch_output(row, detail, "complete"))
+        if not request.include_details:
+            outputs.extend(_batch_output(row, None, "not_requested") for row in selected)
+        else:
 
-        if detail_budget_exhausted:
-            completion = Completeness.BUDGET_EXHAUSTED
-        elif page.next_page_token:
+            async def describe(row: BatchOperationSummaryFact) -> BatchOperationDetailFact:
+                return await self._batches.describe(context, target, row.job_id)
+
+            details = await bounded_fanout(
+                selected,
+                concurrency=BATCH_DETAIL_CONCURRENCY,
+                operation=describe,
+            )
+            for item in details:
+                if item.error is None:
+                    outputs.append(_batch_output(item.item, item.value, "complete"))
+                elif (
+                    isinstance(item.error, OpsMcpError)
+                    and item.error.code is ErrorCode.INVALID_ARGUMENT
+                ):
+                    # A listed operation can disappear before its detail read.
+                    detail_unknown = True
+                    outputs.append(_batch_output(item.item, None, "unknown"))
+                else:
+                    raise item.error
+
+        if page.next_page_token:
             completion = Completeness.TRUNCATED
         elif detail_unknown:
             completion = Completeness.UNKNOWN
         else:
             completion = Completeness.COMPLETE
         warnings = ()
-        if detail_budget_exhausted:
-            warnings = ("The detail call budget was exhausted; some details are incomplete.",)
-        elif detail_unknown:
+        if detail_unknown:
             warnings = ("Some batch-operation details could not be read.",)
         response = ListBatchOperationsResponse(
             target_ref=target.target_ref,

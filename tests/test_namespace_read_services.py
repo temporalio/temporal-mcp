@@ -206,6 +206,34 @@ async def test_batch_details_are_bounded_to_returned_filtered_rows() -> None:
     assert batches.described == ["job-1"]
 
 
+@pytest.mark.asyncio
+async def test_batch_detail_propagates_systemic_temporal_errors() -> None:
+    page = BatchOperationPageFact(
+        operations=(BatchOperationSummaryFact("job-1", "RUNNING", "RESET", _now(), None),),
+        next_page_token=None,
+        observed_at=_now(),
+    )
+
+    class UnavailableBatchGateway(_BatchGateway):
+        async def describe(
+            self, context: RequestContext, target: ResolvedTarget, job_id: str
+        ) -> BatchOperationDetailFact:
+            raise OpsMcpError(
+                ErrorCode.TEMPORAL_UNREACHABLE,
+                "Temporal is unavailable",
+                retryable=True,
+            )
+
+    service = _service(batches=UnavailableBatchGateway(page))
+
+    with pytest.raises(OpsMcpError) as caught:
+        await service.list_batch_operations(
+            _context(), ListBatchOperationsRequest(target_ref="orders-prod")
+        )
+
+    assert caught.value.code is ErrorCode.TEMPORAL_UNREACHABLE
+
+
 class _Catalog:
     def authorize(self, principal: Principal, target_ref: str) -> ResolvedTarget:
         assert principal.subject == "tester"

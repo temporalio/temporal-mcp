@@ -11,7 +11,6 @@ from pydantic import Field, field_validator, model_validator
 from ops_mcp.contracts.population import (
     PopulationInspection,
     PopulationLimits,
-    PopulationNextCall,
     PopulationProgress,
     SamplingStrategy,
 )
@@ -54,8 +53,6 @@ class AnalyzeIncidentImpactRequest(ContractModel):
     limits: PopulationLimits
     sampling_strategy: Literal[SamplingStrategy.DETERMINISTIC_HASH]
     sample_seed: NonEmptyString
-    inspection_offset: int = Field(default=0, ge=0, exclude=True)
-    excluded_run_identities: tuple[str, ...] = Field(default=(), exclude=True)
     candidate_page_token: str | None = Field(default=None, exclude=True)
     group_by_custom_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=4)
 
@@ -155,13 +152,10 @@ class AnalyzeIncidentImpactResponse(ContractModel):
     evidence_unavailable: tuple[NonEmptyString, ...] = ()
     supported_conclusions: tuple[NonEmptyString, ...] = ()
     unsupported_conclusions: tuple[NonEmptyString, ...] = ()
-    cumulative_inspected_identities: tuple[NonEmptyString, ...] = ()
-    cumulative_confirmed_identities: tuple[NonEmptyString, ...] = ()
     candidate_population: IncidentCandidatePopulation | None = None
     impact_criteria: IncidentImpactCriteria | None = None
     business_grouping: IncidentBusinessGrouping | None = None
     scope: IncidentQueueScope | None = None
     page: PopulationProgress | None = None
     cumulative: PopulationProgress | None = None
-    next_call: PopulationNextCall | None = None
     answer_constraints: AnswerConstraints | None = None

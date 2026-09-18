@@ -8,10 +8,10 @@ import pytest
 
 from ops_mcp.contracts import (
     CountWorkflowsRequest,
-    DiagnoseWorkflowRequest,
-    FilterWorkflowsRequest,
+    InspectWorkflowExecutionRequest,
     PlanWorkflowResetRequest,
     ResolveTargetRequest,
+    SearchWorkflowRunsRequest,
     WorkflowField,
 )
 from ops_mcp.contracts.primitives import Completeness
@@ -304,9 +304,9 @@ async def test_session_one_through_typed_services() -> None:
     assert resolved.target_ref == "orders-prod"
     assert "address" not in resolved.model_dump_json()
 
-    filtered = await visibility.filter_workflows(
+    filtered = await visibility.search_workflow_runs(
         _context(),
-        FilterWorkflowsRequest(
+        SearchWorkflowRunsRequest(
             target_ref=resolved.target_ref,
             query="OrderId = '88231'",
             fields=(WorkflowField.WORKFLOW_ID, WorkflowField.RUN_ID, WorkflowField.STATUS),
@@ -319,27 +319,25 @@ async def test_session_one_through_typed_services() -> None:
     assert failed.run_id == "run-session-1"
     assert failed.status == "FAILED"
 
-    diagnosis = await reasoning.diagnose_workflow(
+    diagnosis = await reasoning.inspect_workflow_execution(
         _context(),
-        DiagnoseWorkflowRequest(
+        InspectWorkflowExecutionRequest(
             target_ref=resolved.target_ref,
             workflow_id=failed.workflow_id,
             run_id=failed.run_id,
         ),
     )
-    assert diagnosis.retry_assessment.assessment == "unknown"
     assert any(
         finding.code == "activity_retry_exhausted" and "503 Service Unavailable" in finding.summary
-        for finding in diagnosis.findings
+        for finding in (
+            *diagnosis.answer.retry_findings,
+            *diagnosis.answer.failure_findings,
+        )
     )
-    assert diagnosis.task_queues
-    assert all(queue.observed_at == NOW for queue in diagnosis.task_queues)
-    assert all(queue.historical_health_known is False for queue in diagnosis.task_queues)
-    assert any(
-        "does not establish health at failure time" in caveat
-        for finding in diagnosis.findings
-        for caveat in finding.caveats
-    )
+    assert diagnosis.answer.task_queues
+    assert all(queue.observed_at == NOW for queue in diagnosis.answer.task_queues)
+    assert all(queue.historical_health_known is False for queue in diagnosis.answer.task_queues)
+    assert any("historical outage" in item for item in diagnosis.unsupported_conclusions)
 
     count = await visibility.count_workflows(
         _context(),

@@ -12,7 +12,7 @@ from temporalio.api.workflowservice.v1 import (
 )
 from temporalio.service import RPCError
 
-from ops_mcp.clients.provider import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.connection import (
     ConnectionStageFact,
     ConnectionStageStatus,
@@ -44,7 +44,7 @@ class SdkConnectionGateway:
     ) -> ServerConnectionFact:
         started = monotonic()
         try:
-            client = await self._provider.get_client(target.target_ref, target.connection)
+            client = await acquire_client(self._provider, context, target)
             context.budget.reserve_temporal_call("GetSystemInfo")
             response = await client.workflow_service.get_system_info(
                 GetSystemInfoRequest(),
@@ -76,7 +76,7 @@ class SdkConnectionGateway:
     ) -> NamespaceConnectionFact:
         started = monotonic()
         try:
-            client = await self._provider.get_client(target.target_ref, target.connection)
+            client = await acquire_client(self._provider, context, target)
             context.budget.reserve_temporal_call("DescribeNamespace")
             response = await client.workflow_service.describe_namespace(
                 DescribeNamespaceRequest(namespace=target.namespace),

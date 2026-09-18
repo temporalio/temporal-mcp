@@ -42,12 +42,15 @@ class YamlTargetCatalog:
     def load(cls, path: str | Path) -> YamlTargetCatalog:
         config_path = Path(path)
         try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            raw = {} if loaded is None else loaded
         except (OSError, yaml.YAMLError) as exc:
             raise InvalidConfigurationError(
                 f"Unable to read target configuration {config_path}"
             ) from exc
 
+        if not isinstance(raw, dict):
+            raise InvalidConfigurationError("Target configuration root must be a mapping")
         raw_groups = raw.get("groups")
         if not isinstance(raw_groups, dict) or not raw_groups:
             raise InvalidConfigurationError(
@@ -56,6 +59,8 @@ class YamlTargetCatalog:
 
         groups: dict[str, dict[str, ResolvedTarget]] = {}
         for group_name, group_value in raw_groups.items():
+            if not isinstance(group_name, str) or not group_name.strip():
+                raise InvalidConfigurationError("Target group names must be non-empty strings")
             if not isinstance(group_value, dict) or not isinstance(
                 group_value.get("targets"), dict
             ):
@@ -64,8 +69,12 @@ class YamlTargetCatalog:
                 )
             targets: dict[str, ResolvedTarget] = {}
             for target_ref, value in group_value["targets"].items():
-                targets[str(target_ref)] = _parse_target(str(target_ref), value)
-            groups[str(group_name)] = targets
+                if not isinstance(target_ref, str) or not target_ref.strip():
+                    raise InvalidConfigurationError(
+                        f"Group {group_name!r} contains an invalid target reference"
+                    )
+                targets[target_ref] = _parse_target(target_ref, value)
+            groups[group_name] = targets
         return cls(groups)
 
     def resolve(self, principal: Principal, human_name: str) -> ResolvedTarget:
@@ -120,20 +129,45 @@ def _parse_target(target_ref: str, value: Any) -> ResolvedTarget:
     if not isinstance(value, dict):
         raise InvalidConfigurationError(f"Target {target_ref!r} must be a mapping")
     try:
-        namespace = str(value["namespace"])
+        unknown = set(value) - {
+            "aliases",
+            "account",
+            "cluster",
+            "namespace",
+            "address",
+            "tls",
+            "api_key_env",
+            "server_name",
+            "credential_generation",
+        }
+        if unknown:
+            raise ValueError(f"unknown fields: {', '.join(sorted(map(str, unknown)))}")
+        namespace = _required_string(value, "namespace")
+        aliases_value = value.get("aliases", [])
+        if not isinstance(aliases_value, list):
+            raise ValueError("aliases must be a list")
+        aliases = tuple(_non_empty_string(alias, "alias") for alias in aliases_value)
+        if len({_normalize(alias) for alias in aliases}) != len(aliases):
+            raise ValueError("aliases must be unique")
+        tls = value.get("tls", False)
+        if not isinstance(tls, bool):
+            raise ValueError("tls must be a boolean")
+        credential_generation = value.get("credential_generation", 0)
+        if isinstance(credential_generation, bool) or not isinstance(credential_generation, int):
+            raise ValueError("credential_generation must be an integer")
         connection = ConnectionDescriptor(
-            address=str(value["address"]),
+            address=_required_string(value, "address"),
             namespace=namespace,
-            tls=bool(value.get("tls", False)),
+            tls=tls,
             api_key_env=_optional_string(value.get("api_key_env")),
             server_name=_optional_string(value.get("server_name")),
-            credential_generation=int(value.get("credential_generation", 0)),
+            credential_generation=credential_generation,
         )
         return ResolvedTarget(
             target_ref=target_ref,
-            aliases=tuple(str(alias) for alias in value.get("aliases", [])),
-            account=str(value["account"]),
-            cluster=str(value["cluster"]),
+            aliases=aliases,
+            account=_required_string(value, "account"),
+            cluster=_required_string(value, "cluster"),
             namespace=namespace,
             connection=connection,
         )
@@ -142,7 +176,20 @@ def _parse_target(target_ref: str, value: Any) -> ResolvedTarget:
 
 
 def _optional_string(value: Any) -> str | None:
-    return str(value) if value is not None else None
+    return _non_empty_string(value, "optional string") if value is not None else None
+
+
+def _required_string(value: dict[str, Any], name: str) -> str:
+    try:
+        return _non_empty_string(value[name], name)
+    except KeyError:
+        raise ValueError(f"{name} is required") from None
+
+
+def _non_empty_string(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
 
 
 def _target_key(

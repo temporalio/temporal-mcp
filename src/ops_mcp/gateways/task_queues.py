@@ -10,7 +10,7 @@ from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.service import RPCError
 
-from ops_mcp.clients.provider import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.task_queues import PollerFact, TaskQueueFact, TaskQueueKind
 from ops_mcp.gateways.history import translate_rpc_error
 from ops_mcp.runtime.context import RequestContext
@@ -42,7 +42,7 @@ class SdkTaskQueueGateway:
             raise ValueError("task_queue is required")
         if not isinstance(task_type, TaskQueueKind):
             raise ValueError("task_type must be workflow or activity")
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("DescribeTaskQueue")
         try:
             response = await client.workflow_service.describe_task_queue(

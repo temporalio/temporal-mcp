@@ -31,24 +31,24 @@ from ops_mcp.contracts.incident import (
     IncidentTimeWindow,
 )
 from ops_mcp.contracts.population import (
+    ActivityQueueDependenciesAnswer,
     AffectedPopulationAggregation,
     AffectedPopulationGroup,
     BlastRadiusSummary,
     ConfirmedWorkflowTypeGroup,
     FailureClass,
     FailureClassGroup,
-    FindStuckWorkflowsRequest,
-    FindStuckWorkflowsResponse,
-    FindWorkflowTaskFailuresRequest,
-    FindWorkflowTaskFailuresResponse,
+    InspectActivityQueueDependenciesRequest,
+    InspectActivityQueueDependenciesResponse,
     InspectedRun,
+    InspectWorkflowTaskFailuresRequest,
+    InspectWorkflowTaskFailuresResponse,
     PopulationFinding,
     PopulationInspection,
     PopulationLimits,
     PopulationTimeWindow,
     QueueSnapshot,
     SamplingStrategy,
-    StuckWorkflowsAnswer,
     WorkflowTaskFailuresAnswer,
 )
 from ops_mcp.contracts.primitives import (
@@ -133,17 +133,17 @@ class PopulationDiagnosticService(Protocol):
         request: AnalyzeIncidentImpactRequest,
     ) -> AnalyzeIncidentImpactResponse: ...
 
-    async def find_workflow_task_failures(
+    async def inspect_workflow_task_failures(
         self,
         context: RequestContext,
-        request: FindWorkflowTaskFailuresRequest,
-    ) -> FindWorkflowTaskFailuresResponse: ...
+        request: InspectWorkflowTaskFailuresRequest,
+    ) -> InspectWorkflowTaskFailuresResponse: ...
 
-    async def find_stuck_workflows(
+    async def inspect_activity_queue_dependencies(
         self,
         context: RequestContext,
-        request: FindStuckWorkflowsRequest,
-    ) -> FindStuckWorkflowsResponse: ...
+        request: InspectActivityQueueDependenciesRequest,
+    ) -> InspectActivityQueueDependenciesResponse: ...
 
 
 class DefaultPopulationDiagnosticService:
@@ -275,9 +275,7 @@ class DefaultPopulationDiagnosticService:
                 "exact_comparison_run_histories",
                 "activity_success_and_failure_events",
             ),
-            evidence_unavailable=(
-                () if complete else ("complete_comparison_population",)
-            ),
+            evidence_unavailable=(() if complete else ("complete_comparison_population",)),
             supported_conclusions=(
                 f"activity_successes={successes} within inspected comparison histories",
                 f"recovery_assessment={assessment} within the comparison query scope",
@@ -300,11 +298,11 @@ class DefaultPopulationDiagnosticService:
         )
         return _charge_output(context, response)
 
-    async def find_workflow_task_failures(
+    async def inspect_workflow_task_failures(
         self,
         context: RequestContext,
-        request: FindWorkflowTaskFailuresRequest,
-    ) -> FindWorkflowTaskFailuresResponse:
+        request: InspectWorkflowTaskFailuresRequest,
+    ) -> InspectWorkflowTaskFailuresResponse:
         before = context.budget.snapshot()
         target = self._catalog.authorize(context.principal, request.target_ref)
         custom_schema = await self._custom_aggregation_schema(
@@ -320,18 +318,14 @@ class DefaultPopulationDiagnosticService:
             request.limits,
             page_token=_decode_candidate_token(request.candidate_page_token),
         )
-        collection = _without_inspected(collection, request.excluded_run_identities)
         advanced.consume_candidates(len(collection.rows))
         ranked = deterministic_sample(
             collection.rows,
-            size=min(
-                request.inspection_offset + request.limits.max_runs,
-                len(collection.rows),
-            ),
+            size=min(request.limits.max_runs, len(collection.rows)),
             seed=request.sample_seed,
             identity=_visibility_identity,
         )
-        selected = ranked[request.inspection_offset :]
+        selected = ranked
         advanced.consume_runs(len(selected))
         descriptions = await self._describe_runs(
             context, target, selected, request.limits.max_concurrency
@@ -416,7 +410,7 @@ class DefaultPopulationDiagnosticService:
             partial_failures=partial_failures,
             incomplete_histories=incomplete_histories,
         )
-        response = FindWorkflowTaskFailuresResponse(
+        response = InspectWorkflowTaskFailuresResponse(
             target_ref=target.target_ref,
             answer=WorkflowTaskFailuresAnswer(
                 effective_query=effective_query,
@@ -500,8 +494,6 @@ class DefaultPopulationDiagnosticService:
             effective_query,
             limits=request.limits,
             sample_seed=request.sample_seed,
-            inspection_offset=request.inspection_offset,
-            excluded_run_identities=request.excluded_run_identities,
             candidate_page_token=request.candidate_page_token,
             requested_activity_task_queues=request.affected_activity_task_queues,
         )
@@ -704,10 +696,7 @@ class DefaultPopulationDiagnosticService:
                     sorted(dependency_evidence.discovered_activity_task_queues)
                 ),
                 excluded_discovered_queues=tuple(
-                    sorted(
-                        dependency_evidence.discovered_activity_task_queues
-                        - affected_queues
-                    )
+                    sorted(dependency_evidence.discovered_activity_task_queues - affected_queues)
                 ),
                 completion_scope=(
                     "explicit_queue_subset"
@@ -717,9 +706,7 @@ class DefaultPopulationDiagnosticService:
                 candidate_population_complete=exact_confirmed_count,
                 incident_impact_complete=(
                     exact_confirmed_count
-                    and not (
-                        dependency_evidence.discovered_activity_task_queues - affected_queues
-                    )
+                    and not (dependency_evidence.discovered_activity_task_queues - affected_queues)
                 ),
             ),
             answer_constraints=AnswerConstraints(
@@ -736,11 +723,11 @@ class DefaultPopulationDiagnosticService:
         )
         return _charge_output(context, response)
 
-    async def find_stuck_workflows(
+    async def inspect_activity_queue_dependencies(
         self,
         context: RequestContext,
-        request: FindStuckWorkflowsRequest,
-    ) -> FindStuckWorkflowsResponse:
+        request: InspectActivityQueueDependenciesRequest,
+    ) -> InspectActivityQueueDependenciesResponse:
         before = context.budget.snapshot()
         target = self._catalog.authorize(context.principal, request.target_ref)
         custom_schema = await self._custom_aggregation_schema(
@@ -763,8 +750,6 @@ class DefaultPopulationDiagnosticService:
             effective_query,
             limits=request.limits,
             sample_seed=request.sample_seed,
-            inspection_offset=request.inspection_offset,
-            excluded_run_identities=request.excluded_run_identities,
             candidate_page_token=request.candidate_page_token,
             requested_activity_task_queues=request.requested_activity_task_queues,
             minimum_open_duration_seconds=(
@@ -944,9 +929,9 @@ class DefaultPopulationDiagnosticService:
             evidence_unavailable.append("complete_history_for_every_candidate")
         if description_errors:
             evidence_unavailable.append("pending_activity_membership_for_every_candidate")
-        response = FindStuckWorkflowsResponse(
+        response = InspectActivityQueueDependenciesResponse(
             target_ref=target.target_ref,
-            answer=StuckWorkflowsAnswer(
+            answer=ActivityQueueDependenciesAnswer(
                 effective_query=effective_query,
                 runs=runs,
                 task_queues=tuple(_queue_snapshot(queue) for queue in queue_values),
@@ -1018,8 +1003,6 @@ class DefaultPopulationDiagnosticService:
         *,
         limits: PopulationLimits,
         sample_seed: str,
-        inspection_offset: int,
-        excluded_run_identities: tuple[str, ...],
         candidate_page_token: str | None,
         requested_activity_task_queues: tuple[str, ...],
         minimum_open_duration_seconds: float | None = None,
@@ -1040,7 +1023,6 @@ class DefaultPopulationDiagnosticService:
             limits,
             page_token=_decode_candidate_token(candidate_page_token),
         )
-        collection = _without_inspected(collection, excluded_run_identities)
         now = datetime.now(UTC)
         candidates = collection.rows
         if minimum_open_duration_seconds is not None:
@@ -1053,15 +1035,13 @@ class DefaultPopulationDiagnosticService:
         advanced.consume_candidates(len(candidates))
         ranked = deterministic_sample(
             candidates,
-            size=min(inspection_offset + limits.max_runs, len(candidates)),
+            size=min(limits.max_runs, len(candidates)),
             seed=sample_seed,
             identity=_visibility_identity,
         )
-        selected = ranked[inspection_offset:]
+        selected = ranked
         advanced.consume_runs(len(selected))
-        descriptions = await self._describe_runs(
-            context, target, selected, limits.max_concurrency
-        )
+        descriptions = await self._describe_runs(context, target, selected, limits.max_concurrency)
         description_by_id = _values_by_identity(descriptions)
         history_rows = selected[: limits.max_histories]
         history_limited = len(history_rows) < len(selected)
@@ -1077,18 +1057,18 @@ class DefaultPopulationDiagnosticService:
         history_by_id = _values_by_identity(histories)
         discovered_queues = frozenset(
             {
-                    activity.activity_task_queue
-                    for workflow in description_by_id.values()
-                    for activity in workflow.pending_activities
-                    if activity.activity_task_queue
+                activity.activity_task_queue
+                for workflow in description_by_id.values()
+                for activity in workflow.pending_activities
+                if activity.activity_task_queue
             }
             | {
-                    attrs.task_queue
-                    for history in history_by_id.values()
-                    for event in history.events
-                    if isinstance((attrs := event.attributes), ActivityTaskEventAttributes)
-                    and attrs.phase == "scheduled"
-                    and attrs.task_queue
+                attrs.task_queue
+                for history in history_by_id.values()
+                for event in history.events
+                if isinstance((attrs := event.attributes), ActivityTaskEventAttributes)
+                and attrs.phase == "scheduled"
+                and attrs.task_queue
             }
         )
         affected_queues = frozenset(requested_activity_task_queues) or discovered_queues
@@ -1238,8 +1218,7 @@ def _activity_outcome(
 def _without_inspected(
     collection: _CandidateCollection, excluded: tuple[str, ...]
 ) -> _CandidateCollection:
-    if not excluded:
-        return collection
+    """Exclude a small, caller-supplied exact-run set for comparison operations."""
     excluded_set = set(excluded)
     return _CandidateCollection(
         rows=tuple(row for row in collection.rows if _visibility_identity(row) not in excluded_set),

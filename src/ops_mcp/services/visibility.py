@@ -12,13 +12,13 @@ from ops_mcp.contracts.visibility import (
     CountWorkflowsAnswer,
     CountWorkflowsRequest,
     CountWorkflowsResponse,
-    FilterWorkflowsAnswer,
-    FilterWorkflowsRequest,
-    FilterWorkflowsResponse,
     GetVisibilitySchemaRequest,
     GetVisibilitySchemaResponse,
     PublicIndexedValueType,
     PublicSearchAttributeSource,
+    SearchWorkflowRunsAnswer,
+    SearchWorkflowRunsRequest,
+    SearchWorkflowRunsResponse,
     VisibilityField,
     VisibilitySchemaAnswer,
     WorkflowCountGroup,
@@ -43,11 +43,11 @@ from ops_mcp.targets import TargetCatalog
 
 
 class VisibilityService(Protocol):
-    async def filter_workflows(
+    async def search_workflow_runs(
         self,
         context: RequestContext,
-        request: FilterWorkflowsRequest,
-    ) -> FilterWorkflowsResponse: ...
+        request: SearchWorkflowRunsRequest,
+    ) -> SearchWorkflowRunsResponse: ...
 
     async def count_workflows(
         self,
@@ -67,11 +67,11 @@ class DefaultVisibilityService:
         self._target_catalog = target_catalog
         self._gateway = gateway
 
-    async def filter_workflows(
+    async def search_workflow_runs(
         self,
         context: RequestContext,
-        request: FilterWorkflowsRequest,
-    ) -> FilterWorkflowsResponse:
+        request: SearchWorkflowRunsRequest,
+    ) -> SearchWorkflowRunsResponse:
         before = context.budget.snapshot()
         target = self._target_catalog.authorize(context.principal, request.target_ref)
         custom_schema: dict[str, SearchAttributeFieldFact] = {}
@@ -85,7 +85,7 @@ class DefaultVisibilityService:
             target,
             query=request.query,
             page_size=request.page_size,
-            page_token=_decode_page_token(request.page_token),
+            page_token=_decode_page_token(request.continuation_token),
         )
         rows = tuple(
             _project_workflow(
@@ -96,14 +96,14 @@ class DefaultVisibilityService:
             )
             for row in page.rows
         )
-        response = FilterWorkflowsResponse(
+        response = SearchWorkflowRunsResponse(
             target_ref=target.target_ref,
-            answer=FilterWorkflowsAnswer(
+            answer=SearchWorkflowRunsAnswer(
                 query=page.query,
                 custom_search_attributes=request.custom_search_attributes,
                 workflows=rows,
                 returned=len(rows),
-                next_page_token=_encode_page_token(page.next_page_token),
+                continuation_token=_encode_page_token(page.next_page_token),
             ),
             inspection=_inspection(context.budget.snapshot(), before, pages_limit=1),
         )

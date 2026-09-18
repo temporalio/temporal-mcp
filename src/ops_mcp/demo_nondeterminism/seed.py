@@ -53,3 +53,7 @@ async def seed() -> None:
 
 def main() -> None:
     asyncio.run(seed())
+
+
+if __name__ == "__main__":
+    main()

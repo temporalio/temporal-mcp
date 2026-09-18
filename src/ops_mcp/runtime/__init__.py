@@ -22,7 +22,14 @@ from ops_mcp.runtime.context import (
     RequestContext,
     RequestContextFactory,
 )
-from ops_mcp.runtime.continuation import ContinuationCodec, ContinuationState, normalize_query
+from ops_mcp.runtime.continuation import (
+    MAX_CONTINUATION_TOKEN_BYTES,
+    MAX_CUMULATIVE_GROUPS,
+    MAX_DISCOVERED_ACTIVITY_QUEUES,
+    ContinuationCodec,
+    ContinuationState,
+    normalize_query,
+)
 from ops_mcp.runtime.errors import (
     BudgetExceededError,
     DeadlineExceededError,
@@ -55,6 +62,9 @@ __all__ = [
     "FanoutResult",
     "IdentityProvider",
     "InvalidConfigurationError",
+    "MAX_CONTINUATION_TOKEN_BYTES",
+    "MAX_CUMULATIVE_GROUPS",
+    "MAX_DISCOVERED_ACTIVITY_QUEUES",
     "MissingCredentialError",
     "OpsMcpError",
     "Principal",

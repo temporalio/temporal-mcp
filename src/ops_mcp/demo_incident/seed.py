@@ -112,7 +112,7 @@ async def seed() -> None:
         flush=True,
     )
     print(
-        "No activity worker ran before incident_end. Start ops-mcp-incident-activity-worker "
+        "No activity worker ran before incident_end. Start the incident activity-worker module "
         "to model recovery; current pollers then become healthy while histories retain the delay.",
         flush=True,
     )
@@ -120,3 +120,7 @@ async def seed() -> None:
 
 def main() -> None:
     asyncio.run(seed())
+
+
+if __name__ == "__main__":
+    main()

@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from ops_mcp.runtime import Principal, TargetNotAuthorizedError, TargetNotFoundError
+from ops_mcp.runtime import (
+    InvalidConfigurationError,
+    Principal,
+    TargetNotAuthorizedError,
+    TargetNotFoundError,
+)
 from ops_mcp.targets import YamlTargetCatalog
 
 
@@ -45,3 +50,43 @@ groups:
     assert unauthorized.value.code == missing.value.code
     with pytest.raises(TargetNotAuthorizedError):
         catalog.authorize(principal, "orders-prod")
+
+
+@pytest.mark.parametrize(
+    "invalid_field",
+    (
+        'tls: "false"',
+        "aliases: orders-prod",
+        "address:",
+        "credential_generation: true",
+        "unexpected: value",
+    ),
+)
+def test_catalog_rejects_coercible_or_unknown_values(tmp_path: Path, invalid_field: str) -> None:
+    config = tmp_path / "targets.yaml"
+    config.write_text(
+        f"""
+groups:
+  support:
+    targets:
+      orders-prod:
+        account: acme
+        cluster: prod
+        namespace: orders
+        address: temporal.example:7233
+        {invalid_field}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidConfigurationError, match="orders-prod"):
+        YamlTargetCatalog.load(config)
+
+
+@pytest.mark.parametrize("document", ("hello", "42", "[]"))
+def test_catalog_rejects_non_mapping_root(tmp_path: Path, document: str) -> None:
+    config = tmp_path / "targets.yaml"
+    config.write_text(document, encoding="utf-8")
+
+    with pytest.raises(InvalidConfigurationError, match="root must be a mapping"):
+        YamlTargetCatalog.load(config)

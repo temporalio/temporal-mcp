@@ -35,3 +35,13 @@ class ResolvedTarget:
     cluster: str
     namespace: str
     connection: ConnectionDescriptor
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("target_ref", self.target_ref),
+            ("account", self.account),
+            ("cluster", self.cluster),
+            ("namespace", self.namespace),
+        ):
+            if not value:
+                raise ValueError(f"{name} must not be empty")

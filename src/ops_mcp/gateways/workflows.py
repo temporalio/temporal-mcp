@@ -10,7 +10,7 @@ from temporalio.client import WorkflowExecutionDescription
 from temporalio.converter import DataConverter
 from temporalio.service import RPCError
 
-from ops_mcp.clients.provider import TemporalClientProvider
+from ops_mcp.clients import TemporalClientProvider, acquire_client
 from ops_mcp.facts.history import DecodedPayloadsFact, JsonValue
 from ops_mcp.facts.workflows import (
     PendingActivityFact,
@@ -46,7 +46,7 @@ class SdkWorkflowGateway:
     ) -> WorkflowExecutionFact:
         if not workflow_id:
             raise ValueError("workflow_id is required")
-        client = await self._provider.get_client(target.target_ref, target.connection)
+        client = await acquire_client(self._provider, context, target)
         context.budget.reserve_temporal_call("DescribeWorkflowExecution")
         try:
             description = await client.get_workflow_handle(workflow_id, run_id=run_id).describe(

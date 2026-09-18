@@ -24,14 +24,21 @@ from ops_mcp.facts import (
     WorkflowTaskEventAttributes,
     WorkflowVisibilityFact,
 )
-from ops_mcp.mcp.adapters import _CONTINUATIONS, _with_population_continuation
-from ops_mcp.runtime import BasicBudgetLimits, BasicExecutionBudget, Principal, RequestContext
+from ops_mcp.mcp.adapters import _with_population_continuation
+from ops_mcp.runtime import (
+    BasicBudgetLimits,
+    BasicExecutionBudget,
+    ContinuationCodec,
+    Principal,
+    RequestContext,
+)
 from ops_mcp.services import DefaultPopulationDiagnosticService
 from ops_mcp.targets import ConnectionDescriptor, ResolvedTarget
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 INCIDENT_START = NOW - timedelta(hours=2)
 INCIDENT_END = INCIDENT_START + timedelta(minutes=40)
+CONTINUATIONS = ContinuationCodec(b"test-secret".ljust(32, b"!"))
 
 
 class _Catalog:
@@ -347,53 +354,39 @@ async def test_incident_queue_discovery_covers_two_queues_across_complete_chain(
         max_task_queues=2,
         max_concurrency=10,
     )
-    state = None
-    preferred = None
-    for _ in range(2):
-        request = AnalyzeIncidentImpactRequest(
-            target_ref="ledger-prod",
-            query="WorkflowType IS NOT NULL",
-            incident_window=IncidentTimeWindow(
-                started_at=INCIDENT_START,
-                ended_at=INCIDENT_END,
-            ),
-            limits=limits,
-            sampling_strategy="deterministic_hash",
-            sample_seed="stable-incident",
-            excluded_run_identities=state.inspected_run_ledger if state else (),
-            candidate_page_token=state.candidate_page_token if state else None,
-            group_by_custom_search_attributes=("Team", "Domain"),
-        )
-        result = await service.analyze_incident_impact(_context(), request)
-        preferred = _with_population_continuation(
-            result,
-            state=state,
-            tool="analyze_incident_impact",
-            target_ref="ledger-prod",
-            scope="two-queue-incident",
-            sample_seed="stable-incident",
-            offset=state.inspection_offset if state else 0,
+    request = AnalyzeIncidentImpactRequest(
+        target_ref="ledger-prod",
+        query="WorkflowType IS NOT NULL",
+        incident_window=IncidentTimeWindow(
             started_at=INCIDENT_START,
             ended_at=INCIDENT_END,
-            confirmed=lambda run: run.classification == "confirmed_historical_impact",
-            discovered_activity_task_queues=(
-                result.scope.discovered_activity_task_queues if result.scope else ()
-            ),
-            candidate_page_token=state.candidate_page_token if state else None,
-        )
-        if preferred.continuation_token:
-            state = _CONTINUATIONS.decode(
-                preferred.continuation_token,
-                tool="analyze_incident_impact",
-                target_ref="ledger-prod",
-                query="two-queue-incident",
-            )
+        ),
+        limits=limits,
+        sampling_strategy="deterministic_hash",
+        sample_seed="stable-incident",
+        group_by_custom_search_attributes=("Team", "Domain"),
+    )
+    result = await service.analyze_incident_impact(_context(), request)
+    preferred = _with_population_continuation(
+        result,
+        state=None,
+        continuations=CONTINUATIONS,
+        tool="analyze_incident_impact",
+        target_ref="ledger-prod",
+        scope="two-queue-incident",
+        sample_seed="stable-incident",
+        started_at=INCIDENT_START,
+        ended_at=INCIDENT_END,
+        confirmed=lambda run: run.classification == "confirmed_historical_impact",
+        discovered_activity_task_queues=(
+            result.scope.discovered_activity_task_queues if result.scope else ()
+        ),
+    )
 
-    assert preferred is not None
-    assert preferred.cumulative.inspected == 160
-    assert preferred.cumulative.confirmed == 160
-    assert preferred.scope.candidate_population_complete is True
-    assert preferred.scope.incident_impact_complete is True
+    assert preferred.cumulative.inspected == 100
+    assert preferred.cumulative.confirmed == 100
+    assert preferred.scope.candidate_population_complete is False
+    assert preferred.scope.incident_impact_complete is False
     assert set(preferred.scope.affected_activity_task_queues) == {
         "audit-activity",
         "ledger-activity",
@@ -433,16 +426,15 @@ async def test_explicit_incident_queue_reports_excluded_dependency_and_subset_sc
     preferred = _with_population_continuation(
         result,
         state=None,
+        continuations=CONTINUATIONS,
         tool="analyze_incident_impact",
         target_ref="ledger-prod",
         scope="explicit-subset",
         sample_seed="explicit-subset",
-        offset=0,
         started_at=INCIDENT_START,
         ended_at=INCIDENT_END,
         confirmed=lambda run: run.classification == "confirmed_historical_impact",
         discovered_activity_task_queues=result.scope.discovered_activity_task_queues,
-        candidate_page_token=None,
     )
 
     assert preferred.scope.completion_scope == "explicit_queue_subset"

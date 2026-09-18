@@ -12,10 +12,10 @@ import pytest
 
 from ops_mcp.contracts import (
     CountWorkflowsRequest,
-    DiagnoseWorkflowRequest,
-    FilterWorkflowsRequest,
+    InspectWorkflowExecutionRequest,
     PlanWorkflowResetRequest,
     ResolveTargetRequest,
+    SearchWorkflowRunsRequest,
     WorkflowField,
 )
 from ops_mcp.contracts.primitives import Completeness
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 async def test_session_one_through_live_composed_services() -> None:
-    root = build_composition_root("config/targets.example.yaml")
+    root = build_composition_root(os.getenv("OPS_MCP_TARGET_CONFIG", "config/targets.example.yaml"))
     try:
         resolved = root.services.targets.resolve_target(
             root.contexts.create(), ResolveTargetRequest(human_name="orders prod")
@@ -40,9 +40,9 @@ async def test_session_one_through_live_composed_services() -> None:
         assert resolved.target_ref == "orders-prod"
         assert "address" not in resolved.model_dump_json()
 
-        filtered = await root.services.visibility.filter_workflows(
+        filtered = await root.services.visibility.search_workflow_runs(
             root.contexts.create(),
-            FilterWorkflowsRequest(
+            SearchWorkflowRunsRequest(
                 target_ref=resolved.target_ref,
                 query="OrderId = '88231'",
                 fields=(
@@ -59,29 +59,27 @@ async def test_session_one_through_live_composed_services() -> None:
         assert failed.run_id
         assert failed.status == "FAILED"
 
-        diagnosis = await root.services.diagnose_workflow.diagnose_workflow(
+        diagnosis = await root.services.reasoning.inspect_workflow_execution(
             root.contexts.create(),
-            DiagnoseWorkflowRequest(
+            InspectWorkflowExecutionRequest(
                 target_ref=resolved.target_ref,
                 workflow_id=failed.workflow_id,
                 run_id=failed.run_id,
             ),
         )
-        assert diagnosis.history_inspection.completion is Completeness.COMPLETE
-        assert diagnosis.retry_assessment.assessment == "unknown"
+        assert diagnosis.inspection.completion == "complete"
         assert any(
             finding.code == "activity_retry_exhausted"
             and "503 Service Unavailable" in finding.summary
-            for finding in diagnosis.findings
+            for finding in (
+                *diagnosis.answer.retry_findings,
+                *diagnosis.answer.failure_findings,
+            )
         )
-        assert diagnosis.task_queues
-        assert all(queue.observed_at is not None for queue in diagnosis.task_queues)
-        assert all(queue.historical_health_known is False for queue in diagnosis.task_queues)
-        assert any(
-            "does not establish health at failure time" in caveat
-            for finding in diagnosis.findings
-            for caveat in finding.caveats
-        )
+        assert diagnosis.answer.task_queues
+        assert all(queue.observed_at is not None for queue in diagnosis.answer.task_queues)
+        assert all(queue.historical_health_known is False for queue in diagnosis.answer.task_queues)
+        assert any("historical outage" in item for item in diagnosis.unsupported_conclusions)
 
         count = await root.services.visibility.count_workflows(
             root.contexts.create(),
@@ -93,7 +91,7 @@ async def test_session_one_through_live_composed_services() -> None:
         assert count.answer.count >= 12
         assert count.answer.precision == "approximate"
 
-        plan = await root.services.plan_workflow_reset.plan_workflow_reset(
+        plan = await root.services.reasoning.plan_workflow_reset(
             root.contexts.create(),
             PlanWorkflowResetRequest(
                 target_ref=resolved.target_ref,

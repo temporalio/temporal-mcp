@@ -163,8 +163,8 @@ answer template.
 Session 1 must verify:
 
 1. `resolve_target` maps `orders prod` without exposing connection material.
-2. `filter_workflows` resolves `OrderId = '88231'` to one failed exact run.
-3. `diagnose_workflow` reports three failed `EnrichProduct` attempts ending in a
+2. `search_workflow_runs` resolves `OrderId = '88231'` to one failed exact run.
+3. `inspect_workflow_execution` reports three failed `EnrichProduct` attempts ending in a
    catalog 503, while distinguishing current worker health from historical health.
 4. `count_workflows` reports twelve completed comparable workflows in the specified
    recovery window.

@@ -17,7 +17,9 @@ pytestmark = pytest.mark.skipif(
 
 
 async def test_visibility_schema_and_first_demo_page_against_pinned_server() -> None:
-    catalog = YamlTargetCatalog.load("config/targets.example.yaml")
+    catalog = YamlTargetCatalog.load(
+        os.getenv("OPS_MCP_TARGET_CONFIG", "config/targets.example.yaml")
+    )
     context = RequestContextFactory(
         DemoIdentityProvider(), default_timeout=timedelta(seconds=10)
     ).create(request_id="visibility-integration")

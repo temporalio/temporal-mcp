@@ -20,7 +20,7 @@ from ops_mcp.gateways import (
     SdkVisibilityGateway,
     SdkWorkflowGateway,
 )
-from ops_mcp.runtime import DemoIdentityProvider, RequestContextFactory
+from ops_mcp.runtime import DemoIdentityProvider, InvalidConfigurationError, RequestContextFactory
 from ops_mcp.services import (
     ConfiguredQueryApprovalPolicy,
     ConnectionCheckService,
@@ -31,16 +31,12 @@ from ops_mcp.services import (
     DefaultTargetService,
     DefaultVisibilityService,
     DefaultWorkflowReadService,
-    DescribeTaskQueueService,
-    DescribeWorkflowService,
-    DiagnoseWorkflowService,
     NamespaceReadService,
-    PlanWorkflowResetService,
     PopulationDiagnosticService,
+    ReasoningService,
     TargetService,
     VisibilityService,
-    WorkflowHistorySliceService,
-    WorkflowResultService,
+    WorkflowReadService,
 )
 from ops_mcp.targets import YamlTargetCatalog
 
@@ -54,22 +50,10 @@ class ServiceBundle:
     connection: ConnectionCheckService
     targets: TargetService
     visibility: VisibilityService
-    describe_workflow: DescribeWorkflowService
-    workflow_history: WorkflowHistorySliceService
-    workflow_result: WorkflowResultService
-    task_queue: DescribeTaskQueueService
+    workflow_reads: WorkflowReadService
     namespace_reads: NamespaceReadService
-    diagnose_workflow: DiagnoseWorkflowService
-    plan_workflow_reset: PlanWorkflowResetService
+    reasoning: ReasoningService
     population: PopulationDiagnosticService
-
-
-@dataclass(frozen=True)
-class ReasoningServiceSlots:
-    """Deprecated compatibility seam; generalized services now live in `ServiceBundle`."""
-
-    diagnose_workflow: object | None = None
-    plan_workflow_reset: object | None = None
 
 
 @dataclass
@@ -77,7 +61,6 @@ class CompositionRoot:
     contexts: RequestContextFactory
     services: ServiceBundle
     client_provider: ShutdownableClientProvider
-    reasoning: ReasoningServiceSlots = ReasoningServiceSlots()
 
     async def shutdown(self) -> None:
         await self.client_provider.shutdown()
@@ -134,13 +117,9 @@ def build_composition_root(
             ),
             targets=DefaultTargetService(catalog),
             visibility=DefaultVisibilityService(catalog, visibility_gateway),
-            describe_workflow=workflow_reads,
-            workflow_history=workflow_reads,
-            workflow_result=workflow_reads,
-            task_queue=workflow_reads,
+            workflow_reads=workflow_reads,
             namespace_reads=namespace_reads,
-            diagnose_workflow=reasoning,
-            plan_workflow_reset=reasoning,
+            reasoning=reasoning,
             population=population,
         ),
         client_provider=provider,
@@ -151,7 +130,13 @@ def _default_target_config_path() -> Path:
     configured = os.getenv("OPS_MCP_TARGET_CONFIG")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[3] / "config" / "targets.example.yaml"
+    checkout_example = Path(__file__).resolve().parents[3] / "config" / "targets.example.yaml"
+    if checkout_example.is_file():
+        return checkout_example
+    raise InvalidConfigurationError(
+        "OPS_MCP_TARGET_CONFIG must point to a target configuration file when ops-mcp is "
+        "run outside its source checkout"
+    )
 
 
 def _resolve_query_approvals(

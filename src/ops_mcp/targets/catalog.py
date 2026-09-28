@@ -1,4 +1,4 @@
-"""Group-scoped target catalog backed by the prototype YAML format."""
+"""Group-scoped target catalog backed by YAML configuration."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class TargetCatalog(Protocol):
 
 
 class YamlTargetCatalog:
-    """Loads the existing `groups.<group>.targets` demo configuration unchanged."""
+    """Load configured Temporal targets grouped by their authorized operator group."""
 
     def __init__(self, groups: dict[str, dict[str, ResolvedTarget]]) -> None:
         self._groups = groups

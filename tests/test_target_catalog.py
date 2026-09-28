@@ -11,8 +11,19 @@ from ops_mcp.runtime import (
 from ops_mcp.targets import YamlTargetCatalog
 
 
-def test_new_catalog_adapts_existing_demo_yaml() -> None:
+def test_customer_example_config_is_valid() -> None:
     catalog = YamlTargetCatalog.load("config/targets.example.yaml")
+    principal = Principal(subject="operator", groups=("operators",))
+
+    target = catalog.resolve(principal, "payments prod")
+
+    assert target.target_ref == "payments-prod"
+    assert target.connection.tls is True
+    assert target.connection.api_key_env == "TEMPORAL_API_KEY"
+
+
+def test_catalog_loads_demo_fixture_yaml() -> None:
+    catalog = YamlTargetCatalog.load("config/targets.demo.yaml")
     principal = Principal(subject="demo", groups=("demo-support", "demo-platform"))
 
     target = catalog.resolve(principal, "Orders_Prod")

@@ -31,8 +31,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_session_one_through_live_composed_services() -> None:
-    root = build_composition_root(os.getenv("OPS_MCP_TARGET_CONFIG", "config/targets.example.yaml"))
+async def test_session_one_through_live_composed_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPS_MCP_GROUP", "demo-support")
+    root = build_composition_root(os.getenv("OPS_MCP_TARGET_CONFIG", "config/targets.demo.yaml"))
     try:
         resolved = root.services.targets.resolve_target(
             root.contexts.create(), ResolveTargetRequest(human_name="orders prod")

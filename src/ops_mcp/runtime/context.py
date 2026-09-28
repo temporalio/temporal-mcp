@@ -29,11 +29,19 @@ class IdentityProvider(Protocol):
 class DemoIdentityProvider:
     """Unauthenticated POC identity source; replace at the transport edge later."""
 
-    def __init__(self, group_env: str = "OPS_MCP_DEMO_GROUP") -> None:
+    def __init__(
+        self,
+        group_env: str = "OPS_MCP_GROUP",
+        legacy_group_env: str | None = "OPS_MCP_DEMO_GROUP",
+    ) -> None:
         self._group_env = group_env
+        self._legacy_group_env = legacy_group_env
 
     def current_principal(self) -> Principal:
-        group = os.getenv(self._group_env, "demo-support")
+        group = os.getenv(self._group_env)
+        if group is None and self._legacy_group_env is not None:
+            group = os.getenv(self._legacy_group_env)
+        group = group or "operators"
         return Principal(subject="unauthenticated-demo", groups=(group,))
 
 

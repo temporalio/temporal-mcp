@@ -290,7 +290,7 @@ class _TaskQueueGateway:
 
 @pytest.mark.asyncio
 async def test_session_one_through_typed_services() -> None:
-    catalog = YamlTargetCatalog.load("config/targets.example.yaml")
+    catalog = YamlTargetCatalog.load("config/targets.demo.yaml")
     targets = DefaultTargetService(catalog)
     visibility = DefaultVisibilityService(catalog, _VisibilityGateway())
     reasoning = DefaultReasoningService(

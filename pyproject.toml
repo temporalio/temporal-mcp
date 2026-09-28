@@ -1,7 +1,7 @@
 [project]
 name = "ops-mcp"
 version = "0.1.0"
-description = "Read-only Temporal operations MCP prototype"
+description = "Investigate Temporal workflows from an MCP client using read-only operations"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

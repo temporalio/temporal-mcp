@@ -1,24 +1,15 @@
-# The auth adapter supplies a group. During the unauthenticated demo only,
-# OPS_MCP_DEMO_GROUP selects one of these groups.
+# Copy this file to config/targets.yaml and replace the placeholder values.
+# OPS_MCP_GROUP selects one of the groups below until a transport identity provider is available.
 groups:
-  demo-support:
+  operators:
     targets:
-      orders-prod:
+      payments-prod:
         aliases:
-          - orders prod
-          - production orders
-        account: local-demo
-        cluster: temporal-dev
-        namespace: default
-        address: 127.0.0.1:7233
-        tls: false
-  demo-platform:
-    targets:
-      orders-prod:
-        aliases:
-          - orders prod
-        account: local-demo
-        cluster: temporal-dev
-        namespace: default
-        address: 127.0.0.1:7233
-        tls: false
+          - payments prod
+          - production payments
+        account: your-account
+        cluster: payments
+        namespace: "<namespace>.<account-id>"
+        address: "<namespace>.<account-id>.tmprl.cloud:7233"
+        tls: true
+        api_key_env: TEMPORAL_API_KEY

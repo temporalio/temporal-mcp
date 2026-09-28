@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from ops_mcp.runtime import (
     BasicBudgetLimits,
+    DemoIdentityProvider,
     Principal,
     RequestContextFactory,
 )
@@ -35,3 +36,30 @@ def test_request_context_can_apply_tool_specific_basic_limits() -> None:
     context = factory.create(limits=BasicBudgetLimits(temporal_calls=101))
 
     assert context.budget.limits.temporal_calls == 101
+
+
+def test_environment_identity_prefers_operator_group_variable(monkeypatch) -> None:
+    monkeypatch.setenv("OPS_MCP_GROUP", "operators")
+    monkeypatch.setenv("OPS_MCP_DEMO_GROUP", "legacy-demo")
+
+    principal = DemoIdentityProvider().current_principal()
+
+    assert principal.groups == ("operators",)
+
+
+def test_environment_identity_accepts_legacy_group_variable(monkeypatch) -> None:
+    monkeypatch.delenv("OPS_MCP_GROUP", raising=False)
+    monkeypatch.setenv("OPS_MCP_DEMO_GROUP", "legacy-demo")
+
+    principal = DemoIdentityProvider().current_principal()
+
+    assert principal.groups == ("legacy-demo",)
+
+
+def test_environment_identity_defaults_to_operators(monkeypatch) -> None:
+    monkeypatch.delenv("OPS_MCP_GROUP", raising=False)
+    monkeypatch.delenv("OPS_MCP_DEMO_GROUP", raising=False)
+
+    principal = DemoIdentityProvider().current_principal()
+
+    assert principal.groups == ("operators",)

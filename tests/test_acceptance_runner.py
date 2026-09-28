@@ -79,6 +79,7 @@ def test_generated_target_and_environment_point_only_at_child_server(tmp_path: P
     assert "Scenario" not in config_text
     assert env["TEMPORAL_ADDRESS"] == "127.0.0.1:17433"
     assert env["OPS_MCP_TARGET_CONFIG"] == str(config)
+    assert env["OPS_MCP_GROUP"] == "demo-support"
     assert env["UNRELATED"] == "kept"
     assert "TEMPORAL_API_KEY" not in env
     assert "TEMPORAL_TLS" not in env

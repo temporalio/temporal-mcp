@@ -138,7 +138,7 @@ def child_environment(base: dict[str, str], port: int, target_config: Path) -> d
             "TEMPORAL_ADDRESS": f"127.0.0.1:{port}",
             "TEMPORAL_NAMESPACE": "default",
             "OPS_MCP_TARGET_CONFIG": str(target_config),
-            "OPS_MCP_DEMO_GROUP": "demo-support",
+            "OPS_MCP_GROUP": "demo-support",
         }
     )
     for cloud_setting in ("TEMPORAL_API_KEY", "TEMPORAL_TLS"):

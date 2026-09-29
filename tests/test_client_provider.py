@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import pytest
 from temporalio.client import Client
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError, RPCStatusCode, TLSConfig
 
 from ops_mcp.clients import CachingTemporalClientProvider, acquire_client
 from ops_mcp.runtime import (
@@ -58,6 +58,57 @@ async def test_provider_classifies_missing_credentials_without_leaking_env_name(
 
     assert exc_info.value.code == "temporal_authentication_failed"
     assert "SECRET_TEMPORAL_KEY" not in str(exc_info.value)
+
+
+async def test_provider_builds_mtls_config_from_server_side_files() -> None:
+    connector = FakeConnector()
+    credentials = {
+        "/run/secrets/temporal-client.pem": b"client cert",
+        "/run/secrets/temporal-client.key": b"client key",
+        "/run/secrets/temporal-ca.pem": b"server ca",
+    }
+    provider = CachingTemporalClientProvider(
+        connector=connector,
+        credential_file_reader=credentials.__getitem__,
+    )
+    descriptor = ConnectionDescriptor(
+        address="temporal.example:7233",
+        namespace="orders",
+        tls=True,
+        server_name="temporal.internal",
+        client_cert_path="/run/secrets/temporal-client.pem",
+        client_key_path="/run/secrets/temporal-client.key",
+        server_ca_cert_path="/run/secrets/temporal-ca.pem",
+    )
+
+    await provider.get_client("orders-prod", descriptor)
+
+    tls = connector.calls[0][1]["tls"]
+    assert isinstance(tls, TLSConfig)
+    assert tls.client_cert == b"client cert"
+    assert tls.client_private_key == b"client key"
+    assert tls.server_root_ca_cert == b"server ca"
+    assert tls.domain == "temporal.internal"
+
+
+async def test_provider_classifies_unreadable_mtls_file_without_leaking_path() -> None:
+    def unreadable(_: str) -> bytes:
+        raise OSError("private path details")
+
+    provider = CachingTemporalClientProvider(credential_file_reader=unreadable)
+    descriptor = ConnectionDescriptor(
+        address="temporal.example:7233",
+        namespace="orders",
+        tls=True,
+        client_cert_path="/secret/client.pem",
+        client_key_path="/secret/client.key",
+    )
+
+    with pytest.raises(MissingCredentialError) as exc_info:
+        await provider.get_client("orders-prod", descriptor)
+
+    assert exc_info.value.code == ErrorCode.TEMPORAL_AUTHENTICATION_FAILED
+    assert "/secret/" not in str(exc_info.value)
 
 
 async def test_provider_invalidation_and_shutdown() -> None:

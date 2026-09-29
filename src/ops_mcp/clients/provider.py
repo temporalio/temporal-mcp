@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Protocol, cast
 
 from temporalio.client import Client
@@ -21,6 +22,11 @@ from ops_mcp.targets.models import ConnectionDescriptor
 
 ClientConnector = Callable[..., Awaitable[Client]]
 CredentialResolver = Callable[[str], str | None]
+CredentialFileReader = Callable[[str], bytes]
+
+
+def _read_credential_file(path: str) -> bytes:
+    return Path(path).read_bytes()
 
 
 class TemporalClientProvider(Protocol):
@@ -47,6 +53,7 @@ class CachingTemporalClientProvider:
         *,
         connector: ClientConnector | None = None,
         credential_resolver: CredentialResolver = os.getenv,
+        credential_file_reader: CredentialFileReader = _read_credential_file,
         identity: str = "ops-mcp",
         connection_attempt_timeout: float = 15.0,
     ) -> None:
@@ -54,6 +61,7 @@ class CachingTemporalClientProvider:
             raise ValueError("connection_attempt_timeout must be positive")
         self._connector = connector or cast(ClientConnector, Client.connect)
         self._credential_resolver = credential_resolver
+        self._credential_file_reader = credential_file_reader
         self._identity = identity
         self._connection_attempt_timeout = connection_attempt_timeout
         self._clients: dict[ConnectionDescriptor, Client] = {}
@@ -113,15 +121,42 @@ class CachingTemporalClientProvider:
             raise MissingCredentialError(target_ref)
         return api_key
 
+    def _read_tls_file(self, target_ref: str, path: str | None) -> bytes | None:
+        if path is None:
+            return None
+        try:
+            contents = self._credential_file_reader(path)
+        except OSError as exc:
+            raise MissingCredentialError(target_ref) from exc
+        if not contents:
+            raise MissingCredentialError(target_ref)
+        return contents
+
+    def _tls_config(self, target_ref: str, descriptor: ConnectionDescriptor) -> bool | TLSConfig:
+        if not descriptor.tls:
+            return False
+        if not any(
+            (
+                descriptor.server_name,
+                descriptor.client_cert_path,
+                descriptor.client_key_path,
+                descriptor.server_ca_cert_path,
+            )
+        ):
+            return True
+        return TLSConfig(
+            server_root_ca_cert=self._read_tls_file(target_ref, descriptor.server_ca_cert_path),
+            domain=descriptor.server_name,
+            client_cert=self._read_tls_file(target_ref, descriptor.client_cert_path),
+            client_private_key=self._read_tls_file(target_ref, descriptor.client_key_path),
+        )
+
     async def _connect(self, target_ref: str, descriptor: ConnectionDescriptor) -> Client:
         api_key = self._resolve_api_key(target_ref, descriptor)
-        tls: bool | TLSConfig = descriptor.tls
-        if descriptor.server_name:
-            tls = TLSConfig(domain=descriptor.server_name)
         return await self._connector(
             descriptor.address,
             namespace=descriptor.namespace,
-            tls=tls,
+            tls=self._tls_config(target_ref, descriptor),
             api_key=api_key,
             identity=self._identity,
         )

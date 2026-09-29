@@ -4,7 +4,7 @@
   environment name mean for the current caller, or which targets may I inspect?
 - **Inputs:** optional `human_name: str`; identity comes from request context, not arguments.
 - **Output:** a discriminated `answer`. An exact unique match has `kind: resolved`,
-  `target_ref`, display name, account label, cluster label, namespace, and
+  `target_ref`, display name, optional account and cluster labels, namespace, and
   `resolved_from`. Discovery or an exact ambiguous match has `kind: candidates`,
   a reason, and deterministically ordered public candidate summaries. Connection
   addresses, TLS configuration, credential configuration, and secrets never cross

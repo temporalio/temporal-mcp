@@ -28,33 +28,94 @@ Copy the target configuration template and replace its placeholder values:
 cp config/targets.example.yaml config/targets.yaml
 ```
 
-The template connects to Temporal Cloud:
+Each key under `targets` is a user-chosen target name. The name identifies the environment in MCP
+prompts and does not need to match the Temporal Namespace. Optional aliases let people use other
+familiar names for the same target.
+
+The template connects to Temporal Cloud with an API key:
 
 ```yaml
 # config/targets.yaml
 groups:
+  # Local access group selected by OPS_MCP_GROUP; it is not sent to Temporal.
   operators:
     targets:
-      payments-prod:
+      # Canonical target name returned to the agent and reused in MCP tool calls.
+      my-cloud-target:
+        # Human-friendly resolution names; the first alias is the display name.
         aliases:
-          - payments prod
-          - production payments
-        account: acme
-        cluster: payments
+          - my cloud target
+        # Optional labels returned to the agent; omit them when they are not useful.
+        # account: "<account-label>"
+        # cluster: "<cluster-label>"
+        # Real Temporal Cloud Namespace and frontend endpoint.
         namespace: "<namespace>.<account-id>"
         address: "<namespace>.<account-id>.tmprl.cloud:7233"
         tls: true
+        # Name of the environment variable containing the key, not the key itself.
         api_key_env: TEMPORAL_API_KEY
 ```
 
-For a self-hosted cluster, set `address` to its frontend host and port, choose the appropriate
-`tls` value, and omit `api_key_env` if the cluster does not require an API key.
+The target fields have three different roles:
 
-The configuration stores only the name of the credential environment variable. Keep the credential
+| Field | What it represents | Used for |
+| --- | --- | --- |
+| Group key, such as `operators` | Local access-group name | Selects which targets the current MCP caller can access; must match `OPS_MCP_GROUP` in this prototype |
+| Target key, such as `my-cloud-target` | User-chosen canonical target name | Returned to the agent as `target_ref` and reused in tool calls and target-specific policy |
+| `aliases` | Optional human-friendly names | Resolving natural-language target names; the first alias is returned as the display name |
+| `account` | Optional account label | Agent-visible metadata for distinguishing targets; it is not used to construct the Namespace or endpoint |
+| `cluster` | Optional cluster/deployment label | Agent-visible metadata for distinguishing targets; it is not used by the Temporal connection |
+| `namespace` | Exact Temporal Namespace | The real Namespace used by SDK operations; Cloud Namespaces include the account ID suffix |
+| `address` | Temporal frontend gRPC address | The real server endpoint used by the SDK; it remains server-side |
+| `tls` | Whether the SDK uses TLS | Connection security; it must be `true` for Temporal Cloud |
+| `api_key_env` | Environment-variable name | Looks up an API key in the MCP server process without putting the secret in YAML |
+| `client_cert_path`, `client_key_path` | Readable PEM file paths | Supplies the client identity for mTLS; the paths and file contents remain server-side |
+| `server_ca_cert_path`, `server_name` | Optional private-CA and TLS-name overrides | Nonstandard or private deployments; normally omitted for `*.tmprl.cloud` |
+
+API key configuration stores only the name of the credential environment variable. Keep the key
 itself in your MCP client's secret store or process environment:
 
 ```bash
 export TEMPORAL_API_KEY="..."
+```
+
+To connect to Temporal Cloud with mTLS instead, remove `api_key_env` and configure the client PEM
+file paths:
+
+```yaml
+groups:
+  operators:
+    targets:
+      my-cloud-target:
+        aliases:
+          - my cloud target
+        # Optional labels returned to the agent; omit them when they are not useful.
+        # account: "<account-label>"
+        # cluster: "<cluster-label>"
+        # These values must identify the real Temporal Cloud Namespace and endpoint.
+        namespace: "<namespace>.<account-id>"
+        address: "<namespace>.<account-id>.tmprl.cloud:7233"
+        tls: true
+        # Files containing the working client certificate and its private key.
+        client_cert_path: /absolute/path/to/client.pem
+        client_key_path: /absolute/path/to/client.key
+```
+
+`client_cert_path` and `client_key_path` must be configured together. All certificate paths are
+read by the server when it first connects to the target; their contents are never exposed through
+MCP tools. The MCP server process must be able to read both files. Restart the MCP server after
+replacing either file so it creates a new Temporal connection with the rotated credentials.
+
+For the standard `*.tmprl.cloud` endpoint, leave `server_ca_cert_path` and `server_name` unset. For
+a self-hosted cluster, set `address` to its frontend host and port, choose the appropriate `tls`
+value, and omit authentication fields the cluster does not require. Private deployments can also
+set these optional TLS fields:
+
+```yaml
+        # Server certificate signed by a private CA:
+        server_ca_cert_path: /absolute/path/to/server-ca.pem
+        # Certificate/SNI name override when the dialed host uses a different name:
+        server_name: temporal.example.com
 ```
 
 You can add more targets under `targets` and give each one aliases that match how your team refers
@@ -85,8 +146,9 @@ to your checkout:
 }
 ```
 
-Make sure the MCP server process also receives `TEMPORAL_API_KEY` (or whichever variable you named
-in `api_key_env`). How secrets are supplied varies by MCP client.
+When using API-key authentication, make sure the MCP server process also receives
+`TEMPORAL_API_KEY` (or whichever variable you named in `api_key_env`). How secrets are supplied
+varies by MCP client. This environment variable is not needed when using mTLS.
 
 `OPS_MCP_GROUP` is the prototype's temporary access-group selector. It must match a group in
 the target configuration. A real identity provider is planned before authenticated remote use.
@@ -96,12 +158,12 @@ the target configuration. A real identity provider is planned before authenticat
 Try prompts like:
 
 - “What Temporal environments can I access?”
-- “Check the connection to payments prod.”
-- “Why is workflow `payment-8472` stuck?”
-- “Find failed `PaymentWorkflow` runs from the last hour and summarize the common failures.”
-- “Is the `payment-activities` task queue backed up or missing workers?”
+- “Check the connection to my cloud target.”
+- “Why is workflow `<workflow-id>` stuck?”
+- “Find failed `<workflow-type>` runs from the last hour and summarize the common failures.”
+- “Is the `<task-queue>` task queue backed up or missing workers?”
 - “How many workflows were affected during the incident from 14:00 to 14:30 UTC?”
-- “Show me the recent failures for workflow `payment-8472` without dumping its full history.”
+- “Show me the recent failures for workflow `<workflow-id>` without dumping its full history.”
 - “Prepare a reset plan for this workflow. Do not execute anything.”
 
 The server tells the agent to resolve a configured target first, reuse that target throughout the
@@ -122,7 +184,7 @@ Workflow queries are denied by default. To approve specific no-argument queries 
 an environment variable to the server process:
 
 ```bash
-export OPS_MCP_QUERY_APPROVALS_JSON='{"payments-prod":["current_state","blocked_on"]}'
+export OPS_MCP_QUERY_APPROVALS_JSON='{"my-cloud-target":["current_state","blocked_on"]}'
 ```
 
 ## Safety model
@@ -130,7 +192,7 @@ export OPS_MCP_QUERY_APPROVALS_JSON='{"payments-prod":["current_state","blocked_
 - **Read-only by construction.** The server does not execute Temporal mutations. A reset plan may
   include a reviewable CLI command, but reports `executed: false` and never runs it.
 - **Credentials stay server-side.** Tool arguments and responses never contain Temporal addresses,
-  TLS settings, or API keys.
+  TLS settings, certificate contents, private keys, or API keys.
 - **Investigations are bounded.** Large searches use explicit limits and resumable continuation
   tokens instead of silently scanning an entire namespace.
 - **Partial evidence stays visible.** Results distinguish candidates from confirmed workflows and

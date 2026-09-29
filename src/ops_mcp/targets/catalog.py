@@ -138,6 +138,9 @@ def _parse_target(target_ref: str, value: Any) -> ResolvedTarget:
             "tls",
             "api_key_env",
             "server_name",
+            "client_cert_path",
+            "client_key_path",
+            "server_ca_cert_path",
             "credential_generation",
         }
         if unknown:
@@ -161,13 +164,16 @@ def _parse_target(target_ref: str, value: Any) -> ResolvedTarget:
             tls=tls,
             api_key_env=_optional_string(value.get("api_key_env")),
             server_name=_optional_string(value.get("server_name")),
+            client_cert_path=_optional_string(value.get("client_cert_path")),
+            client_key_path=_optional_string(value.get("client_key_path")),
+            server_ca_cert_path=_optional_string(value.get("server_ca_cert_path")),
             credential_generation=credential_generation,
         )
         return ResolvedTarget(
             target_ref=target_ref,
             aliases=aliases,
-            account=_required_string(value, "account"),
-            cluster=_required_string(value, "cluster"),
+            account=_optional_string(value.get("account")),
+            cluster=_optional_string(value.get("cluster")),
             namespace=namespace,
             connection=connection,
         )
@@ -194,7 +200,7 @@ def _non_empty_string(value: Any, name: str) -> str:
 
 def _target_key(
     target: ResolvedTarget,
-) -> tuple[str, str, str, str, ConnectionDescriptor]:
+) -> tuple[str, str | None, str | None, str, ConnectionDescriptor]:
     return (
         target.target_ref,
         target.account,
@@ -208,8 +214,8 @@ def _target_sort_key(target: ResolvedTarget) -> tuple[str, str, str, str, str]:
     return (
         _normalize(target.target_ref),
         _normalize(target.aliases[0] if target.aliases else target.target_ref),
-        _normalize(target.account),
-        _normalize(target.cluster),
+        _normalize(target.account or ""),
+        _normalize(target.cluster or ""),
         _normalize(target.namespace),
     )
 

@@ -22,8 +22,8 @@ class ResolveTargetRequest(ContractModel):
 class TargetCandidate(ContractModel):
     target_ref: NonEmptyString
     display_name: NonEmptyString
-    account: NonEmptyString
-    cluster: NonEmptyString
+    account: NonEmptyString | None = None
+    cluster: NonEmptyString | None = None
     namespace: NonEmptyString
 
 
@@ -31,8 +31,8 @@ class ResolvedTargetAnswer(ContractModel):
     kind: Literal["resolved"] = "resolved"
     target_ref: NonEmptyString
     display_name: NonEmptyString
-    account: NonEmptyString
-    cluster: NonEmptyString
+    account: NonEmptyString | None = None
+    cluster: NonEmptyString | None = None
     namespace: NonEmptyString
     resolved_from: NonEmptyString
     resolution: Literal["exact_name_or_alias", "sole_authorized_target"] = "exact_name_or_alias"

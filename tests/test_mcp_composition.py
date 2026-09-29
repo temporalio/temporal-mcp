@@ -455,7 +455,7 @@ async def test_default_query_allowlist_denies_without_temporal_io() -> None:
         await server.call_tool(
             "query_workflow",
             {
-                "target_ref": "payments-prod",
+                "target_ref": "my-cloud-target",
                 "workflow_id": "order-1",
                 "run_id": "run-1",
                 "query_name": "blocked_on",

@@ -1,15 +1,34 @@
 # Copy this file to config/targets.yaml and replace the placeholder values.
-# OPS_MCP_GROUP selects one of the groups below until a transport identity provider is available.
+# Group names are local access-control labels. OPS_MCP_GROUP must equal one of these keys; group
+# names are not sent to Temporal.
 groups:
   operators:
     targets:
-      payments-prod:
+      # This key is the canonical target name (target_ref) shown to the agent and reused in tool
+      # calls. It is local to this MCP server and does not need to match a Temporal resource name.
+      my-cloud-target:
+        # Optional names that people can use to resolve this target. The first alias is also the
+        # display name returned to the agent.
         aliases:
-          - payments prod
-          - production payments
-        account: your-account
-        cluster: payments
+          - my cloud target
+        # Optional labels returned to the agent to help distinguish targets. They do not affect
+        # the connection, so omit either one when it is not meaningful for your deployment.
+        # account: "<account-label>"
+        # cluster: "<cluster-label>"
+        # The exact Temporal Namespace. For Temporal Cloud this includes the account ID suffix.
         namespace: "<namespace>.<account-id>"
+        # The real Temporal frontend gRPC endpoint used by the SDK.
         address: "<namespace>.<account-id>.tmprl.cloud:7233"
+        # Enables TLS for the connection. Temporal Cloud requires TLS.
         tls: true
+        # The name of an environment variable containing the API key, not the API key itself.
         api_key_env: TEMPORAL_API_KEY
+        # To use mTLS instead, remove api_key_env and provide paths that the MCP process can read.
+        # These are real client certificate and private-key files used by the TLS connection.
+        # client_cert_path: /absolute/path/to/client.pem
+        # client_key_path: /absolute/path/to/client.key
+        # The standard *.tmprl.cloud endpoint does not require the optional fields below.
+        # Use server_ca_cert_path only when the server certificate uses a private CA.
+        # server_ca_cert_path: /absolute/path/to/server-ca.pem  # Private server CA
+        # Use server_name only when the dialed host needs a different TLS certificate/SNI name.
+        # server_name: temporal.example.com  # Certificate/SNI name override

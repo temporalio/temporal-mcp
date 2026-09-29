@@ -45,3 +45,26 @@ queues, histories, `Team`, and `Domain` to work through unrelated workflows.
 Run isolated acceptance for deterministic product checks. Run noisy acceptance separately as a
 robustness evaluation; a failure there must not be hidden by adding test-specific filtering to a
 production tool.
+
+## Live mTLS connection test
+
+The opt-in mTLS integration test requires `openssl` and a self-hosted `temporal-server` binary. It
+generates a disposable CA plus CA-signed server and client certificates, then configures the real
+Temporal frontend with its server certificate, `requireClientAuth: true`, and the CA in
+`clientCaFiles`. It verifies that a client without a certificate is rejected, then uses the normal
+target catalog and client provider to register the isolated test namespace and run live
+`GetSystemInfo` and `DescribeNamespace` RPCs directly against that frontend. There is no TLS proxy
+in this test.
+
+Build `temporal-server` from a compatible checkout of the Temporal server repository, then provide
+its path to the test:
+
+```bash
+OPS_MCP_MTLS_INTEGRATION=1 \
+OPS_MCP_TEMPORAL_SERVER_BINARY=/absolute/path/to/temporal-server \
+uv run pytest \
+  tests/integration/test_mtls_client_provider_integration.py
+```
+
+All generated keys, certificates, logs, and processes are scoped to the test's temporary directory
+and removed or stopped during cleanup.

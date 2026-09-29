@@ -14,6 +14,7 @@ from ops_mcp.runtime.budget import (
     BudgetSnapshot,
     CancellationToken,
     ExecutionBudget,
+    ScopedExecutionBudget,
 )
 from ops_mcp.runtime.context import (
     DemoIdentityProvider,
@@ -59,6 +60,7 @@ __all__ = [
     "DemoIdentityProvider",
     "ErrorCode",
     "ExecutionBudget",
+    "ScopedExecutionBudget",
     "FanoutResult",
     "IdentityProvider",
     "InvalidConfigurationError",

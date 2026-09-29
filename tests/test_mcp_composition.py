@@ -187,6 +187,7 @@ async def test_registers_all_generalized_tools_with_typed_schemas() -> None:
         "check_connection",
         "resolve_target",
         "search_workflow_runs",
+        "batch_search_workflow_runs",
         "count_workflows",
         "get_visibility_schema",
         "describe_workflow",
@@ -428,7 +429,7 @@ async def test_enum_validation_reports_allowed_values() -> None:
         )
 
     message = str(exc_info.value)
-    assert "'workflow' or 'activity'" in message
+    assert "'workflow', 'activity' or 'both'" in message
     assert services.calls == []
 
 

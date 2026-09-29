@@ -94,6 +94,8 @@ Errors are typed as `{code, message, retryable, details?}`. Baseline codes:
 - `target_not_authorized`
 - `temporal_unreachable`
 - `temporal_authentication_failed`
+- `temporal_permission_denied` (credentials were accepted, but the specific RPC was forbidden;
+  safe details identify the operation and gRPC status)
 - `namespace_not_found`
 - `invalid_visibility_query`
 - `workflow_not_found`
@@ -127,6 +129,7 @@ grammar, operators, grouping, and ordering support.
 | `get_visibility_schema` | direct read | [sheet](get_visibility_schema.md) | proposed |
 | `search_workflow_runs` | paged read | [compatibility sheet](filter_workflows.md) | preferred |
 | `count_workflows` | aggregate read | [sheet](count_workflows.md) | proposed |
+| `batch_search_workflow_runs` | bounded multi-target read | [sheet](batch_search_workflow_runs.md) | proposed |
 | `describe_workflow` | direct read | [sheet](describe_workflow.md) | proposed |
 | `get_workflow_history_slice` | bounded read | [sheet](get_workflow_history_slice.md) | proposed |
 | `get_workflow_result` | bounded read | [sheet](get_workflow_result.md) | proposed |

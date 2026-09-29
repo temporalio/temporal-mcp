@@ -23,6 +23,9 @@ groups:
         tls: true
         # The name of an environment variable containing the API key, not the API key itself.
         api_key_env: TEMPORAL_API_KEY
+        # Custom Search Attribute types are discovered through the namespace-read
+        # WorkflowService.GetSearchAttributes API and cached by the server. They are not
+        # duplicated in this file.
         # To use mTLS instead, remove api_key_env and provide paths that the MCP process can read.
         # These are real client certificate and private-key files used by the TLS connection.
         # client_cert_path: /absolute/path/to/client.pem

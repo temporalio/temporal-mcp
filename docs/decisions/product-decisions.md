@@ -80,8 +80,8 @@ not operational safety. See [reset-event-semantics.md](reset-event-semantics.md)
 
 ### PD-019 — Temporal owns Visibility query capabilities
 
-**Decision:** The MCP server exposes registered search-attribute names, sources,
-and indexed types, but it does not maintain a per-backend grammar/operator matrix
+**Decision:** The MCP server exposes legal search-attribute names and indexed types without
+claiming system/custom provenance, but it does not maintain a per-backend grammar/operator matrix
 or emulate unsupported ordering. The selected Temporal target validates each raw
 Visibility query. A rejected query returns a stable `invalid_visibility_query`
 code with bounded, sanitized rejection feedback so an agent can revise it.

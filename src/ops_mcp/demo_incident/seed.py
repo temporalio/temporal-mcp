@@ -1,4 +1,8 @@
-"""Seed Session 4 runs while activity dispatch is intentionally unavailable."""
+"""Administrative demo seeder, not part of the read-only MCP runtime.
+
+This setup command uses OperatorService only to create demo Search Attributes before evaluation.
+Runtime composition never imports or invokes it.
+"""
 
 from __future__ import annotations
 

@@ -29,13 +29,13 @@ from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.targets.models import ConnectionDescriptor, ResolvedTarget
 
 
-def _context() -> RequestContext:
+def _context(*, history_events: int = 20) -> RequestContext:
     return RequestContext(
         request_id="request-1",
         principal=Principal(subject="tester", groups=("test",)),
         budget=BasicExecutionBudget(
             deadline=datetime.now(UTC) + timedelta(seconds=30),
-            limits=BasicBudgetLimits(temporal_calls=10, pages=10, history_events=20),
+            limits=BasicBudgetLimits(temporal_calls=10, pages=10, history_events=history_events),
         ),
     )
 
@@ -161,6 +161,98 @@ async def test_forward_history_pages_are_charged_and_normalized() -> None:
     assert context.budget.snapshot().pages_read == 2
     assert context.budget.snapshot().history_events_read == 3
     assert service.forward_requests[1][0].next_page_token == b"two"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("delivered", "limit"), [(365, 200), (560, 500)])
+async def test_server_overdelivery_is_clipped_to_hard_limit(delivered: int, limit: int) -> None:
+    events = [
+        HistoryEvent(
+            event_id=index,
+            event_type=EventType.EVENT_TYPE_MARKER_RECORDED,
+            task_id=index,
+        )
+        for index in range(1, delivered + 1)
+    ]
+    for event in events:
+        event.event_time.FromDatetime(datetime(2026, 1, 1, tzinfo=UTC))
+    response = GetWorkflowExecutionHistoryResponse(
+        history=History(events=events), next_page_token=b"server-next"
+    )
+    service = _HistoryService([response, response])
+    gateway = SdkHistoryGateway(
+        _Provider(SimpleNamespace(workflow_service=service, data_converter=DataConverter.default))
+    )
+
+    first = await gateway.read(
+        _context(history_events=limit),
+        _target(),
+        "order-1",
+        "run-1",
+        max_events=limit,
+        page_size=limit,
+    )
+
+    assert len(first.events) == limit
+    assert first.events_scanned == limit
+    assert first.next_page_token == b""
+    assert first.next_page_offset == limit
+    assert not first.complete
+
+    remaining = delivered - limit
+    second = await gateway.read(
+        _context(history_events=remaining),
+        _target(),
+        "order-1",
+        "run-1",
+        max_events=remaining,
+        page_size=limit,
+        next_page_token=first.next_page_token,
+        page_offset=first.next_page_offset,
+    )
+    assert [event.event_id for event in second.events] == list(range(limit + 1, delivered + 1))
+
+
+@pytest.mark.asyncio
+async def test_reverse_overdelivery_continuation_has_no_skip_or_duplicate() -> None:
+    events = [
+        HistoryEvent(
+            event_id=index,
+            event_type=EventType.EVENT_TYPE_MARKER_RECORDED,
+            task_id=index,
+        )
+        for index in range(365, 0, -1)
+    ]
+    for event in events:
+        event.event_time.FromDatetime(datetime(2026, 1, 1, tzinfo=UTC))
+    response = GetWorkflowExecutionHistoryReverseResponse(history=History(events=events))
+    service = _HistoryService([], [response, response])
+    gateway = SdkHistoryGateway(
+        _Provider(SimpleNamespace(workflow_service=service, data_converter=DataConverter.default))
+    )
+
+    first = await gateway.read(
+        _context(history_events=200),
+        _target(),
+        "order-1",
+        "run-1",
+        max_events=200,
+        reverse=True,
+    )
+    second = await gateway.read(
+        _context(history_events=165),
+        _target(),
+        "order-1",
+        "run-1",
+        max_events=165,
+        next_page_token=first.next_page_token,
+        page_offset=first.next_page_offset,
+        reverse=True,
+    )
+
+    combined = [event.event_id for event in first.events + second.events]
+    assert combined == list(range(365, 0, -1))
+    assert len(combined) == len(set(combined))
 
 
 @pytest.mark.asyncio

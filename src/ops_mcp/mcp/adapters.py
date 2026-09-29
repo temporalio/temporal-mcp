@@ -16,6 +16,8 @@ from ops_mcp.contracts import (
     AnalyzeIncidentImpactResponse,
     AssessWorkflowRecoveryRequest,
     AssessWorkflowRecoveryResponse,
+    BatchSearchWorkflowRunsRequest,
+    BatchSearchWorkflowRunsResponse,
     CheckConnectionRequest,
     CheckConnectionResponse,
     CountWorkflowsRequest,
@@ -157,7 +159,21 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         ] = None,
         custom_search_attributes: Annotated[
             list[str] | None,
-            Field(description="Registered custom Search Attributes to project."),
+            Field(
+                description=(
+                    "Registered custom Search Attributes to project. System attributes must use "
+                    "system_search_attributes."
+                )
+            ),
+        ] = None,
+        system_search_attributes: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Supported Temporal system attributes to project without schema discovery; "
+                    "currently TemporalReportedProblems."
+                )
+            ),
         ] = None,
         page_size: Annotated[int, Field(ge=1, le=200, description="Maximum rows returned.")] = 100,
         continuation_token: Annotated[
@@ -176,6 +192,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                     else SearchWorkflowRunsRequest.model_fields["fields"].default
                 ),
                 custom_search_attributes=tuple(custom_search_attributes or ()),
+                system_search_attributes=tuple(system_search_attributes or ()),
                 page_size=page_size,
                 continuation_token=continuation_token,
             )
@@ -188,6 +205,46 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
             raise_service_error(
                 exc, context=context, tool_name="search_workflow_runs", target_ref=target_ref
             )
+
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    async def batch_search_workflow_runs(
+        target_refs: Annotated[
+            list[str], Field(min_length=1, max_length=20, description="Authorized target refs.")
+        ],
+        query: Annotated[str, Field(description="Shared raw Temporal Visibility query.")],
+        fields: Annotated[
+            list[WorkflowField] | None, Field(description="Shared projection.")
+        ] = None,
+        custom_search_attributes: Annotated[
+            list[str] | None, Field(description="Shared registered custom projections.")
+        ] = None,
+        system_search_attributes: Annotated[
+            list[str] | None,
+            Field(description="Shared supported Temporal system projections."),
+        ] = None,
+        page_size: Annotated[int, Field(ge=1, le=200)] = 100,
+    ) -> BatchSearchWorkflowRunsResponse:
+        """Search a bounded target set with bounded concurrency and per-target outcomes."""
+        try:
+            request = BatchSearchWorkflowRunsRequest(
+                target_refs=tuple(target_refs),
+                query=query,
+                fields=(
+                    tuple(fields)
+                    if fields
+                    else SearchWorkflowRunsRequest.model_fields["fields"].default
+                ),
+                custom_search_attributes=tuple(custom_search_attributes or ()),
+                system_search_attributes=tuple(system_search_attributes or ()),
+                page_size=page_size,
+            )
+        except ValidationError as exc:
+            raise_request_validation_error(exc)
+        context = root.contexts.create()
+        try:
+            return await root.services.visibility.batch_search_workflow_runs(context, request)
+        except Exception as exc:
+            raise_service_error(exc, context=context, tool_name="batch_search_workflow_runs")
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def count_workflows(
@@ -217,7 +274,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def get_visibility_schema(target_ref: TargetRefInput) -> GetVisibilitySchemaResponse:
-        """Use before uncertain system/custom fields; returns types and query examples."""
+        """List legal visibility fields, indexed types, and query examples."""
         try:
             request = GetVisibilitySchemaRequest(target_ref=target_ref)
         except ValidationError as exc:
@@ -343,8 +400,13 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
         target_ref: TargetRefInput,
         task_queue: Annotated[str, Field(description="Exact Temporal task-queue name.")],
         task_type: Annotated[
-            Literal["workflow", "activity"],
-            Field(description="Explicit queue kind; workflow and activity queues are distinct."),
+            Literal["workflow", "activity", "both"],
+            Field(
+                description=(
+                    "Queue kind. Use both to fetch independent workflow and activity snapshots "
+                    "with per-kind errors in one invocation."
+                )
+            ),
         ],
     ) -> DescribeTaskQueueResponse:
         """Describe a current queue snapshot, never historical queue health."""
@@ -1086,9 +1148,7 @@ def _with_population_continuation(
 ):
     original_size = len(response.model_dump_json().encode("utf-8"))
     next_candidate_page_token = response.inspection.candidate_next_page_token
-    stalled_cursor = (
-        response.inspection.candidate_collection_stop_reason == "stalled_page_token"
-    )
+    stalled_cursor = response.inspection.candidate_collection_stop_reason == "stalled_page_token"
     raw_has_more = next_candidate_page_token is not None
     has_next = raw_has_more and not stalled_cursor
     inspected = len(response.answer.runs)
@@ -1165,9 +1225,8 @@ def _with_population_continuation(
         state.cumulative_history_window_truncated if state else False
     ) or response.inspection.history_window_truncated
     cumulative_exhausted_dimension = (
-        (state.cumulative_exhausted_dimension if state else None)
-        or response.inspection.exhausted_dimension
-    )
+        state.cumulative_exhausted_dimension if state else None
+    ) or response.inspection.exhausted_dimension
     cumulative = PopulationProgress(
         inspected=cumulative_inspected,
         confirmed=cumulative_confirmed,
@@ -1191,9 +1250,11 @@ def _with_population_continuation(
     warnings = list(response.warnings)
     page_sampled = response.inspection.sample_size < response.inspection.candidate_frame_size
     cumulative_sampled = (state.cumulative_sampled if state else False) or page_sampled
-    cumulative_incomplete = (state.cumulative_incomplete if state else False) or (
-        response.inspection.completion in {"partial", "truncated", "budget_exhausted"}
-    ) or stalled_cursor
+    cumulative_incomplete = (
+        (state.cumulative_incomplete if state else False)
+        or (response.inspection.completion in {"partial", "truncated", "budget_exhausted"})
+        or stalled_cursor
+    )
     if stalled_cursor:
         warnings.append(
             "Visibility pagination returned an unchanged cursor; continuation stopped to avoid "

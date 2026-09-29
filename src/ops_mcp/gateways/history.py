@@ -52,6 +52,7 @@ class TemporalHistoryGateway(Protocol):
         page_size: int = 250,
         max_events: int | None = None,
         next_page_token: bytes | None = None,
+        page_offset: int = 0,
         reverse: bool = False,
     ) -> HistoryReadFact: ...
 
@@ -81,6 +82,7 @@ class SdkHistoryGateway:
         page_size: int = 250,
         max_events: int | None = None,
         next_page_token: bytes | None = None,
+        page_offset: int = 0,
         reverse: bool = False,
     ) -> HistoryReadFact:
         if not workflow_id or not run_id:
@@ -89,15 +91,27 @@ class SdkHistoryGateway:
             raise ValueError("page_size must be positive")
         if max_events is not None and max_events <= 0:
             raise ValueError("max_events must be positive when provided")
+        if page_offset < 0:
+            raise ValueError("page_offset must be non-negative")
 
         client = await acquire_client(self._provider, context, target)
         token = next_page_token or b""
         events: list[HistoryEventFact] = []
         pages_read = 0
+        offset = page_offset
+        resume_offset = 0
+        budget_stopped = False
         stop = False
         while not stop:
-            remaining = None if max_events is None else max_events - len(events)
+            requested_remaining = None if max_events is None else max_events - len(events)
+            budget_remaining = context.budget.remaining_history_events()
+            remaining = (
+                budget_remaining
+                if requested_remaining is None
+                else min(requested_remaining, budget_remaining)
+            )
             if remaining is not None and remaining <= 0:
+                budget_stopped = True
                 break
             request_size = page_size if remaining is None else min(page_size, remaining)
             context.budget.reserve_temporal_call(
@@ -129,14 +143,39 @@ class SdkHistoryGateway:
                         timeout=timeout,
                     )
             except RPCError as exc:
-                raise translate_rpc_error(exc, exact_run=True) from exc
+                raise translate_rpc_error(
+                    exc,
+                    exact_run=True,
+                    operation=(
+                        "get_workflow_execution_history_reverse"
+                        if reverse
+                        else "get_workflow_execution_history"
+                    ),
+                ) from exc
             context.budget.consume_page("workflow_history")
             pages_read += 1
             page = tuple(response.history.events)
-            context.budget.consume_history_events(len(page))
-            events.extend(await _normalize_events(client.data_converter, page))
-            token = response.next_page_token
+            if offset > len(page):
+                raise OpsMcpError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "The history continuation token is no longer valid",
+                    retryable=False,
+                )
+            available = page[offset:]
+            take = len(available) if remaining is None else min(len(available), remaining)
+            selected = available[:take]
+            context.budget.consume_history_events(len(selected))
+            events.extend(await _normalize_events(client.data_converter, selected))
+            if take < len(available):
+                # Temporal advanced to the next page even though it over-delivered this one.
+                # Re-fetch the same server page and skip the already returned prefix on resume.
+                resume_offset = offset + take
+            else:
+                token = response.next_page_token
+                offset = 0
             stop = not token or (max_events is not None and len(events) >= max_events)
+            if resume_offset:
+                stop = True
 
         return HistoryReadFact(
             workflow_id=workflow_id,
@@ -145,8 +184,11 @@ class SdkHistoryGateway:
             reverse=reverse,
             pages_read=pages_read,
             events_scanned=len(events),
-            next_page_token=token or None,
+            next_page_token=(
+                token if resume_offset or budget_stopped else (token or None)
+            ),
             observed_at=datetime.now(UTC),
+            next_page_offset=resume_offset,
         )
 
     async def closing_event(
@@ -200,7 +242,15 @@ class SdkHistoryGateway:
                     timeout=timeout,
                 )
         except RPCError as exc:
-            raise translate_rpc_error(exc, exact_run=True) from exc
+            raise translate_rpc_error(
+                exc,
+                exact_run=True,
+                operation=(
+                    "get_workflow_execution_history"
+                    if wait
+                    else "get_workflow_execution_history_reverse"
+                ),
+            ) from exc
         context.budget.consume_page("workflow_closing_event")
         page = tuple(response.history.events)
         context.budget.consume_history_events(len(page))
@@ -373,7 +423,9 @@ def normalize_failure(failure: Failure) -> FailureFact:
     )
 
 
-def translate_rpc_error(error: RPCError, *, exact_run: bool = False) -> OpsMcpError:
+def translate_rpc_error(
+    error: RPCError, *, operation: str, exact_run: bool = False
+) -> OpsMcpError:
     """Map SDK transport status to a stable, connection-safe internal error."""
     if error.status is RPCStatusCode.DEADLINE_EXCEEDED:
         return DeadlineExceededError()
@@ -385,11 +437,19 @@ def translate_rpc_error(error: RPCError, *, exact_run: bool = False) -> OpsMcpEr
             else "The requested workflow was not found",
             retryable=False,
         )
-    if error.status in {RPCStatusCode.UNAUTHENTICATED, RPCStatusCode.PERMISSION_DENIED}:
+    if error.status is RPCStatusCode.UNAUTHENTICATED:
         return OpsMcpError(
             ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
             "Temporal rejected the server's credentials",
             retryable=False,
+            details={"operation": operation, "grpc_status": "unauthenticated"},
+        )
+    if error.status is RPCStatusCode.PERMISSION_DENIED:
+        return OpsMcpError(
+            ErrorCode.TEMPORAL_PERMISSION_DENIED,
+            "Temporal denied permission for the requested operation",
+            retryable=False,
+            details={"operation": operation, "grpc_status": "permission_denied"},
         )
     if error.status is RPCStatusCode.UNAVAILABLE:
         return OpsMcpError(

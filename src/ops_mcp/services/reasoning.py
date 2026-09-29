@@ -540,6 +540,7 @@ def _systemic_queue_error(error: Exception) -> bool:
     return error.code in {
         ErrorCode.TARGET_NOT_AUTHORIZED,
         ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
+        ErrorCode.TEMPORAL_PERMISSION_DENIED,
         ErrorCode.TEMPORAL_UNREACHABLE,
         ErrorCode.DEADLINE_EXCEEDED,
         ErrorCode.BUDGET_EXHAUSTED,

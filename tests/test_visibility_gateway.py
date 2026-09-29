@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 from temporalio.api.enums.v1 import IndexedValueType
-from temporalio.api.operatorservice.v1 import ListSearchAttributesResponse
+from temporalio.api.workflowservice.v1 import GetSearchAttributesResponse
 from temporalio.client import (
     Client,
     WorkflowExecutionCount,
@@ -16,7 +16,7 @@ from temporalio.client import (
 from temporalio.common import SearchAttributeKey, SearchAttributePair, TypedSearchAttributes
 from temporalio.service import RPCError, RPCStatusCode
 
-from ops_mcp.facts import CountPrecision, SearchAttributeSource, VisibilityGroupBy
+from ops_mcp.facts import CountPrecision, VisibilityGroupBy
 from ops_mcp.gateways import SdkVisibilityGateway
 from ops_mcp.runtime import (
     BasicBudgetLimits,
@@ -66,12 +66,12 @@ class FakeIterator:
         self.current_page = self._rows
 
 
-class FakeOperatorService:
+class FakeWorkflowService:
     def __init__(self, response: object) -> None:
         self.response = response
         self.calls: list[tuple[object, dict[str, Any]]] = []
 
-    async def list_search_attributes(self, request: object, **kwargs: Any) -> object:
+    async def get_search_attributes(self, request: object, **kwargs: Any) -> object:
         self.calls.append((request, kwargs))
         if isinstance(self.response, Exception):
             raise self.response
@@ -84,11 +84,11 @@ class FakeClient:
         *,
         iterator: FakeIterator | None = None,
         count: WorkflowExecutionCount | Exception | None = None,
-        schema: ListSearchAttributesResponse | Exception | None = None,
+        read_schema: GetSearchAttributesResponse | Exception | None = None,
     ) -> None:
         self.iterator = iterator
         self.count = count
-        self.operator_service = FakeOperatorService(schema)
+        self.workflow_service = FakeWorkflowService(read_schema)
         self.list_calls: list[tuple[str | None, dict[str, Any]]] = []
         self.count_calls: list[tuple[str | None, dict[str, Any]]] = []
 
@@ -126,6 +126,64 @@ def _target() -> ResolvedTarget:
         namespace="default",
         connection=descriptor,
     )
+
+
+@pytest.mark.asyncio
+async def test_get_search_attributes_uses_namespace_read_workflow_service() -> None:
+    response = GetSearchAttributesResponse(
+        keys={
+            "WorkflowId": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+            "ExecutionStatus": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+            "TemporalReportedProblems": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD_LIST,
+            "TemporalFutureReservedField": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+            "Team": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        }
+    )
+    client = FakeClient(read_schema=response)
+
+    schema = await SdkVisibilityGateway(FakeProvider(client)).get_legal_search_attributes(
+        _context(), _target()
+    )
+
+    assert [(field.name, field.value_type.name) for field in schema.fields] == [
+        ("ExecutionStatus", "KEYWORD"),
+        ("Team", "KEYWORD"),
+        ("TemporalFutureReservedField", "KEYWORD"),
+        ("TemporalReportedProblems", "KEYWORD_LIST"),
+        ("WorkflowId", "KEYWORD"),
+    ]
+    assert len(client.workflow_service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_search_attributes_reports_low_privilege_operation() -> None:
+    client = FakeClient(
+        read_schema=RPCError("unsafe", RPCStatusCode.PERMISSION_DENIED, b"")
+    )
+
+    with pytest.raises(OpsMcpError) as caught:
+        await SdkVisibilityGateway(FakeProvider(client)).get_legal_search_attributes(
+            _context(), _target()
+        )
+
+    assert caught.value.details == {
+        "operation": "get_search_attributes",
+        "grpc_status": "permission_denied",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_search_attributes_maps_unimplemented_to_unsupported_capability() -> None:
+    client = FakeClient(
+        read_schema=RPCError("unknown", RPCStatusCode.UNIMPLEMENTED, b"")
+    )
+
+    with pytest.raises(OpsMcpError) as caught:
+        await SdkVisibilityGateway(FakeProvider(client)).get_legal_search_attributes(
+            _context(), _target()
+        )
+
+    assert caught.value.code is ErrorCode.UNSUPPORTED_CAPABILITY
 
 
 def _workflow_row() -> object:
@@ -238,31 +296,6 @@ async def test_count_uses_server_group_by_and_marks_sdk_precision_approximate() 
     assert context.budget.snapshot().pages_read == 0
 
 
-async def test_schema_reads_operator_service_and_preserves_server_types() -> None:
-    response = ListSearchAttributesResponse(
-        system_attributes={"WorkflowId": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD},
-        custom_attributes={"OrderId": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD},
-        storage_schema={"OrderId": "keyword"},
-    )
-    client = FakeClient(schema=response)
-    context = _context()
-
-    result = await SdkVisibilityGateway(FakeProvider(client)).get_visibility_schema(
-        context, _target()
-    )
-
-    request, kwargs = client.operator_service.calls[0]
-    assert request.namespace == "default"
-    assert kwargs["retry"] is True
-    assert kwargs["timeout"] <= timedelta(seconds=30)
-    assert [(field.name, field.source, field.value_type.name) for field in result.fields] == [
-        ("OrderId", SearchAttributeSource.CUSTOM, "KEYWORD"),
-        ("WorkflowId", SearchAttributeSource.SYSTEM, "KEYWORD"),
-    ]
-    assert result.storage_schema[0].name == "OrderId"
-    assert context.budget.snapshot().temporal_calls == 1
-
-
 async def test_invalid_query_returns_safe_temporal_rejection_feedback() -> None:
     rpc_error = RPCError(
         "invalid query: operation is not supported: 'ORDER BY' clause",
@@ -329,15 +362,3 @@ async def test_invalid_query_rejection_reason_is_single_line_and_bounded() -> No
     assert reason.endswith("…")
     assert "\n" not in reason
     assert "\x00" not in reason
-
-
-async def test_schema_unimplemented_is_classified_as_unsupported() -> None:
-    rpc_error = RPCError("unknown method", RPCStatusCode.UNIMPLEMENTED, b"")
-    client = FakeClient(schema=rpc_error)
-
-    with pytest.raises(OpsMcpError) as exc_info:
-        await SdkVisibilityGateway(FakeProvider(client)).get_visibility_schema(
-            _context(), _target()
-        )
-
-    assert exc_info.value.code is ErrorCode.UNSUPPORTED_CAPABILITY

@@ -22,12 +22,11 @@ from ops_mcp.facts import (
     PendingActivityFact,
     PollerFact,
     SearchAttributeFieldFact,
-    SearchAttributeSource,
+    SearchAttributeSchemaFact,
     TaskQueueFact,
     TaskQueueKind,
     VisibilityCountFact,
     VisibilityPageFact,
-    VisibilitySchemaFact,
     WorkflowExecutionFact,
     WorkflowTaskEventAttributes,
     WorkflowVisibilityFact,
@@ -71,7 +70,7 @@ class Visibility:
         *,
         has_more: bool,
         population_count: int = 100_000,
-        schema: VisibilitySchemaFact | None = None,
+        schema: SearchAttributeSchemaFact | None = None,
     ) -> None:
         self.rows = rows
         self.has_more = has_more
@@ -113,13 +112,12 @@ class Visibility:
             next_page_token=str(next_offset).encode("ascii") if has_more else None,
         )
 
-    async def get_visibility_schema(self, context, target):
+    async def get_legal_search_attributes(self, context, target):
         del target
         context.budget.reserve_temporal_call("schema")
         self.schema_calls += 1
         assert self.schema is not None
         return self.schema
-
 
 class Workflows:
     def __init__(self, values: dict[str, WorkflowExecutionFact]) -> None:
@@ -226,18 +224,16 @@ def _row(index: int, *, task_queue: str = "workflows") -> WorkflowVisibilityFact
     )
 
 
-def _custom_schema(*names: str) -> VisibilitySchemaFact:
-    return VisibilitySchemaFact(
+def _custom_schema(*names: str) -> SearchAttributeSchemaFact:
+    return SearchAttributeSchemaFact(
         namespace="default",
         fields=tuple(
             SearchAttributeFieldFact(
                 name=name,
-                source=SearchAttributeSource.CUSTOM,
                 value_type=IndexedValueTypeFact(code=2, name="KEYWORD"),
             )
             for name in names
         ),
-        storage_schema=(),
     )
 
 
@@ -458,16 +454,17 @@ async def test_failure_population_narrows_before_bounded_history_fanout() -> Non
     assert "StartTime" in result.answer.effective_query
 
 
-async def test_failure_aggregation_is_typed_complete_and_confirmed_only() -> None:
+@pytest.mark.parametrize("custom_name", ("ActivityId", "ActivityType"))
+async def test_activity_names_are_accepted_for_custom_grouping(custom_name: str) -> None:
     rows = tuple(
         replace(
             _row(index),
             workflow_type="FulfillmentWorkflow",
-            search_attributes={"Team": "shipping" if index < 2 else "platform"},
+            search_attributes={custom_name: "shipping" if index < 2 else "platform"},
         )
         for index in range(3)
     )
-    visibility = Visibility(rows, has_more=False, schema=_custom_schema("Team"))
+    visibility = Visibility(rows, has_more=False, schema=_custom_schema(custom_name))
     service = DefaultPopulationDiagnosticService(
         Catalog(_target()),
         visibility,
@@ -492,14 +489,14 @@ async def test_failure_aggregation_is_typed_complete_and_confirmed_only() -> Non
             ),
             sampling_strategy="deterministic_hash",
             sample_seed="fixed",
-            group_by_custom_search_attributes=("Team",),
+            group_by_custom_search_attributes=(custom_name,),
         ),
     )
 
     aggregation = result.answer.affected_aggregation
     assert visibility.schema_calls == 1
     assert aggregation.scope == "complete_query_population"
-    assert aggregation.dimensions == ("workflow_type", "Team")
+    assert aggregation.dimensions == ("workflow_type", custom_name)
     assert aggregation.confirmed_affected_runs == 2
     assert sum(group.confirmed_runs for group in aggregation.groups) == 2
     assert {group.custom_search_attributes[0].value for group in aggregation.groups} == {

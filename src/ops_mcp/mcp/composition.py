@@ -34,6 +34,7 @@ from ops_mcp.services import (
     NamespaceReadService,
     PopulationDiagnosticService,
     ReasoningService,
+    SearchAttributeSchemaResolver,
     TargetService,
     VisibilityService,
     WorkflowReadService,
@@ -75,6 +76,7 @@ def build_composition_root(
     catalog = YamlTargetCatalog.load(config_path or _default_target_config_path())
     provider = CachingTemporalClientProvider()
     visibility_gateway = SdkVisibilityGateway(provider)
+    schema_resolver = SearchAttributeSchemaResolver(visibility_gateway)
     workflow_gateway = SdkWorkflowGateway(provider)
     history_gateway = SdkHistoryGateway(provider)
     task_queue_gateway = SdkTaskQueueGateway(provider)
@@ -107,6 +109,7 @@ def build_composition_root(
         workflow_gateway,
         history_gateway,
         task_queue_gateway,
+        schema_resolver,
     )
     return CompositionRoot(
         contexts=RequestContextFactory(DemoIdentityProvider()),
@@ -116,7 +119,9 @@ def build_composition_root(
                 SdkConnectionGateway(provider),
             ),
             targets=DefaultTargetService(catalog),
-            visibility=DefaultVisibilityService(catalog, visibility_gateway),
+            visibility=DefaultVisibilityService(
+                catalog, visibility_gateway, schema_resolver=schema_resolver
+            ),
             workflow_reads=workflow_reads,
             namespace_reads=namespace_reads,
             reasoning=reasoning,

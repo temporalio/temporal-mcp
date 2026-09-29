@@ -12,6 +12,7 @@ class ErrorCode(StrEnum):
     TARGET_NOT_AUTHORIZED = "target_not_authorized"
     TEMPORAL_UNREACHABLE = "temporal_unreachable"
     TEMPORAL_AUTHENTICATION_FAILED = "temporal_authentication_failed"
+    TEMPORAL_PERMISSION_DENIED = "temporal_permission_denied"
     NAMESPACE_NOT_FOUND = "namespace_not_found"
     INVALID_VISIBILITY_QUERY = "invalid_visibility_query"
     WORKFLOW_NOT_FOUND = "workflow_not_found"

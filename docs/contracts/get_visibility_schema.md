@@ -3,12 +3,12 @@
 - **Operator question:** Which workflow visibility fields are registered on this
   namespace, and what are their indexed types?
 - **Inputs:** `target_ref: str`.
-- **Output:** ordered fields with name, source (`system | custom`), and indexed
-  value type.
+- **Output:** ordered legal fields with name and indexed value type. The response deliberately
+  makes no system/custom provenance claim because this read API does not provide one.
 - **Facts:** registered search attributes. **Interpretation:** none. This tool does
   not discover or claim query grammar, operator, grouping, or ordering support.
-- **Gateway calls:** `OperatorService.ListSearchAttributes` (or the pinned SDK/RPC
-  equivalent).
+- **Gateway calls:** the shared, cached Namespace Read-authorized
+  `WorkflowService.GetSearchAttributes` path also used by projection and grouping validation.
 - **Completeness:** `complete` for returned namespace schema; `unknown` if the
   server cannot expose the schema.
 - **Limits/refusals:** do not invent fields from observed executions or infer

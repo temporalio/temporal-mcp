@@ -53,6 +53,7 @@ def create_mcp(root: CompositionRoot | None = None) -> FastMCP[CompositionRoot]:
 
 _ARGUMENT_EXAMPLES: dict[str, object] = {
     "target_ref": "orders-prod",
+    "target_refs": ["orders-prod", "payments-prod"],
     "human_name": "orders prod",
     "probe_codec": False,
     "query": "WorkflowType = 'OrderWorkflow'",
@@ -63,6 +64,7 @@ _ARGUMENT_EXAMPLES: dict[str, object] = {
     "activity_type": "EnrichProduct",
     "fields": ["WorkflowId", "RunId", "ExecutionStatus"],
     "custom_search_attributes": ["Team"],
+    "system_search_attributes": ["TemporalReportedProblems"],
     "group_by_custom_search_attributes": ["Team"],
     "business_grouping": ["Team", "Domain"],
     "page_size": 100,

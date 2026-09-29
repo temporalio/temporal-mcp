@@ -20,6 +20,7 @@ from ops_mcp.services.reasoning import (
     DefaultReasoningService,
     ReasoningService,
 )
+from ops_mcp.services.search_attributes import SearchAttributeSchemaResolver
 from ops_mcp.services.targets import DefaultTargetService, TargetService
 from ops_mcp.services.visibility import DefaultVisibilityService, VisibilityService
 from ops_mcp.services.workflow_reads import (
@@ -45,5 +46,6 @@ __all__ = [
     "DefaultReasoningService",
     "PopulationDiagnosticService",
     "ReasoningService",
+    "SearchAttributeSchemaResolver",
     "WorkflowReadService",
 ]

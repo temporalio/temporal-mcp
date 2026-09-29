@@ -7,6 +7,7 @@ import pytest
 from temporalio.api.batch.v1 import BatchOperationInfo
 from temporalio.api.enums.v1 import BatchOperationState, BatchOperationType
 from temporalio.api.workflowservice.v1 import ListBatchOperationsResponse
+from temporalio.service import RPCError, RPCStatusCode
 
 from ops_mcp.gateways.namespace_reads import (
     SdkBatchGateway,
@@ -15,6 +16,7 @@ from ops_mcp.gateways.namespace_reads import (
 )
 from ops_mcp.runtime.budget import BasicExecutionBudget
 from ops_mcp.runtime.context import Principal, RequestContext
+from ops_mcp.runtime.errors import OpsMcpError
 from ops_mcp.targets.models import ConnectionDescriptor, ResolvedTarget
 
 
@@ -88,6 +90,38 @@ async def test_batch_list_uses_raw_service_and_normalizes_enum_values() -> None:
     assert context.budget.snapshot().temporal_calls == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("list_schedules", "query_workflow", "list_batch_operations"))
+async def test_namespace_read_permission_errors_identify_operation(operation) -> None:
+    error = RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b"")
+    if operation == "list_schedules":
+        client = SimpleNamespace(
+            list_schedules=lambda **kwargs: _ScheduleIterator((), None, error)
+        )
+        awaitable = SdkScheduleGateway(_Provider(client)).list_page(
+            _context(), _target(), page_size=1, page_token=None
+        )
+    elif operation == "query_workflow":
+        client = SimpleNamespace(
+            get_workflow_handle=lambda *args, **kwargs: _QueryHandle(error)
+        )
+        awaitable = SdkQueryGateway(_Provider(client)).query(
+            _context(), _target(), "wf", "run", "state"
+        )
+    else:
+        client = SimpleNamespace(workflow_service=_BatchService(error))
+        awaitable = SdkBatchGateway(_Provider(client)).list_page(
+            _context(), _target(), page_size=1, page_token=None
+        )
+    with pytest.raises(OpsMcpError) as caught:
+        await awaitable
+
+    assert caught.value.details == {
+        "operation": operation,
+        "grpc_status": "permission_denied",
+    }
+
+
 class _Provider:
     def __init__(self, client: object) -> None:
         self.client = client
@@ -97,20 +131,27 @@ class _Provider:
 
 
 class _ScheduleIterator:
-    def __init__(self, rows: tuple[object, ...], token: bytes | None) -> None:
+    def __init__(
+        self, rows: tuple[object, ...], token: bytes | None, error: Exception | None = None
+    ) -> None:
         self.current_page = rows
         self.next_page_token = token
+        self.error = error
 
     async def fetch_next_page(self) -> None:
-        return None
+        if self.error is not None:
+            raise self.error
 
 
 class _QueryHandle:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.query_name: str | None = None
+        self.error = error
 
     async def query(self, query_name: str, **kwargs: object) -> object:
         self.query_name = query_name
+        if self.error is not None:
+            raise self.error
         assert "args" not in kwargs and "arg" not in kwargs
         assert kwargs["rpc_timeout"] <= timedelta(seconds=30)
         return {"activity": "EnrichProduct"}
@@ -123,6 +164,8 @@ class _BatchService:
 
     async def list_batch_operations(self, request: object, **kwargs: object) -> object:
         self.calls.append((request, kwargs))
+        if isinstance(self.response, Exception):
+            raise self.response
         return self.response
 
 

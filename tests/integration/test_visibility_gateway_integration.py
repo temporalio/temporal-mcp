@@ -31,7 +31,7 @@ async def test_visibility_schema_and_first_demo_page_against_pinned_server(
     gateway = SdkVisibilityGateway(provider)
 
     try:
-        schema = await gateway.get_visibility_schema(context, target)
+        schema = await gateway.get_legal_search_attributes(context, target)
         page = await gateway.list_workflows_page(
             context,
             target,

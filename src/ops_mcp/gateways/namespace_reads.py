@@ -108,7 +108,7 @@ class SdkScheduleGateway:
         try:
             await iterator.fetch_next_page()
         except RPCError as exc:
-            raise translate_rpc_error(exc) from exc
+            raise translate_rpc_error(exc, operation="list_schedules") from exc
         context.budget.consume_page("schedules")
         facts = tuple(_schedule_summary(item) for item in iterator.current_page or ())
         return facts, iterator.next_page_token
@@ -130,7 +130,7 @@ class SdkScheduleGateway:
                 rpc_timeout=timedelta(seconds=context.budget.remaining_seconds())
             )
         except RPCError as exc:
-            raise _schedule_error(exc) from exc
+            raise _schedule_error(exc, operation="describe_schedule") from exc
 
         upcoming: tuple[datetime, ...] = ()
         if upcoming_count:
@@ -148,7 +148,7 @@ class SdkScheduleGateway:
                     timeout=timedelta(seconds=context.budget.remaining_seconds()),
                 )
             except RPCError as exc:
-                raise _schedule_error(exc) from exc
+                raise _schedule_error(exc, operation="list_schedule_matching_times") from exc
             upcoming = tuple(
                 value.ToDatetime().replace(tzinfo=UTC)
                 for value in response.start_time[:upcoming_count]
@@ -205,7 +205,7 @@ class SdkQueryGateway:
                     "The workflow query failed",
                     retryable=False,
                 ) from exc
-            raise translate_rpc_error(exc, exact_run=True) from exc
+            raise translate_rpc_error(exc, operation="query_workflow", exact_run=True) from exc
         except (WorkflowQueryFailedError, WorkflowQueryRejectedError) as exc:
             raise OpsMcpError(
                 ErrorCode.QUERY_FAILED,
@@ -256,7 +256,7 @@ class SdkBatchGateway:
                 timeout=timedelta(seconds=context.budget.remaining_seconds()),
             )
         except RPCError as exc:
-            raise translate_rpc_error(exc) from exc
+            raise translate_rpc_error(exc, operation="list_batch_operations") from exc
         context.budget.consume_page("batch_operations")
         return BatchOperationPageFact(
             operations=tuple(_batch_summary(item) for item in response.operation_info),
@@ -279,7 +279,7 @@ class SdkBatchGateway:
                 timeout=timedelta(seconds=context.budget.remaining_seconds()),
             )
         except RPCError as exc:
-            raise _batch_error(exc) from exc
+            raise _batch_error(exc, operation="describe_batch_operation") from exc
         return BatchOperationDetailFact(
             job_id=value.job_id,
             state=_enum_name(value, "state"),
@@ -388,21 +388,21 @@ def _json_safe(value: Any) -> JsonValue:
     return str(value)
 
 
-def _schedule_error(error: RPCError) -> OpsMcpError:
+def _schedule_error(error: RPCError, *, operation: str) -> OpsMcpError:
     if error.status.name == "NOT_FOUND":
         return OpsMcpError(
             ErrorCode.INVALID_ARGUMENT,
             "The requested schedule was not found",
             retryable=False,
         )
-    return translate_rpc_error(error)
+    return translate_rpc_error(error, operation=operation)
 
 
-def _batch_error(error: RPCError) -> OpsMcpError:
+def _batch_error(error: RPCError, *, operation: str) -> OpsMcpError:
     if error.status.name == "NOT_FOUND":
         return OpsMcpError(
             ErrorCode.INVALID_ARGUMENT,
             "The requested batch operation was not found",
             retryable=False,
         )
-    return translate_rpc_error(error)
+    return translate_rpc_error(error, operation=operation)

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from temporalio.api.enums.v1 import IndexedValueType
-from temporalio.api.operatorservice.v1 import ListSearchAttributesRequest
+from temporalio.api.workflowservice.v1 import GetSearchAttributesRequest
 from temporalio.client import Client, WorkflowExecution
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -16,14 +16,12 @@ from ops_mcp.facts.visibility import (
     CountPrecision,
     IndexedValueTypeFact,
     SearchAttributeFieldFact,
-    SearchAttributeSource,
-    StorageSchemaEntryFact,
+    SearchAttributeSchemaFact,
     VisibilityCountFact,
     VisibilityCountGroupFact,
     VisibilityGroupBy,
     VisibilityPageFact,
     VisibilityScalar,
-    VisibilitySchemaFact,
     WorkflowVisibilityFact,
 )
 from ops_mcp.runtime import DeadlineExceededError, ErrorCode, OpsMcpError, RequestContext
@@ -51,6 +49,12 @@ _PEM_MATERIAL = re.compile(r"(?is)-----BEGIN [^-\r\n]+-----.*?(?:-----END [^-\r\
 
 
 class VisibilityGateway(Protocol):
+    async def get_legal_search_attributes(
+        self,
+        context: RequestContext,
+        target: ResolvedTarget,
+    ) -> SearchAttributeSchemaFact: ...
+
     async def list_workflows_page(
         self,
         context: RequestContext,
@@ -70,18 +74,38 @@ class VisibilityGateway(Protocol):
         group_by: VisibilityGroupBy | None = None,
     ) -> VisibilityCountFact: ...
 
-    async def get_visibility_schema(
-        self,
-        context: RequestContext,
-        target: ResolvedTarget,
-    ) -> VisibilitySchemaFact: ...
-
-
 class SdkVisibilityGateway:
     """Pinned-SDK implementation using one Temporal call per gateway method."""
 
     def __init__(self, client_provider: TemporalClientProvider) -> None:
         self._client_provider = client_provider
+
+    async def get_legal_search_attributes(
+        self, context: RequestContext, target: ResolvedTarget
+    ) -> SearchAttributeSchemaFact:
+        client = await self._client(context, target, "get_search_attributes")
+        try:
+            response = await client.workflow_service.get_search_attributes(
+                GetSearchAttributesRequest(),
+                retry=True,
+                timeout=_remaining_timeout(context),
+            )
+        except RPCError as exc:
+            raise _translate_rpc_error(
+                exc, capability_read=True, operation="get_search_attributes"
+            ) from exc
+        return SearchAttributeSchemaFact(
+            namespace=target.namespace,
+            fields=tuple(
+                sorted(
+                    (
+                        _search_attribute_fact(name, value)
+                        for name, value in response.keys.items()
+                    ),
+                    key=lambda item: item.name,
+                )
+            ),
+        )
 
     async def list_workflows_page(
         self,
@@ -108,7 +132,9 @@ class SdkVisibilityGateway:
         try:
             await iterator.fetch_next_page()
         except RPCError as exc:
-            raise _translate_rpc_error(exc, visibility_query=True) from exc
+            raise _translate_rpc_error(
+                exc, visibility_query=True, operation="list_workflow_executions"
+            ) from exc
 
         rows = tuple(_workflow_fact(item) for item in (iterator.current_page or ()))
         return VisibilityPageFact(
@@ -134,7 +160,9 @@ class SdkVisibilityGateway:
                 rpc_timeout=_remaining_timeout(context),
             )
         except RPCError as exc:
-            raise _translate_rpc_error(exc, visibility_query=True) from exc
+            raise _translate_rpc_error(
+                exc, visibility_query=True, operation="count_workflow_executions"
+            ) from exc
 
         return VisibilityCountFact(
             namespace=target.namespace,
@@ -150,40 +178,6 @@ class SdkVisibilityGateway:
             ),
             # temporalio 1.31 documents this aggregate as approximate.
             precision=CountPrecision.APPROXIMATE,
-        )
-
-    async def get_visibility_schema(
-        self,
-        context: RequestContext,
-        target: ResolvedTarget,
-    ) -> VisibilitySchemaFact:
-        client = await self._client(context, target, "list_search_attributes")
-        try:
-            response = await client.operator_service.list_search_attributes(
-                ListSearchAttributesRequest(namespace=target.namespace),
-                retry=True,
-                timeout=_remaining_timeout(context),
-            )
-        except RPCError as exc:
-            raise _translate_rpc_error(exc, capability_read=True) from exc
-
-        fields = [
-            _search_attribute_fact(name, value, SearchAttributeSource.SYSTEM)
-            for name, value in response.system_attributes.items()
-        ]
-        fields.extend(
-            _search_attribute_fact(name, value, SearchAttributeSource.CUSTOM)
-            for name, value in response.custom_attributes.items()
-        )
-        fields.sort(key=lambda item: (item.source.value, item.name))
-        storage_schema = tuple(
-            StorageSchemaEntryFact(name=name, storage_type=storage_type)
-            for name, storage_type in sorted(response.storage_schema.items())
-        )
-        return VisibilitySchemaFact(
-            namespace=target.namespace,
-            fields=tuple(fields),
-            storage_schema=storage_schema,
         )
 
     async def _client(
@@ -242,7 +236,6 @@ def _visibility_scalar(value: object) -> VisibilityScalar:
 def _search_attribute_fact(
     name: str,
     value: int,
-    source: SearchAttributeSource,
 ) -> SearchAttributeFieldFact:
     try:
         enum_name = IndexedValueType.Name(value)
@@ -251,7 +244,6 @@ def _search_attribute_fact(
     normalized_name = enum_name.removeprefix("INDEXED_VALUE_TYPE_")
     return SearchAttributeFieldFact(
         name=name,
-        source=source,
         value_type=IndexedValueTypeFact(code=value, name=normalized_name),
     )
 
@@ -263,16 +255,25 @@ def _remaining_timeout(context: RequestContext) -> timedelta:
 def _translate_rpc_error(
     error: RPCError,
     *,
+    operation: str,
     visibility_query: bool = False,
     capability_read: bool = False,
 ) -> OpsMcpError:
     if error.status == RPCStatusCode.DEADLINE_EXCEEDED:
         return DeadlineExceededError()
-    if error.status in {RPCStatusCode.UNAUTHENTICATED, RPCStatusCode.PERMISSION_DENIED}:
+    if error.status is RPCStatusCode.UNAUTHENTICATED:
         return OpsMcpError(
             ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
             "Temporal rejected the configured target credentials",
             retryable=False,
+            details={"operation": operation, "grpc_status": "unauthenticated"},
+        )
+    if error.status is RPCStatusCode.PERMISSION_DENIED:
+        return OpsMcpError(
+            ErrorCode.TEMPORAL_PERMISSION_DENIED,
+            "Temporal denied permission for the visibility operation",
+            retryable=False,
+            details={"operation": operation, "grpc_status": "permission_denied"},
         )
     if error.status == RPCStatusCode.NOT_FOUND:
         return OpsMcpError(

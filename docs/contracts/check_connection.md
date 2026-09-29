@@ -1,5 +1,9 @@
 # `check_connection`
 
+A successful server/namespace probe establishes connectivity for those probe RPCs only. It does
+not prove that the configured identity may call every workflow/visibility RPC;
+later capability reads can still return `temporal_permission_denied` with the rejected operation.
+
 - **Operator question:** Can this configured target reach its Temporal namespace
   and configured payload codec, and where does setup fail?
 - **Inputs:** `target_ref: str`; `probe_codec: bool = true`.

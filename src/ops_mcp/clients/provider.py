@@ -208,11 +208,19 @@ def _translate_connection_error(exc: Exception) -> OpsMcpError:
     if isinstance(exc, OpsMcpError):
         return exc
     if isinstance(exc, RPCError):
-        if exc.status in {RPCStatusCode.UNAUTHENTICATED, RPCStatusCode.PERMISSION_DENIED}:
+        if exc.status is RPCStatusCode.UNAUTHENTICATED:
             return OpsMcpError(
                 ErrorCode.TEMPORAL_AUTHENTICATION_FAILED,
                 "Temporal rejected the configured target credentials",
                 retryable=False,
+                details={"operation": "connect", "grpc_status": "unauthenticated"},
+            )
+        if exc.status is RPCStatusCode.PERMISSION_DENIED:
+            return OpsMcpError(
+                ErrorCode.TEMPORAL_PERMISSION_DENIED,
+                "Temporal denied the configured target permission for this operation",
+                retryable=False,
+                details={"operation": "connect", "grpc_status": "permission_denied"},
             )
         if exc.status in {
             RPCStatusCode.UNAVAILABLE,

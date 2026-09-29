@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 from dataclasses import asdict
 from typing import Protocol, TypeVar
 
@@ -25,7 +27,9 @@ from ops_mcp.contracts.workflow_reads import (
     PendingChildOutput,
     PendingWorkflowTaskOutput,
     PollerOutput,
+    TaskQueueBothOutput,
     TaskQueueDescriptionOutput,
+    TaskQueueKindResult,
     WorkflowDescriptionOutput,
     WorkflowResultAnswer,
     WorkflowResultOutput,
@@ -40,13 +44,14 @@ from ops_mcp.facts.history import (
     WorkflowCloseEventAttributes,
     WorkflowTaskEventAttributes,
 )
-from ops_mcp.facts.task_queues import TaskQueueKind
+from ops_mcp.facts.task_queues import TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.workflows import WorkflowExecutionFact
 from ops_mcp.gateways.history import TemporalHistoryGateway
 from ops_mcp.gateways.task_queues import TemporalTaskQueueGateway
 from ops_mcp.gateways.workflows import TemporalWorkflowGateway
 from ops_mcp.runtime.budget import BudgetSnapshot
 from ops_mcp.runtime.context import RequestContext
+from ops_mcp.runtime.continuation import ContinuationCodec, ContinuationState
 from ops_mcp.runtime.errors import DeadlineExceededError, ErrorCode, OpsMcpError
 from ops_mcp.targets.catalog import TargetCatalog
 from ops_mcp.targets.models import ResolvedTarget
@@ -81,11 +86,14 @@ class DefaultWorkflowReadService:
         workflow_gateway: TemporalWorkflowGateway,
         history_gateway: TemporalHistoryGateway,
         task_queue_gateway: TemporalTaskQueueGateway,
+        *,
+        continuations: ContinuationCodec | None = None,
     ) -> None:
         self._catalog = catalog
         self._workflows = workflow_gateway
         self._history = history_gateway
         self._task_queues = task_queue_gateway
+        self._continuations = continuations or ContinuationCodec()
 
     async def describe_workflow(
         self, context: RequestContext, request: DescribeWorkflowRequest
@@ -108,6 +116,18 @@ class DefaultWorkflowReadService:
         before = context.budget.snapshot()
         reverse = request.last_n is not None
         scan_limit = request.last_n or request.limit
+        scope = _history_scope(request)
+        native_token = None
+        page_offset = 0
+        if request.page_token:
+            state = self._continuations.decode(
+                request.page_token,
+                tool="get_workflow_history_slice",
+                target_ref=target.target_ref,
+                query=scope,
+            )
+            native_token = _decode_page_token(state.candidate_page_token)
+            page_offset = state.page_offset
         read = await self._history.read(
             context,
             target,
@@ -115,7 +135,8 @@ class DefaultWorkflowReadService:
             request.run_id,
             page_size=scan_limit,
             max_events=scan_limit,
-            next_page_token=_decode_page_token(request.page_token),
+            next_page_token=native_token,
+            page_offset=page_offset,
             reverse=reverse,
         )
         scanned = tuple(sorted(read.events, key=lambda event: event.event_id))
@@ -128,7 +149,17 @@ class DefaultWorkflowReadService:
         completion = (
             Completeness.COMPLETE if read.complete or selector_complete else Completeness.TRUNCATED
         )
-        next_token = None if selector_complete else _encode_page_token(read.next_page_token)
+        next_token = (
+            None
+            if selector_complete
+            else _history_continuation(
+                self._continuations,
+                target.target_ref,
+                scope,
+                read.next_page_token,
+                read.next_page_offset,
+            )
+        )
         truncation_warnings = (
             ("More history is available; continue with next_page_token.",)
             if completion is Completeness.TRUNCATED
@@ -209,37 +240,74 @@ class DefaultWorkflowReadService:
     ) -> DescribeTaskQueueResponse:
         target = self._authorize(context, request.target_ref)
         before = context.budget.snapshot()
+        if request.task_type == "both":
+            results: list[TaskQueueKindResult] = []
+            failures = 0
+            for kind in (TaskQueueKind.WORKFLOW, TaskQueueKind.ACTIVITY):
+                try:
+                    queue = await self._task_queues.describe(
+                        context, target, request.task_queue, kind
+                    )
+                    results.append(
+                        TaskQueueKindResult(
+                            task_type=kind.value,
+                            description=_task_queue_output(queue),
+                        )
+                    )
+                except OpsMcpError as exc:
+                    failures += 1
+                    results.append(TaskQueueKindResult(task_type=kind.value, error=exc.as_dict()))
+            response = DescribeTaskQueueResponse(
+                target_ref=target.target_ref,
+                answer=TaskQueueBothOutput(
+                    task_queue=request.task_queue,
+                    results=(results[0], results[1]),
+                ),
+                inspection=_inspection(
+                    context,
+                    before,
+                    Completeness.PARTIAL if failures else Completeness.COMPLETE,
+                ),
+                warnings=(
+                    ("One or more task-queue kinds could not be described.",) if failures else ()
+                ),
+            )
+            return _charge_output(context, response)
         queue = await self._task_queues.describe(
             context, target, request.task_queue, TaskQueueKind(request.task_type)
         )
         response = DescribeTaskQueueResponse(
             target_ref=target.target_ref,
-            answer=TaskQueueDescriptionOutput(
-                task_queue=queue.task_queue,
-                task_type=queue.task_type.value,
-                pollers=tuple(
-                    PollerOutput(
-                        identity=poller.identity,
-                        last_access_time=poller.last_access_time,
-                        rate_per_second=poller.rate_per_second,
-                    )
-                    for poller in queue.pollers
-                ),
-                poller_count=len(queue.pollers),
-                currently_has_pollers=queue.currently_has_pollers,
-                approximate_backlog_count=queue.approximate_backlog_count,
-                approximate_backlog_age_seconds=queue.approximate_backlog_age_seconds,
-                tasks_add_rate=queue.tasks_add_rate,
-                tasks_dispatch_rate=queue.tasks_dispatch_rate,
-                rate_limiting_active=queue.rate_limiting_active,
-                observed_at=queue.observed_at,
-            ),
+            answer=_task_queue_output(queue),
             inspection=_inspection(context, before, Completeness.COMPLETE),
         )
         return _charge_output(context, response)
 
     def _authorize(self, context: RequestContext, target_ref: str) -> ResolvedTarget:
         return self._catalog.authorize(context.principal, target_ref)
+
+
+def _task_queue_output(queue: TaskQueueFact) -> TaskQueueDescriptionOutput:
+    return TaskQueueDescriptionOutput(
+        task_queue=queue.task_queue,
+        task_type=queue.task_type.value,
+        pollers=tuple(
+            PollerOutput(
+                identity=poller.identity,
+                last_access_time=poller.last_access_time,
+                rate_per_second=poller.rate_per_second,
+            )
+            for poller in queue.pollers
+        ),
+        poller_count=len(queue.pollers),
+        currently_has_pollers=queue.currently_has_pollers,
+        approximate_backlog_count=queue.approximate_backlog_count,
+        approximate_backlog_age_seconds=queue.approximate_backlog_age_seconds,
+        tasks_add_rate=queue.tasks_add_rate,
+        tasks_dispatch_rate=queue.tasks_dispatch_rate,
+        rate_limiting_active=queue.rate_limiting_active,
+        observed_at=queue.observed_at,
+    )
 
 
 def _workflow_output(fact: WorkflowExecutionFact) -> WorkflowDescriptionOutput:
@@ -442,8 +510,39 @@ def _charge_output(context: RequestContext, response: ResponseModel) -> Response
     return response
 
 
-def _encode_page_token(value: bytes | None) -> str | None:
-    return base64.urlsafe_b64encode(value).decode("ascii") if value else None
+def _history_scope(request: HistorySliceRequest) -> str:
+    serialized = json.dumps(
+        request.model_dump(mode="json", exclude={"page_token", "target_ref"}),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _history_continuation(
+    codec: ContinuationCodec,
+    target_ref: str,
+    scope: str,
+    native_token: bytes | None,
+    page_offset: int,
+) -> str | None:
+    if native_token is None and page_offset == 0:
+        return None
+    encoded_native = (
+        base64.urlsafe_b64encode(native_token).decode("ascii") if native_token is not None else None
+    )
+    return codec.encode(
+        ContinuationState(
+            tool="get_workflow_history_slice",
+            target_ref=target_ref,
+            scope_digest=codec.scope_digest(scope),
+            sample_seed=codec.stable_seed(
+                tool="get_workflow_history_slice", target_ref=target_ref, scope=scope
+            ),
+            candidate_page_token=encoded_native,
+            page_offset=page_offset,
+        )
+    )
 
 
 def _decode_page_token(value: str | None) -> bytes | None:

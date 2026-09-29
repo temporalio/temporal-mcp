@@ -26,6 +26,7 @@ class ContinuationState:
     scope_digest: str
     sample_seed: str
     candidate_page_token: str | None = None
+    page_offset: int = 0
     started_at: str | None = None
     ended_at: str | None = None
     discovered_activity_task_queues: tuple[str, ...] = ()

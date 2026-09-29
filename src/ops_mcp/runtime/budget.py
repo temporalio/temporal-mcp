@@ -75,9 +75,13 @@ class ExecutionBudget(Protocol):
 
     def consume_history_events(self, count: int) -> None: ...
 
+    def remaining_history_events(self) -> int: ...
+
     def consume_output_bytes(self, count: int) -> None: ...
 
     def snapshot(self) -> BudgetSnapshot: ...
+
+    def child(self) -> ExecutionBudget: ...
 
 
 class BasicExecutionBudget:
@@ -139,6 +143,11 @@ class BasicExecutionBudget:
         self.ensure_active()
         self._consume("history_events", count)
 
+    def remaining_history_events(self) -> int:
+        self.ensure_active()
+        with self._lock:
+            return self._limits.history_events - self._history_events_read
+
     def consume_output_bytes(self, count: int) -> None:
         self.ensure_active()
         self._consume("output_bytes", count)
@@ -152,6 +161,11 @@ class BasicExecutionBudget:
                 output_bytes=self._output_bytes,
                 exhausted_dimension=self._exhausted_dimension,
             )
+
+    def child(self) -> ExecutionBudget:
+        """Create local counters backed by this budget's aggregate enforcement."""
+
+        return ScopedExecutionBudget(self)
 
     def _consume(self, dimension: str, count: int) -> None:
         if count < 0:
@@ -171,3 +185,74 @@ class BasicExecutionBudget:
                     raise ResultTooLargeError(limit, consumed, count)
                 raise BudgetExceededError(dimension, limit, consumed, count)
             setattr(self, attribute, consumed + count)
+
+
+class ScopedExecutionBudget:
+    """Per-operation accounting that atomically charges a shared parent budget."""
+
+    def __init__(self, parent: ExecutionBudget) -> None:
+        self._parent = parent
+        self._lock = Lock()
+        self._temporal_calls = 0
+        self._pages_read = 0
+        self._history_events_read = 0
+        self._output_bytes = 0
+        self._exhausted_dimension: str | None = None
+
+    @property
+    def deadline(self) -> datetime:
+        return self._parent.deadline
+
+    def ensure_active(self) -> None:
+        self._parent.ensure_active()
+
+    def remaining_seconds(self) -> float:
+        return self._parent.remaining_seconds()
+
+    def reserve_temporal_call(self, operation: str) -> None:
+        self._charge("temporal_calls", 1, lambda: self._parent.reserve_temporal_call(operation))
+
+    def consume_page(self, operation: str) -> None:
+        self._charge("pages", 1, lambda: self._parent.consume_page(operation))
+
+    def consume_history_events(self, count: int) -> None:
+        self._charge(
+            "history_events", count, lambda: self._parent.consume_history_events(count)
+        )
+
+    def remaining_history_events(self) -> int:
+        return self._parent.remaining_history_events()
+
+    def consume_output_bytes(self, count: int) -> None:
+        self._charge("output_bytes", count, lambda: self._parent.consume_output_bytes(count))
+
+    def snapshot(self) -> BudgetSnapshot:
+        with self._lock:
+            return BudgetSnapshot(
+                temporal_calls=self._temporal_calls,
+                pages_read=self._pages_read,
+                history_events_read=self._history_events_read,
+                output_bytes=self._output_bytes,
+                exhausted_dimension=self._exhausted_dimension,
+            )
+
+    def child(self) -> ExecutionBudget:
+        return ScopedExecutionBudget(self)
+
+    def _charge(self, dimension: str, count: int, parent_charge: Callable[[], None]) -> None:
+        if count < 0:
+            raise ValueError("budget consumption must be non-negative")
+        try:
+            parent_charge()
+        except (BudgetExceededError, ResultTooLargeError):
+            with self._lock:
+                self._exhausted_dimension = dimension
+            raise
+        attribute = {
+            "temporal_calls": "_temporal_calls",
+            "pages": "_pages_read",
+            "history_events": "_history_events_read",
+            "output_bytes": "_output_bytes",
+        }[dimension]
+        with self._lock:
+            setattr(self, attribute, getattr(self, attribute) + count)

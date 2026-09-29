@@ -53,7 +53,9 @@ class SdkConnectionGateway:
             )
         except RPCError as exc:
             return ServerConnectionFact(
-                outcome=_failed_stage("server", started, translate_rpc_error(exc))
+                outcome=_failed_stage(
+                    "server", started, translate_rpc_error(exc, operation="get_system_info")
+                )
             )
         except OpsMcpError as exc:
             return ServerConnectionFact(outcome=_failed_stage("server", started, exc))
@@ -85,7 +87,9 @@ class SdkConnectionGateway:
             )
         except RPCError as exc:
             return NamespaceConnectionFact(
-                outcome=_failed_stage("namespace", started, translate_rpc_error(exc))
+                outcome=_failed_stage(
+                    "namespace", started, translate_rpc_error(exc, operation="describe_namespace")
+                )
             )
         except OpsMcpError as exc:
             return NamespaceConnectionFact(outcome=_failed_stage("namespace", started, exc))

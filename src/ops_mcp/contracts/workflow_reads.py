@@ -205,7 +205,8 @@ class GetWorkflowResultResponse(ContractModel):
     warnings: tuple[WarningMessage, ...] = ()
 
 
-TaskQueueTypeInput = Annotated[Literal["workflow", "activity"], Field()]
+SingleTaskQueueType = Annotated[Literal["workflow", "activity"], Field()]
+TaskQueueTypeInput = Annotated[Literal["workflow", "activity", "both"], Field()]
 
 
 class DescribeTaskQueueRequest(ContractModel):
@@ -222,7 +223,7 @@ class PollerOutput(ContractModel):
 
 class TaskQueueDescriptionOutput(ContractModel):
     task_queue: str
-    task_type: TaskQueueTypeInput
+    task_type: SingleTaskQueueType
     pollers: tuple[PollerOutput, ...]
     poller_count: int = Field(ge=0)
     currently_has_pollers: bool
@@ -234,9 +235,27 @@ class TaskQueueDescriptionOutput(ContractModel):
     observed_at: datetime
 
 
+class TaskQueueKindResult(ContractModel):
+    task_type: SingleTaskQueueType
+    description: TaskQueueDescriptionOutput | None = None
+    error: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_outcome(self) -> TaskQueueKindResult:
+        if (self.description is None) == (self.error is None):
+            raise ValueError("exactly one of description or error is required")
+        return self
+
+
+class TaskQueueBothOutput(ContractModel):
+    task_queue: str
+    task_type: Literal["both"] = "both"
+    results: tuple[TaskQueueKindResult, TaskQueueKindResult]
+
+
 class DescribeTaskQueueResponse(ContractModel):
     schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
     target_ref: str = Field(min_length=1)
-    answer: TaskQueueDescriptionOutput
+    answer: TaskQueueDescriptionOutput | TaskQueueBothOutput
     inspection: Inspection
     warnings: tuple[WarningMessage, ...] = ()

@@ -8,11 +8,6 @@ from enum import StrEnum
 from typing import TypeAlias
 
 
-class SearchAttributeSource(StrEnum):
-    SYSTEM = "system"
-    CUSTOM = "custom"
-
-
 @dataclass(frozen=True)
 class IndexedValueTypeFact:
     """A registered indexed-value type, preserving its server enum value."""
@@ -24,21 +19,13 @@ class IndexedValueTypeFact:
 @dataclass(frozen=True)
 class SearchAttributeFieldFact:
     name: str
-    source: SearchAttributeSource
     value_type: IndexedValueTypeFact
 
 
 @dataclass(frozen=True)
-class StorageSchemaEntryFact:
-    name: str
-    storage_type: str
-
-
-@dataclass(frozen=True)
-class VisibilitySchemaFact:
+class SearchAttributeSchemaFact:
     namespace: str
     fields: tuple[SearchAttributeFieldFact, ...]
-    storage_schema: tuple[StorageSchemaEntryFact, ...]
 
 
 @dataclass(frozen=True)

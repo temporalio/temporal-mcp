@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, SerializerFunctionWrapHandler, field_validator, model_serializer
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from ops_mcp.contracts.primitives import (
     CURRENT_SCHEMA_VERSION,
@@ -71,6 +77,7 @@ class SearchWorkflowRunsRequest(ContractModel):
         min_length=1,
     )
     custom_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=10)
+    system_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=5)
     page_size: int = Field(default=100, ge=1, le=200)
     continuation_token: str | None = Field(default=None, min_length=1)
 
@@ -81,7 +88,7 @@ class SearchWorkflowRunsRequest(ContractModel):
             raise ValueError("fields must not contain duplicates")
         return fields
 
-    @field_validator("custom_search_attributes")
+    @field_validator("custom_search_attributes", "system_search_attributes")
     @classmethod
     def custom_search_attributes_must_be_unique(cls, names: tuple[str, ...]) -> tuple[str, ...]:
         if len(names) != len(set(names)):
@@ -128,9 +135,11 @@ class WorkflowProjectionRow(ContractModel):
 class SearchWorkflowRunsAnswer(ContractModel):
     query: str
     custom_search_attributes: tuple[NonEmptyString, ...] = ()
+    system_search_attributes: tuple[NonEmptyString, ...] = ()
     workflows: tuple[WorkflowProjectionRow, ...]
     returned: int = Field(ge=0)
     continuation_token: str | None = None
+    observed_at: datetime
 
 
 class SearchWorkflowRunsResponse(ContractModel):
@@ -164,6 +173,7 @@ class CountWorkflowsAnswer(ContractModel):
     count: int = Field(ge=0)
     groups: tuple[WorkflowCountGroup, ...]
     precision: Literal["approximate"] = "approximate"
+    observed_at: datetime
 
 
 class CountWorkflowsResponse(ContractModel):
@@ -176,11 +186,6 @@ class CountWorkflowsResponse(ContractModel):
 
 class GetVisibilitySchemaRequest(ContractModel):
     target_ref: NonEmptyString
-
-
-class PublicSearchAttributeSource(StrEnum):
-    SYSTEM = "system"
-    CUSTOM = "custom"
 
 
 class PublicIndexedValueType(StrEnum):
@@ -196,7 +201,6 @@ class PublicIndexedValueType(StrEnum):
 
 class VisibilityField(ContractModel):
     name: NonEmptyString
-    source: PublicSearchAttributeSource
     value_type: PublicIndexedValueType
     query_examples: tuple[NonEmptyString, ...] = ()
 
@@ -212,3 +216,39 @@ class GetVisibilitySchemaResponse(ContractModel):
     answer: VisibilitySchemaAnswer
     inspection: Inspection
     warnings: tuple[WarningMessage, ...] = ()
+
+
+class BatchSearchWorkflowRunsRequest(ContractModel):
+    target_refs: tuple[NonEmptyString, ...] = Field(min_length=1, max_length=20)
+    query: str
+    fields: tuple[WorkflowField, ...] = SearchWorkflowRunsRequest.model_fields["fields"].default
+    custom_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=10)
+    system_search_attributes: tuple[NonEmptyString, ...] = Field(default=(), max_length=5)
+    page_size: int = Field(default=100, ge=1, le=200)
+
+    @field_validator(
+        "target_refs", "fields", "custom_search_attributes", "system_search_attributes"
+    )
+    @classmethod
+    def values_must_be_unique(cls, values: tuple[Any, ...]) -> tuple[Any, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("batch values must not contain duplicates")
+        return values
+
+
+class BatchSearchWorkflowRunsItem(ContractModel):
+    target_ref: NonEmptyString
+    response: SearchWorkflowRunsResponse | None = None
+    error: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_outcome(self) -> BatchSearchWorkflowRunsItem:
+        if (self.response is None) == (self.error is None):
+            raise ValueError("exactly one of response or error is required")
+        return self
+
+
+class BatchSearchWorkflowRunsResponse(ContractModel):
+    schema_version: SchemaVersion = CURRENT_SCHEMA_VERSION
+    items: tuple[BatchSearchWorkflowRunsItem, ...]
+    observed_at: datetime

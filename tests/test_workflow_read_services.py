@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -24,6 +25,8 @@ from ops_mcp.facts.task_queues import PollerFact, TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.workflows import PendingActivityFact, WorkflowExecutionFact
 from ops_mcp.runtime.budget import BasicExecutionBudget
 from ops_mcp.runtime.context import Principal, RequestContext
+from ops_mcp.runtime.continuation import ContinuationCodec
+from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.services.workflow_reads import DefaultWorkflowReadService
 from ops_mcp.targets.models import ConnectionDescriptor, ResolvedTarget
 
@@ -97,6 +100,58 @@ async def test_failure_slice_is_explicitly_truncated_and_returns_token() -> None
 
 
 @pytest.mark.asyncio
+async def test_history_slice_continuation_preserves_intra_page_offset() -> None:
+    class OffsetHistory:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def read(self, context, target, workflow_id, run_id, **kwargs):
+            self.calls.append(kwargs)
+            context.budget.reserve_temporal_call("history")
+            context.budget.consume_page("history")
+            event_ids = (1, 2) if len(self.calls) == 1 else (3, 4)
+            if len(self.calls) == 2:
+                assert kwargs["next_page_token"] == b"same-page"
+                assert kwargs["page_offset"] == 2
+            return HistoryReadFact(
+                workflow_id=workflow_id,
+                run_id=run_id,
+                events=tuple(
+                    _history_event(value, ActivityTaskEventAttributes(phase="scheduled"))
+                    for value in event_ids
+                ),
+                reverse=kwargs["reverse"],
+                pages_read=1,
+                events_scanned=2,
+                next_page_token=b"same-page" if len(self.calls) == 1 else None,
+                next_page_offset=2 if len(self.calls) == 1 else 0,
+                observed_at=_now(),
+            )
+
+        async def closing_event(self, *args, **kwargs):
+            raise AssertionError("not used")
+
+    gateway = OffsetHistory()
+    service = _service(
+        history_gateway=gateway,
+        continuations=ContinuationCodec(b"h" * 32),
+    )
+    request = HistorySliceRequest(
+        target_ref="orders-prod",
+        workflow_id="order-1",
+        run_id="run-1",
+        event_id_range={"first": 1, "last": 999},
+        limit=2,
+    )
+    first = await service.get_workflow_history_slice(_context(), request)
+    assert first.answer.continuation_token is not None
+    second = await service.get_workflow_history_slice(
+        _context(), request.model_copy(update={"page_token": first.answer.continuation_token})
+    )
+    assert [event.event_id for event in first.answer.events + second.answer.events] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_result_does_not_wait_by_default_and_returns_terminal_failure() -> None:
     context = _context()
     closing = _history_event(
@@ -146,6 +201,100 @@ async def test_task_queue_keeps_workflow_and_activity_types_explicit() -> None:
     assert response.answer.task_type == "activity"
     assert response.answer.currently_has_pollers
     assert queue_gateway.kind is TaskQueueKind.ACTIVITY
+
+
+@pytest.mark.asyncio
+async def test_task_queue_both_returns_independent_kind_snapshots() -> None:
+    class BothGateway(_TaskQueueGateway):
+        def __init__(self, fact: TaskQueueFact) -> None:
+            super().__init__(fact)
+            self.kinds: list[TaskQueueKind] = []
+
+        async def describe(
+            self,
+            context: RequestContext,
+            target: ResolvedTarget,
+            task_queue: str,
+            task_type: TaskQueueKind,
+        ) -> TaskQueueFact:
+            self.kinds.append(task_type)
+            context.budget.reserve_temporal_call("task_queue")
+            return replace(self.fact, task_type=task_type)
+
+    gateway = BothGateway(
+        TaskQueueFact(
+            task_queue="shared",
+            task_type=TaskQueueKind.WORKFLOW,
+            pollers=(),
+            approximate_backlog_count=0,
+            approximate_backlog_age_seconds=0,
+            tasks_add_rate=0,
+            tasks_dispatch_rate=0,
+            rate_limiting_active=False,
+            observed_at=_now(),
+        )
+    )
+
+    response = await _service(task_queue_gateway=gateway).describe_task_queue(
+        _context(),
+        DescribeTaskQueueRequest(target_ref="orders-prod", task_queue="shared", task_type="both"),
+    )
+
+    assert response.answer.task_type == "both"
+    assert [item.task_type for item in response.answer.results] == ["workflow", "activity"]
+    assert gateway.kinds == [TaskQueueKind.WORKFLOW, TaskQueueKind.ACTIVITY]
+    assert response.inspection.temporal_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed", "error_flags", "completion"),
+    (
+        ({TaskQueueKind.WORKFLOW}, (True, False), Completeness.PARTIAL),
+        ({TaskQueueKind.ACTIVITY}, (False, True), Completeness.PARTIAL),
+        (
+            {TaskQueueKind.WORKFLOW, TaskQueueKind.ACTIVITY},
+            (True, True),
+            Completeness.PARTIAL,
+        ),
+    ),
+)
+async def test_task_queue_both_preserves_per_kind_failures(
+    failed, error_flags, completion
+) -> None:
+    class PartialGateway(_TaskQueueGateway):
+        async def describe(self, context, target, task_queue, task_type):
+            context.budget.reserve_temporal_call("describe_task_queue")
+            if task_type in failed:
+                raise OpsMcpError(
+                    ErrorCode.TEMPORAL_PERMISSION_DENIED,
+                    "denied",
+                    retryable=False,
+                    details={"operation": "describe_task_queue"},
+                )
+            return replace(self.fact, task_type=task_type)
+
+    gateway = PartialGateway(
+        TaskQueueFact(
+            task_queue="shared",
+            task_type=TaskQueueKind.WORKFLOW,
+            pollers=(),
+            approximate_backlog_count=0,
+            approximate_backlog_age_seconds=0,
+            tasks_add_rate=0,
+            tasks_dispatch_rate=0,
+            rate_limiting_active=False,
+            observed_at=_now(),
+        )
+    )
+    response = await _service(task_queue_gateway=gateway).describe_task_queue(
+        _context(),
+        DescribeTaskQueueRequest(target_ref="orders-prod", task_queue="shared", task_type="both"),
+    )
+
+    assert tuple(item.error is not None for item in response.answer.results) == error_flags
+    assert response.inspection.temporal_calls == 2
+    assert response.inspection.completion is completion
 
 
 def test_history_slice_requires_exactly_one_selector() -> None:
@@ -235,6 +384,7 @@ def _service(
     workflow_gateway: object | None = None,
     history_gateway: object | None = None,
     task_queue_gateway: object | None = None,
+    continuations: ContinuationCodec | None = None,
 ) -> DefaultWorkflowReadService:
     target = _target()
     return DefaultWorkflowReadService(
@@ -255,6 +405,7 @@ def _service(
                 observed_at=_now(),
             )
         ),
+        continuations=continuations,
     )
 
 

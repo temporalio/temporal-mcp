@@ -93,13 +93,14 @@ from ops_mcp.contracts.targets import (
     TargetResolutionAnswer,
 )
 from ops_mcp.contracts.visibility import (
+    BatchSearchWorkflowRunsRequest,
+    BatchSearchWorkflowRunsResponse,
     CountWorkflowsAnswer,
     CountWorkflowsRequest,
     CountWorkflowsResponse,
     GetVisibilitySchemaRequest,
     GetVisibilitySchemaResponse,
     PublicIndexedValueType,
-    PublicSearchAttributeSource,
     SearchAttributeProjection,
     SearchWorkflowRunsAnswer,
     SearchWorkflowRunsRequest,
@@ -123,6 +124,8 @@ from ops_mcp.contracts.workflow_reads import (
 )
 
 __all__ = [
+    "BatchSearchWorkflowRunsRequest",
+    "BatchSearchWorkflowRunsResponse",
     "CURRENT_SCHEMA_VERSION",
     "ApprovedQueryOutput",
     "AffectedPopulationAggregation",
@@ -175,7 +178,6 @@ __all__ = [
     "IncidentQueueScope",
     "IncidentTimeWindow",
     "PublicIndexedValueType",
-    "PublicSearchAttributeSource",
     "SearchAttributeProjection",
     "SearchWorkflowRunsAnswer",
     "SearchWorkflowRunsRequest",

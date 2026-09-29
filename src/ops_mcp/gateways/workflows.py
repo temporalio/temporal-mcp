@@ -53,7 +53,11 @@ class SdkWorkflowGateway:
                 rpc_timeout=timedelta(seconds=context.budget.remaining_seconds())
             )
         except RPCError as exc:
-            raise translate_rpc_error(exc, exact_run=run_id is not None) from exc
+            raise translate_rpc_error(
+                exc,
+                exact_run=run_id is not None,
+                operation="describe_workflow_execution",
+            ) from exc
         return await _description_fact(
             target,
             description,

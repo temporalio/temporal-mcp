@@ -83,8 +83,8 @@ from ops_mcp.runtime.budget import BudgetSnapshot
 from ops_mcp.runtime.context import RequestContext
 from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.services.search_attributes import (
+    SearchAttributeSchemaResolver,
     project_search_attribute,
-    validate_custom_search_attributes,
 )
 from ops_mcp.targets.catalog import TargetCatalog
 from ops_mcp.targets.models import ResolvedTarget
@@ -154,12 +154,14 @@ class DefaultPopulationDiagnosticService:
         workflows: TemporalWorkflowGateway,
         history: TemporalHistoryGateway,
         task_queues: TemporalTaskQueueGateway,
+        schema_resolver: SearchAttributeSchemaResolver | None = None,
     ) -> None:
         self._catalog = catalog
         self._visibility = visibility
         self._workflows = workflows
         self._history = history
         self._task_queues = task_queues
+        self._schema_resolver = schema_resolver or SearchAttributeSchemaResolver(visibility)
 
     async def assess_workflow_recovery(
         self,
@@ -980,8 +982,7 @@ class DefaultPopulationDiagnosticService:
     ) -> dict[str, SearchAttributeFieldFact]:
         if not names:
             return {}
-        schema = await self._visibility.get_visibility_schema(context, target)
-        return validate_custom_search_attributes(names, schema.fields)
+        return await self._schema_resolver.custom_fields(context, target, names)
 
     async def _describe_runs(
         self,

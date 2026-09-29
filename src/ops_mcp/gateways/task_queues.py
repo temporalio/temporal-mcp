@@ -61,7 +61,7 @@ class SdkTaskQueueGateway:
                 timeout=timedelta(seconds=context.budget.remaining_seconds()),
             )
         except RPCError as exc:
-            raise translate_rpc_error(exc) from exc
+            raise translate_rpc_error(exc, operation="describe_task_queue") from exc
         stats = response.stats
         pollers = tuple(
             PollerFact(

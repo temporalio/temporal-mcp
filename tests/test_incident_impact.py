@@ -16,10 +16,9 @@ from ops_mcp.facts import (
     HistoryReadFact,
     IndexedValueTypeFact,
     SearchAttributeFieldFact,
-    SearchAttributeSource,
+    SearchAttributeSchemaFact,
     VisibilityCountFact,
     VisibilityPageFact,
-    VisibilitySchemaFact,
     WorkflowExecutionFact,
     WorkflowTaskEventAttributes,
     WorkflowVisibilityFact,
@@ -87,24 +86,21 @@ class _Visibility:
             next_page_token=(str(next_offset).encode() if next_offset < len(self.rows) else None),
         )
 
-    async def get_visibility_schema(self, context, target):
+    async def get_legal_search_attributes(self, context, target):
         del target
         context.budget.reserve_temporal_call("schema")
-        return VisibilitySchemaFact(
+        return SearchAttributeSchemaFact(
             namespace="default",
             fields=(
                 SearchAttributeFieldFact(
                     name="Team",
-                    source=SearchAttributeSource.CUSTOM,
                     value_type=IndexedValueTypeFact(code=2, name="KEYWORD"),
                 ),
                 SearchAttributeFieldFact(
                     name="Domain",
-                    source=SearchAttributeSource.CUSTOM,
                     value_type=IndexedValueTypeFact(code=2, name="KEYWORD"),
                 ),
             ),
-            storage_schema=(),
         )
 
 

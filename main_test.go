@@ -99,6 +99,23 @@ func TestVersionIsSetAtLinkTime(t *testing.T) {
 	}
 }
 
+func TestServerName(t *testing.T) {
+	url := startServer(t, buildBinary(t), filepath.Join("testdata", "config.yaml"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	if got := session.InitializeResult().ServerInfo.Name; got != "temporal-operator" {
+		t.Errorf("server name = %q, want %q", got, "temporal-operator")
+	}
+}
+
 func TestBinaryDoesNotImportFixture(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
 	if err != nil {

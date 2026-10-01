@@ -17,7 +17,10 @@ import (
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
-const name = "operator-mcp"
+const (
+	name       = "operator-mcp"
+	serverName = "temporal-operator"
+)
 
 var version = "dev"
 
@@ -62,6 +65,6 @@ func run(args []string, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", server.NewHandler(name, version, cfg, clients))
+	mux.Handle("/mcp", server.NewHandler(serverName, version, cfg, clients))
 	return (&http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}).Serve(ln)
 }

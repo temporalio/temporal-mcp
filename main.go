@@ -14,12 +14,12 @@ import (
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/server"
+	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
-const (
-	name    = "operator-mcp"
-	version = "dev"
-)
+const name = "operator-mcp"
+
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:], os.Stderr); err != nil {
@@ -50,6 +50,11 @@ func run(args []string, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
+	clients, err := temporal.NewClients(cfg.Targets, name, version)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: %w", *configPath, err)
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
@@ -57,6 +62,6 @@ func run(args []string, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", server.NewHandler(name, version, cfg))
+	mux.Handle("/mcp", server.NewHandler(name, version, cfg, clients))
 	return (&http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}).Serve(ln)
 }

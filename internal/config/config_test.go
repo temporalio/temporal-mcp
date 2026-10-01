@@ -58,6 +58,49 @@ func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	}
 }
 
+func TestParseAPIKey(t *testing.T) {
+	data := "listen: 127.0.0.1:8080\ntargets:\n" +
+		"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}}\n" +
+		"  - {name: b, description: x, address: b:7233, namespace: b, api_key: {file: /keys/b}}\n"
+	cfg, err := parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := []*APIKey{cfg.Targets[0].APIKey, cfg.Targets[1].APIKey}, []*APIKey{{Env: "A_KEY"}, {File: "/keys/b"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("api keys = %+v, want %+v", got, want)
+	}
+}
+
+func TestLookup(t *testing.T) {
+	cfg := &Config{Targets: []Target{
+		{Name: "Prod", Aliases: []string{"production"}},
+		{Name: "prod"},
+	}}
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"Prod", "Prod"},
+		{"prod", "prod"},
+		{"production", "Prod"},
+		{"PRODUCTION", "Prod"},
+		{"PROD", ""},
+		{"staging", ""},
+	}
+	for _, tt := range tests {
+		got, ok := cfg.Lookup(tt.name)
+		if tt.want == "" {
+			if ok {
+				t.Errorf("Lookup(%q) = %q, want no target", tt.name, got.Name)
+			}
+			continue
+		}
+		if !ok || got.Name != tt.want {
+			t.Errorf("Lookup(%q) = %v, %v, want %q", tt.name, got, ok, tt.want)
+		}
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	tests := []struct {
 		name string
@@ -189,6 +232,24 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: Prod, aliases: [prod], description: x, address: a:7233, namespace: a}\n",
 			want: []string{`targets[0]: alias "prod" conflicts with name "Prod" of this target; aliases are case-insensitive`},
+		},
+		{
+			name: "api key with env and file",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY, file: /keys/a}}\n",
+			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "api key without env or file",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {}}\n",
+			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "inline api key",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: secret}\n",
+			want: []string{"cannot unmarshal !!str `secret` into config.APIKey"},
 		},
 		{
 			name: "all errors reported",

@@ -28,6 +28,17 @@ type Target struct {
 	Description string   `yaml:"description"`
 	Address     string   `yaml:"address"`
 	Namespace   string   `yaml:"namespace"`
+	// APIKey says where to read the target's API key. With one the server connects
+	// over TLS; without one it connects in plaintext with no credentials.
+	APIKey *APIKey `yaml:"api_key"`
+}
+
+// APIKey says where to read a Temporal API key from. Exactly one field is set.
+type APIKey struct {
+	// Env is the name of an environment variable holding the key, read at startup.
+	Env string `yaml:"env"`
+	// File is the path of a file holding the key, read on every Temporal call.
+	File string `yaml:"file"`
 }
 
 // Load reads the YAML file at path and returns the validated configuration.
@@ -106,8 +117,28 @@ func (c *Config) validate() error {
 			}
 			aliases = append(aliases, seenAlias{alias, i})
 		}
+		if k := t.APIKey; k != nil && (k.Env == "") == (k.File == "") {
+			errs = append(errs, fmt.Errorf("%s: api_key: exactly one of env or file is required", label))
+		}
 	}
 	return errors.Join(errs...)
+}
+
+// Lookup returns the target whose name is exactly name or that has an alias equal to name ignoring case.
+func (c *Config) Lookup(name string) (*Target, bool) {
+	for i := range c.Targets {
+		if c.Targets[i].Name == name {
+			return &c.Targets[i], true
+		}
+	}
+	for i, t := range c.Targets {
+		for _, alias := range t.Aliases {
+			if strings.EqualFold(alias, name) {
+				return &c.Targets[i], true
+			}
+		}
+	}
+	return nil, false
 }
 
 func targetRef(from, to int) string {

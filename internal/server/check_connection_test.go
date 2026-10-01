@@ -159,7 +159,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	}
 }
 
-func TestFailureReasonScrub(t *testing.T) {
+func TestRPCErrorMessageScrub(t *testing.T) {
 	tests := []struct {
 		name    string
 		address string
@@ -170,21 +170,21 @@ func TestFailureReasonScrub(t *testing.T) {
 			name:    "single-label host is not replaced inside other words",
 			address: "temporal:7233",
 			message: "namespace temporal-system is unavailable",
-			want:    "Unavailable: the Temporal server reported: namespace temporal-system is unavailable",
+			want:    "the Temporal server reported: namespace temporal-system is unavailable",
 		},
 		{
 			name:    "FQDN, IP and address are replaced",
 			address: "temporal.example.com:7233",
 			message: "temporal.example.com at 10.1.2.3 refused temporal.example.com:7233",
-			want:    "Unavailable: the Temporal server reported: <address> at <address> refused <address>",
+			want:    "the Temporal server reported: <address> at <address> refused <address>",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 7233}}
-			got := failureReason(status.Error(codes.Unavailable, tt.message), &config.Target{Address: tt.address}, p)
+			got := rpcErrorMessage(status.Error(codes.Unavailable, tt.message), &config.Target{Address: tt.address}, p)
 			if got != tt.want {
-				t.Errorf("reason = %q, want %q", got, tt.want)
+				t.Errorf("message = %q, want %q", got, tt.want)
 			}
 		})
 	}

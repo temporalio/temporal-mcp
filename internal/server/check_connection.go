@@ -38,9 +38,9 @@ type stage struct {
 
 func checkConnection(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[checkConnectionInput, envelope[connectionCheck]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in checkConnectionInput) (*mcp.CallToolResult, envelope[connectionCheck], error) {
-		t, ok := cfg.Lookup(in.Target)
-		if !ok {
-			return nil, envelope[connectionCheck]{}, fmt.Errorf("unknown target %q; list_available_targets lists the targets", in.Target)
+		t, err := lookupTarget(cfg, in.Target)
+		if err != nil {
+			return nil, envelope[connectionCheck]{}, err
 		}
 		svc := clients.Client(t.Name).WorkflowService()
 		server := runStage(ctx, "server", t, func(ctx context.Context, opts ...grpc.CallOption) error {
@@ -70,30 +70,30 @@ func runStage(ctx context.Context, name string, t *config.Target, call func(cont
 	err := call(ctx, grpc.Peer(&p))
 	s := stage{Name: name, Status: "ok", LatencyMS: new(time.Since(start).Milliseconds())}
 	if err != nil {
-		s.Status, s.Reason = "failed", new(failureReason(err, t, &p))
+		s.Status, s.Reason = "failed", new(fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p)))
 	}
 	return s
 }
 
-func failureReason(err error, t *config.Target, p *peer.Peer) string {
+func rpcErrorMessage(err error, t *config.Target, p *peer.Peer) string {
 	st := serviceerror.ToStatus(err)
 	code := st.Code()
 	if code == codes.DeadlineExceeded {
-		return "DeadlineExceeded: timed out waiting for the Temporal server"
+		return "timed out waiting for the Temporal server"
 	}
 	reached := p.Addr != nil
 	// Errors raised before a call reaches the Temporal server name its address, which results must not reveal.
 	switch {
 	case code == codes.Unavailable && !reached && strings.Contains(st.Message(), "authentication handshake failed"):
-		return "Unavailable: the TLS handshake or certificate check with the Temporal server failed"
+		return "the TLS handshake or certificate check with the Temporal server failed"
 	case code == codes.Unavailable && !reached:
-		return "Unavailable: could not connect to the Temporal server"
+		return "could not connect to the Temporal server"
 	}
 	msg := scrub(st.Message(), t, p)
 	if code == codes.Unavailable {
-		return "Unavailable: the Temporal server reported: " + msg
+		return "the Temporal server reported: " + msg
 	}
-	return fmt.Sprintf("%s: %s", code, msg)
+	return msg
 }
 
 func scrub(msg string, t *config.Target, p *peer.Peer) string {

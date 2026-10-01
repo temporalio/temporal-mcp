@@ -68,7 +68,7 @@ _ARGUMENT_EXAMPLES: dict[str, object] = {
     "group_by_custom_search_attributes": ["Team"],
     "business_grouping": ["Team", "Domain"],
     "page_size": 100,
-    "continuation_token": "signed-opaque-token",
+    "continuation_token": "opaque-token",
     "workflow_id": "order-88231",
     "run_id": "01a0268c-ba90-7f27-ac62-754c4a5c892c",
     "failures_only": True,
@@ -175,14 +175,6 @@ def main() -> None:
         raise SystemExit(
             "streamable-http is unauthenticated in this prototype; set "
             "OPS_MCP_ALLOW_INSECURE_HTTP=1 only for a loopback-only demo"
-        )
-    continuation_secret = os.getenv("OPS_MCP_CONTINUATION_SECRET")
-    if transport == "streamable-http" and (
-        continuation_secret is None or len(continuation_secret.encode()) < 32
-    ):
-        raise SystemExit(
-            "OPS_MCP_CONTINUATION_SECRET must contain at least 32 bytes for stable "
-            "streamable-http continuations"
         )
     try:
         server = create_mcp()

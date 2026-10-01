@@ -195,6 +195,11 @@ export OPS_MCP_QUERY_APPROVALS_JSON='{"my-cloud-target":["current_state","blocke
   TLS settings, certificate contents, private keys, or API keys.
 - **Investigations are bounded.** Large searches use explicit limits and resumable continuation
   tokens instead of silently scanning an entire namespace.
+- **Pagination retains its request scope.** Reuse the original request parameters with a
+  continuation token. Visibility and ordinary history page boundaries carry Temporal's opaque
+  cursor. If Temporal returns an indivisible history batch larger than the requested slice, the
+  server uses a checksummed, scope-bound token to resume within that native page. Composite
+  investigation tokens likewise carry validated, checksummed progress state.
 - **Partial evidence stays visible.** Results distinguish candidates from confirmed workflows and
   report failed reads, sampling, and truncation rather than presenting incomplete data as exact.
 

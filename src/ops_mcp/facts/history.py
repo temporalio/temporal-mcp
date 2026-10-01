@@ -143,6 +143,7 @@ class HistoryReadFact:
     next_page_token: bytes | None
     observed_at: datetime
     next_page_offset: int = 0
+    next_expected_event_id: int | None = None
 
     @property
     def complete(self) -> bool:

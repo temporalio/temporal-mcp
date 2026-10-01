@@ -20,7 +20,12 @@ from ops_mcp.gateways import (
     SdkVisibilityGateway,
     SdkWorkflowGateway,
 )
-from ops_mcp.runtime import DemoIdentityProvider, InvalidConfigurationError, RequestContextFactory
+from ops_mcp.runtime import (
+    CompositeContinuationCodec,
+    DemoIdentityProvider,
+    InvalidConfigurationError,
+    RequestContextFactory,
+)
 from ops_mcp.services import (
     ConfiguredQueryApprovalPolicy,
     ConnectionCheckService,
@@ -62,6 +67,7 @@ class CompositionRoot:
     contexts: RequestContextFactory
     services: ServiceBundle
     client_provider: ShutdownableClientProvider
+    continuations: CompositeContinuationCodec
 
     async def shutdown(self) -> None:
         await self.client_provider.shutdown()
@@ -72,6 +78,7 @@ def build_composition_root(
     *,
     query_approvals: Mapping[str, Collection[str]] | None = None,
 ) -> CompositionRoot:
+    continuations = CompositeContinuationCodec()
     approvals = _resolve_query_approvals(query_approvals)
     catalog = YamlTargetCatalog.load(config_path or _default_target_config_path())
     provider = CachingTemporalClientProvider()
@@ -120,7 +127,9 @@ def build_composition_root(
             ),
             targets=DefaultTargetService(catalog),
             visibility=DefaultVisibilityService(
-                catalog, visibility_gateway, schema_resolver=schema_resolver
+                catalog,
+                visibility_gateway,
+                schema_resolver=schema_resolver,
             ),
             workflow_reads=workflow_reads,
             namespace_reads=namespace_reads,
@@ -128,6 +137,7 @@ def build_composition_root(
             population=population,
         ),
         client_provider=provider,
+        continuations=continuations,
     )
 
 

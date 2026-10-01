@@ -17,6 +17,7 @@ from ops_mcp.contracts import (
 )
 from ops_mcp.mcp import CompositionRoot, ServiceBundle, build_composition_root, create_mcp
 from ops_mcp.runtime import (
+    CompositeContinuationCodec,
     ErrorCode,
     OpsMcpError,
     Principal,
@@ -173,6 +174,7 @@ def _root(services: _RecordingServices) -> tuple[CompositionRoot, _Provider]:
         contexts=RequestContextFactory(_Identity(), default_timeout=timedelta(seconds=5)),
         services=bundle,
         client_provider=provider,
+        continuations=CompositeContinuationCodec(),
     )
     return root, provider
 
@@ -506,7 +508,9 @@ async def test_explicit_query_allowlist_overrides_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPS_MCP_QUERY_APPROVALS_JSON", "not-json")
-    root = build_composition_root(query_approvals={"orders-prod": ["explicit_query"]})
+    root = build_composition_root(
+        query_approvals={"orders-prod": ["explicit_query"]},
+    )
 
     policy = cast(Any, root.services.namespace_reads)._query_policy
     assert policy.is_approved("orders-prod", "explicit_query")
@@ -544,15 +548,12 @@ def test_unauthenticated_http_requires_explicit_demo_opt_in(
         app.main()
 
 
-def test_http_requires_stable_continuation_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ops_mcp.mcp import app
+async def test_startup_requires_no_continuation_configuration() -> None:
 
-    monkeypatch.setenv("OPS_MCP_TRANSPORT", "streamable-http")
-    monkeypatch.setenv("OPS_MCP_ALLOW_INSECURE_HTTP", "1")
-    monkeypatch.setenv("OPS_MCP_CONTINUATION_SECRET", "too-short")
+    root = build_composition_root()
 
-    with pytest.raises(SystemExit, match="at least 32 bytes"):
-        app.main()
+    assert isinstance(root.continuations, CompositeContinuationCodec)
+    await root.shutdown()
 
 
 def _error_payload(error: ToolError) -> dict[str, object]:

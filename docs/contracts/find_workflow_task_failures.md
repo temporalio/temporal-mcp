@@ -24,7 +24,7 @@ service semantics.
 - **Completeness:** normally `sampled`; `complete` only if every narrowed candidate
   is inspected within budget and the query population is bounded.
 - **Limits/refusals:** each call has bounded candidate, page, run, and history budgets;
-  a signed continuation advances to subsequent native Visibility frames without a
+  a checksummed continuation advances to subsequent native Visibility frames without a
   global candidate ceiling. Fan-out remains independently bounded. Sampling occurs
   only after candidate collection. A truncated frame is explicitly
   nonrepresentative and cannot support extrapolation. A fully collected frame with

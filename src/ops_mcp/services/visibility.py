@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import hashlib
-import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -43,12 +39,11 @@ from ops_mcp.facts import (
 from ops_mcp.gateways import VisibilityGateway
 from ops_mcp.runtime import (
     BudgetSnapshot,
-    ContinuationCodec,
-    ContinuationState,
     ErrorCode,
     OpsMcpError,
     RequestContext,
 )
+from ops_mcp.runtime.cursors import decode_temporal_cursor, encode_temporal_cursor
 from ops_mcp.services.search_attributes import (
     SYSTEM_SEARCH_ATTRIBUTES,
     SearchAttributeSchemaResolver,
@@ -93,12 +88,10 @@ class DefaultVisibilityService:
         target_catalog: TargetCatalog,
         gateway: VisibilityGateway,
         *,
-        continuations: ContinuationCodec | None = None,
         schema_resolver: SearchAttributeSchemaResolver | None = None,
     ) -> None:
         self._target_catalog = target_catalog
         self._gateway = gateway
-        self._continuations = continuations or ContinuationCodec()
         self._schema_resolver = schema_resolver or SearchAttributeSchemaResolver(gateway)
 
     async def batch_search_workflow_runs(
@@ -176,16 +169,7 @@ class DefaultVisibilityService:
             custom_schema = await self._schema_resolver.custom_fields(
                 context, target, request.custom_search_attributes
             )
-        scope = _search_scope(request)
-        native_page_token = None
-        if request.continuation_token:
-            state = self._continuations.decode(
-                request.continuation_token,
-                tool="search_workflow_runs",
-                target_ref=target.target_ref,
-                query=scope,
-            )
-            native_page_token = _decode_page_token(state.candidate_page_token)
+        native_page_token = decode_temporal_cursor(request.continuation_token)
         page = await self._gateway.list_workflows_page(
             context,
             target,
@@ -211,9 +195,7 @@ class DefaultVisibilityService:
                 system_search_attributes=request.system_search_attributes,
                 workflows=rows,
                 returned=len(rows),
-                continuation_token=_visibility_continuation(
-                    self._continuations, target.target_ref, scope, page.next_page_token
-                ),
+                continuation_token=encode_temporal_cursor(page.next_page_token),
                 observed_at=datetime.now(UTC),
             ),
             inspection=_inspection(context.budget.snapshot(), before, pages_limit=1),
@@ -390,39 +372,6 @@ def _validate_visibility_query(query: str) -> None:
         )
 
 
-def _search_scope(request: SearchWorkflowRunsRequest) -> str:
-    serialized = json.dumps(
-        {
-            "query": request.query,
-            "fields": [field.value for field in request.fields],
-            "custom": list(request.custom_search_attributes),
-            "system": list(request.system_search_attributes),
-            "page_size": request.page_size,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(serialized).hexdigest()
-
-
-def _visibility_continuation(
-    codec: ContinuationCodec, target_ref: str, scope: str, token: bytes | None
-) -> str | None:
-    if not token:
-        return None
-    return codec.encode(
-        ContinuationState(
-            tool="search_workflow_runs",
-            target_ref=target_ref,
-            scope_digest=codec.scope_digest(scope),
-            sample_seed=codec.stable_seed(
-                tool="search_workflow_runs", target_ref=target_ref, scope=scope
-            ),
-            candidate_page_token=base64.urlsafe_b64encode(token).decode("ascii"),
-        )
-    )
-
-
 def _visibility_warnings(
     rows: tuple[WorkflowVisibilityFact, ...], fields: tuple[WorkflowField, ...]
 ) -> tuple[str, ...]:
@@ -434,19 +383,6 @@ def _visibility_warnings(
             "Temporal reported history_length=0 for an open execution; it is returned as unknown.",
         )
     return ()
-
-
-def _decode_page_token(token: str | None) -> bytes | None:
-    if token is None:
-        return None
-    try:
-        return base64.b64decode(token.encode("ascii"), altchars=b"-_", validate=True)
-    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
-        raise OpsMcpError(
-            ErrorCode.INVALID_ARGUMENT,
-            "The page token is invalid",
-            retryable=False,
-        ) from exc
 
 
 def _log_unexpected_batch_error(request_id: str, target_ref: str, exc: Exception) -> None:

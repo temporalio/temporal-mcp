@@ -25,7 +25,6 @@ from ops_mcp.facts.task_queues import PollerFact, TaskQueueFact, TaskQueueKind
 from ops_mcp.facts.workflows import PendingActivityFact, WorkflowExecutionFact
 from ops_mcp.runtime.budget import BasicExecutionBudget
 from ops_mcp.runtime.context import Principal, RequestContext
-from ops_mcp.runtime.continuation import ContinuationCodec
 from ops_mcp.runtime.errors import ErrorCode, OpsMcpError
 from ops_mcp.services.workflow_reads import DefaultWorkflowReadService
 from ops_mcp.targets.models import ConnectionDescriptor, ResolvedTarget
@@ -97,11 +96,12 @@ async def test_failure_slice_is_explicitly_truncated_and_returns_token() -> None
     assert response.inspection.completion is Completeness.TRUNCATED
     assert response.answer.continuation_token is not None
     assert history_gateway.read_args["max_events"] == 2
+    assert response.warnings[0] == "More history is available; continue with continuation_token."
 
 
 @pytest.mark.asyncio
-async def test_history_slice_continuation_preserves_intra_page_offset() -> None:
-    class OffsetHistory:
+async def test_history_slice_native_continuation_survives_process_restart() -> None:
+    class PagedHistory:
         def __init__(self) -> None:
             self.calls = []
 
@@ -111,8 +111,7 @@ async def test_history_slice_continuation_preserves_intra_page_offset() -> None:
             context.budget.consume_page("history")
             event_ids = (1, 2) if len(self.calls) == 1 else (3, 4)
             if len(self.calls) == 2:
-                assert kwargs["next_page_token"] == b"same-page"
-                assert kwargs["page_offset"] == 2
+                assert kwargs["next_page_token"] == b"next-page"
             return HistoryReadFact(
                 workflow_id=workflow_id,
                 run_id=run_id,
@@ -123,19 +122,16 @@ async def test_history_slice_continuation_preserves_intra_page_offset() -> None:
                 reverse=kwargs["reverse"],
                 pages_read=1,
                 events_scanned=2,
-                next_page_token=b"same-page" if len(self.calls) == 1 else None,
-                next_page_offset=2 if len(self.calls) == 1 else 0,
+                next_page_token=b"next-page" if len(self.calls) == 1 else None,
                 observed_at=_now(),
             )
 
         async def closing_event(self, *args, **kwargs):
             raise AssertionError("not used")
 
-    gateway = OffsetHistory()
-    service = _service(
-        history_gateway=gateway,
-        continuations=ContinuationCodec(b"h" * 32),
-    )
+    gateway = PagedHistory()
+    first_runtime = _service(history_gateway=gateway)
+    second_runtime = _service(history_gateway=gateway)
     request = HistorySliceRequest(
         target_ref="orders-prod",
         workflow_id="order-1",
@@ -143,11 +139,79 @@ async def test_history_slice_continuation_preserves_intra_page_offset() -> None:
         event_id_range={"first": 1, "last": 999},
         limit=2,
     )
-    first = await service.get_workflow_history_slice(_context(), request)
-    assert first.answer.continuation_token is not None
-    second = await service.get_workflow_history_slice(
+    first = await first_runtime.get_workflow_history_slice(_context(), request)
+    assert first.answer.continuation_token == "bmV4dC1wYWdl"
+    second = await second_runtime.get_workflow_history_slice(
         _context(), request.model_copy(update={"page_token": first.answer.continuation_token})
     )
+    assert [event.event_id for event in first.answer.events + second.answer.events] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_history_overdelivery_envelope_survives_process_restart() -> None:
+    class OverdeliveredHistory:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def read(self, context, target, workflow_id, run_id, **kwargs):
+            self.calls.append(kwargs)
+            context.budget.reserve_temporal_call("history")
+            context.budget.consume_page("history")
+            context.budget.consume_history_events(2)
+            if len(self.calls) == 1:
+                return HistoryReadFact(
+                    workflow_id=workflow_id,
+                    run_id=run_id,
+                    events=tuple(
+                        _history_event(value, ActivityTaskEventAttributes(phase="scheduled"))
+                        for value in (1, 2)
+                    ),
+                    reverse=False,
+                    pages_read=1,
+                    events_scanned=2,
+                    next_page_token=b"",
+                    next_page_offset=2,
+                    next_expected_event_id=3,
+                    observed_at=_now(),
+                )
+            assert kwargs["next_page_token"] is None
+            assert kwargs["page_offset"] == 2
+            assert kwargs["expected_event_id"] == 3
+            return HistoryReadFact(
+                workflow_id=workflow_id,
+                run_id=run_id,
+                events=tuple(
+                    _history_event(value, ActivityTaskEventAttributes(phase="scheduled"))
+                    for value in (3, 4)
+                ),
+                reverse=False,
+                pages_read=1,
+                events_scanned=2,
+                next_page_token=None,
+                observed_at=_now(),
+            )
+
+        async def closing_event(self, *args, **kwargs):
+            raise AssertionError("not used")
+
+    gateway = OverdeliveredHistory()
+    first_runtime = _service(history_gateway=gateway)
+    second_runtime = _service(history_gateway=gateway)
+    request = HistorySliceRequest(
+        target_ref="orders-prod",
+        workflow_id="order-1",
+        run_id="run-1",
+        event_id_range={"first": 1, "last": 999},
+        limit=2,
+    )
+
+    first = await first_runtime.get_workflow_history_slice(_context(), request)
+    assert first.answer.continuation_token
+    assert "." in first.answer.continuation_token
+    second = await second_runtime.get_workflow_history_slice(
+        _context(), request.model_copy(update={"page_token": first.answer.continuation_token})
+    )
+
     assert [event.event_id for event in first.answer.events + second.answer.events] == [1, 2, 3, 4]
 
 
@@ -259,9 +323,7 @@ async def test_task_queue_both_returns_independent_kind_snapshots() -> None:
         ),
     ),
 )
-async def test_task_queue_both_preserves_per_kind_failures(
-    failed, error_flags, completion
-) -> None:
+async def test_task_queue_both_preserves_per_kind_failures(failed, error_flags, completion) -> None:
     class PartialGateway(_TaskQueueGateway):
         async def describe(self, context, target, task_queue, task_type):
             context.budget.reserve_temporal_call("describe_task_queue")
@@ -384,7 +446,6 @@ def _service(
     workflow_gateway: object | None = None,
     history_gateway: object | None = None,
     task_queue_gateway: object | None = None,
-    continuations: ContinuationCodec | None = None,
 ) -> DefaultWorkflowReadService:
     target = _target()
     return DefaultWorkflowReadService(
@@ -405,7 +466,6 @@ def _service(
                 observed_at=_now(),
             )
         ),
-        continuations=continuations,
     )
 
 

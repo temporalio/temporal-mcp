@@ -59,14 +59,18 @@ bound, sample, estimate, partial result, or unknown—not a census.
 
 ### Continuations resume bounded work
 
-Pagination and composite continuation use an opaque `continuation_token`. Population tokens are
-signed and scoped to the target, tool, query/window, and relevant request shape. They carry the next
-native Temporal cursor plus bounded cumulative accounting; they do not carry raw queries or an
-ever-growing ledger of workflow IDs.
+Pagination and composite continuation use an opaque `continuation_token`. Visibility and ordinary
+history page boundaries use Temporal's native cursor. Temporal may return an indivisible history
+batch larger than requested; only then, history uses a checksummed token to refetch that page and
+resume after a verified event boundary. Population tokens are checksummed and scoped to the target,
+tool, exact query/window, and relevant request shape. They carry the next native Temporal cursor
+plus bounded cumulative accounting; they do not carry raw queries or an ever-growing ledger of
+workflow IDs.
 
 A continuation advances through non-overlapping Visibility frames. Completeness can only stay the
 same or weaken as later frames add sampling, truncation, failures, or group overflow. Invalid,
-tampered, stale, or cross-scope tokens fail safely.
+corrupted, stale, or cross-scope tokens fail safely. The checksum detects accidental corruption;
+it is not an authentication boundary.
 
 ### Evidence has a time boundary
 

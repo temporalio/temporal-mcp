@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import json
 from dataclasses import asdict
 from typing import Protocol, TypeVar
 
@@ -51,8 +47,13 @@ from ops_mcp.gateways.task_queues import TemporalTaskQueueGateway
 from ops_mcp.gateways.workflows import TemporalWorkflowGateway
 from ops_mcp.runtime.budget import BudgetSnapshot
 from ops_mcp.runtime.context import RequestContext
-from ops_mcp.runtime.continuation import ContinuationCodec, ContinuationState
-from ops_mcp.runtime.errors import DeadlineExceededError, ErrorCode, OpsMcpError
+from ops_mcp.runtime.continuation import (
+    HistoryContinuationCodec,
+    HistoryContinuationState,
+    canonical_scope,
+)
+from ops_mcp.runtime.cursors import decode_temporal_cursor, encode_temporal_cursor
+from ops_mcp.runtime.errors import DeadlineExceededError, OpsMcpError
 from ops_mcp.targets.catalog import TargetCatalog
 from ops_mcp.targets.models import ResolvedTarget
 
@@ -86,14 +87,12 @@ class DefaultWorkflowReadService:
         workflow_gateway: TemporalWorkflowGateway,
         history_gateway: TemporalHistoryGateway,
         task_queue_gateway: TemporalTaskQueueGateway,
-        *,
-        continuations: ContinuationCodec | None = None,
     ) -> None:
         self._catalog = catalog
         self._workflows = workflow_gateway
         self._history = history_gateway
         self._task_queues = task_queue_gateway
-        self._continuations = continuations or ContinuationCodec()
+        self._history_continuations = HistoryContinuationCodec()
 
     async def describe_workflow(
         self, context: RequestContext, request: DescribeWorkflowRequest
@@ -117,17 +116,21 @@ class DefaultWorkflowReadService:
         reverse = request.last_n is not None
         scan_limit = request.last_n or request.limit
         scope = _history_scope(request)
-        native_token = None
         page_offset = 0
-        if request.page_token:
-            state = self._continuations.decode(
+        expected_event_id = None
+        if request.page_token and "." in request.page_token:
+            state = self._history_continuations.decode(
                 request.page_token,
-                tool="get_workflow_history_slice",
                 target_ref=target.target_ref,
-                query=scope,
+                scope=scope,
             )
-            native_token = _decode_page_token(state.candidate_page_token)
+            native_token = decode_temporal_cursor(
+                state.native_page_token, label="history page token"
+            )
             page_offset = state.page_offset
+            expected_event_id = state.expected_event_id
+        else:
+            native_token = decode_temporal_cursor(request.page_token, label="history page token")
         read = await self._history.read(
             context,
             target,
@@ -137,6 +140,7 @@ class DefaultWorkflowReadService:
             max_events=scan_limit,
             next_page_token=native_token,
             page_offset=page_offset,
+            expected_event_id=expected_event_id,
             reverse=reverse,
         )
         scanned = tuple(sorted(read.events, key=lambda event: event.event_id))
@@ -149,19 +153,22 @@ class DefaultWorkflowReadService:
         completion = (
             Completeness.COMPLETE if read.complete or selector_complete else Completeness.TRUNCATED
         )
-        next_token = (
-            None
-            if selector_complete
-            else _history_continuation(
-                self._continuations,
-                target.target_ref,
-                scope,
-                read.next_page_token,
-                read.next_page_offset,
-            )
-        )
+        next_token = None
+        if not selector_complete:
+            if read.next_page_offset:
+                next_token = self._history_continuations.encode(
+                    HistoryContinuationState(
+                        target_ref=target.target_ref,
+                        scope_digest=self._history_continuations.scope_digest(scope),
+                        native_page_token=encode_temporal_cursor(read.next_page_token),
+                        page_offset=read.next_page_offset,
+                        expected_event_id=read.next_expected_event_id,
+                    )
+                )
+            else:
+                next_token = encode_temporal_cursor(read.next_page_token)
         truncation_warnings = (
-            ("More history is available; continue with next_page_token.",)
+            ("More history is available; continue with continuation_token.",)
             if completion is Completeness.TRUNCATED
             else ()
         )
@@ -511,48 +518,4 @@ def _charge_output(context: RequestContext, response: ResponseModel) -> Response
 
 
 def _history_scope(request: HistorySliceRequest) -> str:
-    serialized = json.dumps(
-        request.model_dump(mode="json", exclude={"page_token", "target_ref"}),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(serialized).hexdigest()
-
-
-def _history_continuation(
-    codec: ContinuationCodec,
-    target_ref: str,
-    scope: str,
-    native_token: bytes | None,
-    page_offset: int,
-) -> str | None:
-    if native_token is None and page_offset == 0:
-        return None
-    encoded_native = (
-        base64.urlsafe_b64encode(native_token).decode("ascii") if native_token is not None else None
-    )
-    return codec.encode(
-        ContinuationState(
-            tool="get_workflow_history_slice",
-            target_ref=target_ref,
-            scope_digest=codec.scope_digest(scope),
-            sample_seed=codec.stable_seed(
-                tool="get_workflow_history_slice", target_ref=target_ref, scope=scope
-            ),
-            candidate_page_token=encoded_native,
-            page_offset=page_offset,
-        )
-    )
-
-
-def _decode_page_token(value: str | None) -> bytes | None:
-    if not value:
-        return None
-    try:
-        return base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
-    except (UnicodeEncodeError, ValueError, TypeError, binascii.Error) as exc:
-        raise OpsMcpError(
-            ErrorCode.INVALID_ARGUMENT,
-            "The history page token is invalid",
-            retryable=False,
-        ) from exc
+    return canonical_scope(request.model_dump(mode="json", exclude={"page_token", "target_ref"}))

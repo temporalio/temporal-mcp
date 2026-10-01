@@ -55,16 +55,23 @@ Population tools own sampling seeds, concurrency, page limits, candidate limits,
 limits. These controls are intentionally absent from their normal MCP schemas. Time fields use `started_at` and
 `ended_at`; omitted population windows default to the server's broad bounded window.
 
-Population composites return one signed opaque `continuation_token` when Temporal has another
-Visibility frame. The bounded token contains a keyed scope digest, effective time window, sampling
+Population composites return one checksummed opaque `continuation_token` when Temporal has another
+Visibility frame. The bounded token contains a scope fingerprint, effective time window, sampling
 seed, schema version, next native cursor, scalar progress counters, and fixed-size group summaries;
 it never contains raw queries or workflow/run identity ledgers. Each call reads a non-overlapping
 frame and advances directly to its next native cursor. Sampling, truncation, failures, or group
 overflow in any frame survive in terminal completeness semantics. Tokens are capped below 8 KiB;
-an oversized opaque native cursor produces a typed safe error. Tampered tokens or reuse with a
-changed target, tool, scope, or time window are rejected.
+an oversized opaque native cursor produces a typed safe error. Corrupted tokens or reuse with a
+changed target, tool, scope, or time window are rejected. The checksum and scope fingerprint catch
+accidental corruption or reuse; they are not an authentication boundary.
 
-All paginated tools use only `continuation_token`.
+All paginated tools use only `continuation_token`. Visibility pages and ordinary history page
+boundaries expose a canonically encoded Temporal cursor. Temporal can preserve transaction batches
+by returning more history events than requested; in that case only, the history tool returns a
+checksummed, scope-bound offset token. A resumed call refetches the same native page, verifies the
+expected event boundary, and skips the already-returned prefix without charging it to the new
+call's event budget. These checks detect accidental corruption, stale history, or wrong-request
+reuse; they are not an authentication boundary.
 
 ## Evidence rules
 

@@ -165,7 +165,9 @@ async def test_forward_history_pages_are_charged_and_normalized() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("delivered", "limit"), [(365, 200), (560, 500)])
-async def test_server_overdelivery_is_clipped_to_hard_limit(delivered: int, limit: int) -> None:
+async def test_server_overdelivery_resumes_same_page_without_skip_or_duplicate(
+    delivered: int, limit: int
+) -> None:
     events = [
         HistoryEvent(
             event_id=index,
@@ -184,24 +186,25 @@ async def test_server_overdelivery_is_clipped_to_hard_limit(delivered: int, limi
         _Provider(SimpleNamespace(workflow_service=service, data_converter=DataConverter.default))
     )
 
+    first_context = _context(history_events=limit)
     first = await gateway.read(
-        _context(history_events=limit),
+        first_context,
         _target(),
         "order-1",
         "run-1",
         max_events=limit,
         page_size=limit,
     )
-
-    assert len(first.events) == limit
-    assert first.events_scanned == limit
+    assert [event.event_id for event in first.events] == list(range(1, limit + 1))
     assert first.next_page_token == b""
     assert first.next_page_offset == limit
-    assert not first.complete
+    assert first.next_expected_event_id == limit + 1
+    assert first_context.budget.snapshot().history_events_read == limit
 
     remaining = delivered - limit
+    second_context = _context(history_events=remaining)
     second = await gateway.read(
-        _context(history_events=remaining),
+        second_context,
         _target(),
         "order-1",
         "run-1",
@@ -209,12 +212,16 @@ async def test_server_overdelivery_is_clipped_to_hard_limit(delivered: int, limi
         page_size=limit,
         next_page_token=first.next_page_token,
         page_offset=first.next_page_offset,
+        expected_event_id=first.next_expected_event_id,
     )
     assert [event.event_id for event in second.events] == list(range(limit + 1, delivered + 1))
+    assert second.next_page_token == b"server-next"
+    assert second.next_page_offset == 0
+    assert second_context.budget.snapshot().history_events_read == remaining
 
 
 @pytest.mark.asyncio
-async def test_reverse_overdelivery_continuation_has_no_skip_or_duplicate() -> None:
+async def test_reverse_overdelivery_resume_validates_descending_boundary() -> None:
     events = [
         HistoryEvent(
             event_id=index,
@@ -247,12 +254,64 @@ async def test_reverse_overdelivery_continuation_has_no_skip_or_duplicate() -> N
         max_events=165,
         next_page_token=first.next_page_token,
         page_offset=first.next_page_offset,
+        expected_event_id=first.next_expected_event_id,
         reverse=True,
     )
 
     combined = [event.event_id for event in first.events + second.events]
     assert combined == list(range(365, 0, -1))
     assert len(combined) == len(set(combined))
+
+
+@pytest.mark.asyncio
+async def test_overdelivery_resume_rejects_changed_history_boundary_without_charging_events() -> (
+    None
+):
+    events = [
+        HistoryEvent(
+            event_id=index,
+            event_type=EventType.EVENT_TYPE_MARKER_RECORDED,
+            task_id=index,
+        )
+        for index in range(1, 5)
+    ]
+    for event in events:
+        event.event_time.FromDatetime(datetime(2026, 1, 1, tzinfo=UTC))
+    service = _HistoryService([GetWorkflowExecutionHistoryResponse(history=History(events=events))])
+    gateway = SdkHistoryGateway(
+        _Provider(SimpleNamespace(workflow_service=service, data_converter=DataConverter.default))
+    )
+    context = _context(history_events=2)
+
+    with pytest.raises(OpsMcpError) as exc_info:
+        await gateway.read(
+            context,
+            _target(),
+            "order-1",
+            "run-1",
+            max_events=2,
+            page_offset=2,
+            expected_event_id=999,
+        )
+
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert context.budget.snapshot().history_events_read == 0
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_native_page_above_resource_limit_without_charging_events() -> None:
+    events = [HistoryEvent(event_id=index) for index in range(1, 10_002)]
+    service = _HistoryService([GetWorkflowExecutionHistoryResponse(history=History(events=events))])
+    gateway = SdkHistoryGateway(
+        _Provider(SimpleNamespace(workflow_service=service, data_converter=DataConverter.default))
+    )
+    context = _context(history_events=2)
+
+    with pytest.raises(OpsMcpError) as exc_info:
+        await gateway.read(context, _target(), "order-1", "run-1", max_events=2)
+
+    assert exc_info.value.code is ErrorCode.INTERNAL_ERROR
+    assert context.budget.snapshot().history_events_read == 0
 
 
 @pytest.mark.asyncio

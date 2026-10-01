@@ -76,11 +76,12 @@ from ops_mcp.runtime import (
     MAX_CUMULATIVE_GROUPS,
     MAX_DISCOVERED_ACTIVITY_QUEUES,
     BasicBudgetLimits,
-    ContinuationCodec,
-    ContinuationState,
+    CompositeContinuationCodec,
+    CompositeContinuationState,
     OpsMcpError,
     RequestContext,
-    normalize_query,
+    canonical_scope,
+    normalize_group_counts,
 )
 
 READ_ONLY = ToolAnnotations(
@@ -100,7 +101,7 @@ VisibilityQueryInput = Annotated[
 
 
 def register_direct_read_tools(server: FastMCP[CompositionRoot], root: CompositionRoot) -> None:
-    continuations = ContinuationCodec()
+    continuations = root.continuations
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     async def check_connection(
@@ -608,15 +609,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 failure_class=failure_class,
                 limits=limits,
                 sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
-                sample_seed=(
-                    state.sample_seed
-                    if state
-                    else continuations.stable_seed(
-                        tool="inspect_workflow_task_failures",
-                        target_ref=target_ref,
-                        scope=scope,
-                    )
-                ),
+                sample_seed=(state.sample_seed if state else continuations.new_sample_seed()),
                 candidate_page_token=state.candidate_page_token if state else None,
                 group_by_custom_search_attributes=tuple(group_by_custom_search_attributes or ()),
             )
@@ -737,15 +730,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 minimum_open_duration_seconds=expected_duration_seconds,
                 limits=limits,
                 sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
-                sample_seed=(
-                    state.sample_seed
-                    if state
-                    else continuations.stable_seed(
-                        tool="inspect_activity_queue_dependencies",
-                        target_ref=target_ref,
-                        scope=scope,
-                    )
-                ),
+                sample_seed=(state.sample_seed if state else continuations.new_sample_seed()),
                 candidate_page_token=state.candidate_page_token if state else None,
                 require_running_and_duration=False,
                 activity_task_queues=tuple(activity_task_queues or ()),
@@ -859,15 +844,7 @@ def register_direct_read_tools(server: FastMCP[CompositionRoot], root: Compositi
                 expected_duration_seconds=expected_duration_seconds,
                 limits=resolved_limits,
                 sampling_strategy=SamplingStrategy.DETERMINISTIC_HASH,
-                sample_seed=(
-                    state.sample_seed
-                    if state
-                    else continuations.stable_seed(
-                        tool="analyze_incident_impact",
-                        target_ref=target_ref,
-                        scope=scope,
-                    )
-                ),
+                sample_seed=(state.sample_seed if state else continuations.new_sample_seed()),
                 candidate_page_token=state.candidate_page_token if state else None,
                 group_by_custom_search_attributes=grouping,
             )
@@ -1092,16 +1069,15 @@ def _population_scope(
     groups: tuple[str, ...],
     limits: PopulationLimits,
 ) -> str:
-    """Canonical scope signed into a continuation; changed inputs cannot reuse it."""
-    return "|".join(
-        (
-            normalize_query(query),
-            started_at.isoformat() if started_at else "server_default_start",
-            ended_at.isoformat() if ended_at else "server_default_end",
-            failure_class.value if failure_class else "all_failures",
-            ",".join(groups),
-            limits.model_dump_json(),
-        )
+    return canonical_scope(
+        {
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "failure_class": failure_class.value if failure_class else None,
+            "groups": list(groups),
+            "limits": limits.model_dump(mode="json"),
+            "query": query,
+            "started_at": started_at.isoformat() if started_at else None,
+        }
     )
 
 
@@ -1114,20 +1090,16 @@ def _dependency_scope(
     groups: tuple[str, ...],
     limits: PopulationLimits,
 ) -> str:
-    return "|".join(
-        (
-            normalize_query(query),
-            started_at.isoformat() if started_at else "server_default_start",
-            ended_at.isoformat() if ended_at else "server_default_end",
-            ",".join(queues) or "discover_queues",
-            (
-                str(expected_duration_seconds)
-                if expected_duration_seconds is not None
-                else "no_duration_policy"
-            ),
-            ",".join(groups),
-            limits.model_dump_json(),
-        )
+    return canonical_scope(
+        {
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "expected_duration_seconds": expected_duration_seconds,
+            "groups": list(groups),
+            "limits": limits.model_dump(mode="json"),
+            "query": query,
+            "queues": list(queues),
+            "started_at": started_at.isoformat() if started_at else None,
+        }
     )
 
 
@@ -1135,8 +1107,8 @@ def _with_population_continuation(
     response,
     *,
     context: RequestContext | None = None,
-    state: ContinuationState | None,
-    continuations: ContinuationCodec,
+    state: CompositeContinuationState | None,
+    continuations: CompositeContinuationCodec,
     tool: str,
     target_ref: str,
     scope: str,
@@ -1174,7 +1146,15 @@ def _with_population_continuation(
     group_overflow = (state.cumulative_group_overflow if state else 0) + max(
         0, len(sorted_group_counts) - MAX_CUMULATIVE_GROUPS
     )
-    bounded_group_counts = dict(sorted_group_counts[:MAX_CUMULATIVE_GROUPS])
+    bounded_group_counts = {
+        (dimension, values): count
+        for dimension, values, count in normalize_group_counts(
+            tuple(
+                (dimension, values, count)
+                for (dimension, values), count in sorted_group_counts[:MAX_CUMULATIVE_GROUPS]
+            )
+        )
+    }
     cumulative_groups = tuple(
         PopulationProgressGroup(
             dimension=dimension,
@@ -1334,7 +1314,7 @@ def _with_population_continuation(
         )
     else:
         token = continuations.encode(
-            ContinuationState(
+            CompositeContinuationState(
                 tool=tool,
                 target_ref=target_ref,
                 scope_digest=continuations.scope_digest(scope),

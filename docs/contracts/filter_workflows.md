@@ -6,8 +6,8 @@
   `page_size: 1..200`, `continuation_token?: opaque str`. Custom attributes must be registered
   and are opt-in. The bounded system projection currently supports `TemporalReportedProblems`
   without a schema lookup.
-- **Output:** projected workflow rows, `returned`, observation time, and a signed opaque
-  `continuation_token` bound to target, query, fields, projections, and page size.
+- **Output:** projected workflow rows, `returned`, observation time, and a Temporal-native opaque
+  `continuation_token`. Resume with the original target, query, fields, projections, and page size.
 - **Facts:** visibility records only. **Interpretation:** none.
 - **Gateway calls:** on a custom-projection schema-cache miss, one namespace-read
   `WorkflowService.GetSearchAttributes` call, then one page of `ListWorkflowExecutions`;

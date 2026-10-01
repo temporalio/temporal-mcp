@@ -30,8 +30,6 @@ from ops_mcp.facts import (
 from ops_mcp.runtime import (
     BasicBudgetLimits,
     BasicExecutionBudget,
-    ContinuationCodec,
-    ContinuationState,
     ErrorCode,
     OpsMcpError,
     Principal,
@@ -44,7 +42,6 @@ from ops_mcp.services import (
     DefaultVisibilityService,
     SearchAttributeSchemaResolver,
 )
-from ops_mcp.services.visibility import _search_scope
 from ops_mcp.targets import ConnectionDescriptor, ResolvedTarget, TargetCatalog
 
 
@@ -123,6 +120,7 @@ class FakeVisibilityGateway:
         assert self.schema is not None
         return self.schema
 
+
 def _target() -> ResolvedTarget:
     return ResolvedTarget(
         target_ref="orders-prod",
@@ -180,9 +178,9 @@ def test_resolve_target_uses_context_identity_and_exposes_no_connection() -> Non
     assert context.budget.snapshot().output_bytes > 0
 
 
-async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_token() -> None:
+async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_native_token() -> None:
     catalog = RecordingCatalog(_target())
-    gateway = FakeVisibilityGateway(
+    first_gateway = FakeVisibilityGateway(
         page=VisibilityPageFact(
             namespace="default",
             query="OrderId = '88231'",
@@ -190,8 +188,6 @@ async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_token()
             next_page_token=b"\x00opaque\xff",
         )
     )
-    context = _context()
-    codec = ContinuationCodec(b"v" * 32)
     request = SearchWorkflowRunsRequest(
         target_ref="orders-prod",
         query="OrderId = '88231'",
@@ -202,43 +198,39 @@ async def test_filter_reauthorizes_projects_exact_fields_and_round_trips_token()
         ),
         page_size=10,
     )
-    scope = _search_scope(request)
-    previous = codec.encode(
-        ContinuationState(
-            tool="search_workflow_runs",
-            target_ref="orders-prod",
-            scope_digest=codec.scope_digest(scope),
-            sample_seed="seed",
-            candidate_page_token="cHJldmlvdXM=",
+    first = await DefaultVisibilityService(catalog, first_gateway).search_workflow_runs(
+        _context(), request
+    )
+    second_gateway = FakeVisibilityGateway(
+        page=VisibilityPageFact(
+            namespace="default",
+            query=request.query,
+            rows=(_workflow(),),
+            next_page_token=None,
         )
     )
-
-    result = await DefaultVisibilityService(
-        catalog, gateway, continuations=codec
-    ).search_workflow_runs(
-        context,
-        request.model_copy(update={"continuation_token": previous}),
+    second_context = _context()
+    second = await DefaultVisibilityService(catalog, second_gateway).search_workflow_runs(
+        second_context,
+        request.model_copy(update={"continuation_token": first.answer.continuation_token}),
     )
 
-    assert catalog.authorizations == [(context.principal, "orders-prod")]
-    assert gateway.list_args[0][3] == b"previous"
-    assert result.answer.continuation_token is not None
-    resumed = codec.decode(
-        result.answer.continuation_token,
-        tool="search_workflow_runs",
-        target_ref="orders-prod",
-        query=scope,
-    )
-    assert resumed.candidate_page_token == "AG9wYXF1Zf8="
-    assert result.answer.returned == 1
-    assert result.answer.workflows[0].model_dump() == {
+    assert catalog.authorizations == [
+        (second_context.principal, "orders-prod"),
+        (second_context.principal, "orders-prod"),
+    ]
+    assert first.answer.continuation_token == "AG9wYXF1Zf8"
+    assert second_gateway.list_args[0][3] == b"\x00opaque\xff"
+    assert second.answer.continuation_token is None
+    assert second.answer.returned == 1
+    assert second.answer.workflows[0].model_dump() == {
         "workflow_id": "order-88231",
         "run_id": "run-1",
         "close_time": None,
     }
-    assert result.inspection.temporal_calls == 1
-    assert result.inspection.pages_read == 1
-    assert result.inspection.completion == "complete"
+    assert second.inspection.temporal_calls == 1
+    assert second.inspection.pages_read == 1
+    assert second.inspection.completion == "complete"
 
 
 async def test_filter_projects_only_requested_registered_custom_search_attributes() -> None:
@@ -298,9 +290,8 @@ async def test_system_projection_avoids_schema_rpc() -> None:
         page=VisibilityPageFact(namespace="default", query="", rows=(row,), next_page_token=None)
     )
 
-    result = await DefaultVisibilityService(
-        RecordingCatalog(_target()), gateway
-    ).search_workflow_runs(
+    service = DefaultVisibilityService(RecordingCatalog(_target()), gateway)
+    result = await service.search_workflow_runs(
         _context(),
         SearchWorkflowRunsRequest(
             target_ref="orders-prod",
@@ -476,8 +467,7 @@ async def test_schema_resolver_single_flights_concurrent_failure() -> None:
 
     assert gateway.calls == 1
     assert all(
-        isinstance(result, OpsMcpError)
-        and result.code is ErrorCode.UNSUPPORTED_CAPABILITY
+        isinstance(result, OpsMcpError) and result.code is ErrorCode.UNSUPPORTED_CAPABILITY
         for result in results
     )
     assert resolver._inflight == {}

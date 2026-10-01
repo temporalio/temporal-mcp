@@ -239,8 +239,8 @@ class PopulationInspection(ContractModel):
     inspection_failures: int = Field(ge=0)
     exhausted_dimension: str | None = None
     limits: PopulationLimits
-    # Internal handoff to the signed MCP continuation. Excluded from the wire
-    # response so callers only ever receive the scope-bound continuation_token.
+    # Internal handoff to the validated composite continuation. Excluded from the wire
+    # response so callers only receive the opaque continuation_token.
     candidate_next_page_token: str | None = Field(default=None, exclude=True)
 
 

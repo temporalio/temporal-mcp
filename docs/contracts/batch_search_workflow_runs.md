@@ -9,7 +9,7 @@
 - **Execution:** shared query/projection validation occurs before fan-out. Target authorization is
   still performed independently, and at most four target searches run concurrently. Each item has
   scoped accounting while all items atomically consume the same aggregate request budget.
-- **Completeness:** each success describes one bounded page and includes its own signed
+- **Completeness:** each success describes one bounded page and includes its own Temporal-native
   continuation. Visibility rows and approximate counts are separate, eventually consistent
   observations.
 - **Errors:** malformed shared inputs fail the whole request before any target call. Authorization,

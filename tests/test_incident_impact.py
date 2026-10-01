@@ -27,7 +27,7 @@ from ops_mcp.mcp.adapters import _with_population_continuation
 from ops_mcp.runtime import (
     BasicBudgetLimits,
     BasicExecutionBudget,
-    ContinuationCodec,
+    CompositeContinuationCodec,
     Principal,
     RequestContext,
 )
@@ -37,7 +37,7 @@ from ops_mcp.targets import ConnectionDescriptor, ResolvedTarget
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 INCIDENT_START = NOW - timedelta(hours=2)
 INCIDENT_END = INCIDENT_START + timedelta(minutes=40)
-CONTINUATIONS = ContinuationCodec(b"test-secret".ljust(32, b"!"))
+CONTINUATIONS = CompositeContinuationCodec()
 
 
 class _Catalog:
@@ -308,7 +308,7 @@ async def test_160_visibility_candidates_are_not_promoted_to_confirmed_impact() 
                 max_concurrency=10,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="incident-trap",
+            sample_seed="MDEyMzQ1Njc4OWFi",
             group_by_custom_search_attributes=("Team",),
         ),
     )
@@ -359,7 +359,7 @@ async def test_incident_queue_discovery_covers_two_queues_across_complete_chain(
         ),
         limits=limits,
         sampling_strategy="deterministic_hash",
-        sample_seed="stable-incident",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         group_by_custom_search_attributes=("Team", "Domain"),
     )
     result = await service.analyze_incident_impact(_context(), request)
@@ -370,7 +370,7 @@ async def test_incident_queue_discovery_covers_two_queues_across_complete_chain(
         tool="analyze_incident_impact",
         target_ref="ledger-prod",
         scope="two-queue-incident",
-        sample_seed="stable-incident",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=INCIDENT_START,
         ended_at=INCIDENT_END,
         confirmed=lambda run: run.classification == "confirmed_historical_impact",
@@ -416,7 +416,7 @@ async def test_explicit_incident_queue_reports_excluded_dependency_and_subset_sc
             max_concurrency=2,
         ),
         sampling_strategy="deterministic_hash",
-        sample_seed="explicit-subset",
+        sample_seed="MDEyMzQ1Njc4OWFi",
     )
     result = await service.analyze_incident_impact(_context(), request)
     preferred = _with_population_continuation(
@@ -426,7 +426,7 @@ async def test_explicit_incident_queue_reports_excluded_dependency_and_subset_sc
         tool="analyze_incident_impact",
         target_ref="ledger-prod",
         scope="explicit-subset",
-        sample_seed="explicit-subset",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=INCIDENT_START,
         ended_at=INCIDENT_END,
         confirmed=lambda run: run.classification == "confirmed_historical_impact",

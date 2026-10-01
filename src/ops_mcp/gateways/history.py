@@ -37,6 +37,7 @@ from ops_mcp.facts.history import (
     WorkflowTaskEventAttributes,
 )
 from ops_mcp.runtime.context import RequestContext
+from ops_mcp.runtime.continuation import MAX_NATIVE_HISTORY_PAGE_EVENTS
 from ops_mcp.runtime.errors import DeadlineExceededError, ErrorCode, OpsMcpError
 from ops_mcp.targets.models import ResolvedTarget
 
@@ -53,6 +54,7 @@ class TemporalHistoryGateway(Protocol):
         max_events: int | None = None,
         next_page_token: bytes | None = None,
         page_offset: int = 0,
+        expected_event_id: int | None = None,
         reverse: bool = False,
     ) -> HistoryReadFact: ...
 
@@ -83,6 +85,7 @@ class SdkHistoryGateway:
         max_events: int | None = None,
         next_page_token: bytes | None = None,
         page_offset: int = 0,
+        expected_event_id: int | None = None,
         reverse: bool = False,
     ) -> HistoryReadFact:
         if not workflow_id or not run_id:
@@ -91,15 +94,16 @@ class SdkHistoryGateway:
             raise ValueError("page_size must be positive")
         if max_events is not None and max_events <= 0:
             raise ValueError("max_events must be positive when provided")
-        if page_offset < 0:
-            raise ValueError("page_offset must be non-negative")
-
+        if page_offset < 0 or page_offset > MAX_NATIVE_HISTORY_PAGE_EVENTS:
+            raise ValueError("page_offset is outside the supported range")
+        if (page_offset == 0) != (expected_event_id is None):
+            raise ValueError("expected_event_id is required exactly when page_offset is set")
         client = await acquire_client(self._provider, context, target)
         token = next_page_token or b""
         events: list[HistoryEventFact] = []
         pages_read = 0
-        offset = page_offset
-        resume_offset = 0
+        resume_offset = page_offset
+        resume_expected_event_id = expected_event_id
         budget_stopped = False
         stop = False
         while not stop:
@@ -114,6 +118,7 @@ class SdkHistoryGateway:
                 budget_stopped = True
                 break
             request_size = page_size if remaining is None else min(page_size, remaining)
+            page_start_token = token
             context.budget.reserve_temporal_call(
                 "GetWorkflowExecutionHistoryReverse" if reverse else "GetWorkflowExecutionHistory"
             )
@@ -155,27 +160,39 @@ class SdkHistoryGateway:
             context.budget.consume_page("workflow_history")
             pages_read += 1
             page = tuple(response.history.events)
-            if offset > len(page):
+            if len(page) > MAX_NATIVE_HISTORY_PAGE_EVENTS:
                 raise OpsMcpError(
-                    ErrorCode.INVALID_ARGUMENT,
-                    "The history continuation token is no longer valid",
+                    ErrorCode.INTERNAL_ERROR,
+                    "Temporal returned an unexpectedly large native history page",
                     retryable=False,
+                    details={
+                        "limit": MAX_NATIVE_HISTORY_PAGE_EVENTS,
+                        "returned": len(page),
+                    },
                 )
-            available = page[offset:]
+            if page_offset:
+                if page_offset >= len(page) or page[page_offset].event_id != expected_event_id:
+                    raise OpsMcpError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "The history continuation boundary is no longer valid",
+                        retryable=False,
+                    )
+            available = page[page_offset:]
             take = len(available) if remaining is None else min(len(available), remaining)
             selected = available[:take]
             context.budget.consume_history_events(len(selected))
             events.extend(await _normalize_events(client.data_converter, selected))
             if take < len(available):
-                # Temporal advanced to the next page even though it over-delivered this one.
-                # Re-fetch the same server page and skip the already returned prefix on resume.
-                resume_offset = offset + take
+                resume_offset = page_offset + take
+                resume_expected_event_id = page[resume_offset].event_id
+                token = page_start_token
+                stop = True
             else:
                 token = response.next_page_token
-                offset = 0
-            stop = not token or (max_events is not None and len(events) >= max_events)
-            if resume_offset:
-                stop = True
+                page_offset = 0
+                resume_offset = 0
+                resume_expected_event_id = None
+                stop = not token or (max_events is not None and len(events) >= max_events)
 
         return HistoryReadFact(
             workflow_id=workflow_id,
@@ -184,11 +201,10 @@ class SdkHistoryGateway:
             reverse=reverse,
             pages_read=pages_read,
             events_scanned=len(events),
-            next_page_token=(
-                token if resume_offset or budget_stopped else (token or None)
-            ),
+            next_page_token=(token if resume_offset or budget_stopped else (token or None)),
             observed_at=datetime.now(UTC),
             next_page_offset=resume_offset,
+            next_expected_event_id=resume_expected_event_id,
         )
 
     async def closing_event(
@@ -423,9 +439,7 @@ def normalize_failure(failure: Failure) -> FailureFact:
     )
 
 
-def translate_rpc_error(
-    error: RPCError, *, operation: str, exact_run: bool = False
-) -> OpsMcpError:
+def translate_rpc_error(error: RPCError, *, operation: str, exact_run: bool = False) -> OpsMcpError:
     """Map SDK transport status to a stable, connection-safe internal error."""
     if error.status is RPCStatusCode.DEADLINE_EXCEEDED:
         return DeadlineExceededError()

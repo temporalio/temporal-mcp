@@ -35,8 +35,8 @@ from ops_mcp.mcp.adapters import _with_population_continuation
 from ops_mcp.runtime import (
     BasicBudgetLimits,
     BasicExecutionBudget,
-    ContinuationCodec,
-    ContinuationState,
+    CompositeContinuationCodec,
+    CompositeContinuationState,
     Principal,
     RequestContext,
     ResultTooLargeError,
@@ -45,7 +45,7 @@ from ops_mcp.services import DefaultPopulationDiagnosticService
 from ops_mcp.targets import ConnectionDescriptor, ResolvedTarget
 
 NOW = datetime.now(UTC)
-CONTINUATIONS = ContinuationCodec(b"test-secret".ljust(32, b"!"))
+CONTINUATIONS = CompositeContinuationCodec()
 
 
 class Catalog:
@@ -118,6 +118,7 @@ class Visibility:
         self.schema_calls += 1
         assert self.schema is not None
         return self.schema
+
 
 class Workflows:
     def __init__(self, values: dict[str, WorkflowExecutionFact]) -> None:
@@ -433,7 +434,7 @@ async def test_failure_population_narrows_before_bounded_history_fanout() -> Non
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -488,7 +489,7 @@ async def test_activity_names_are_accepted_for_custom_grouping(custom_name: str)
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
             group_by_custom_search_attributes=(custom_name,),
         ),
     )
@@ -505,7 +506,7 @@ async def test_activity_names_are_accepted_for_custom_grouping(custom_name: str)
     }
 
 
-async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() -> None:
+async def test_population_resume_starts_at_next_composite_candidate_frame_cursor() -> None:
     rows = tuple(_row(index) for index in range(6))
     visibility = Visibility(rows, has_more=False)
     service = DefaultPopulationDiagnosticService(
@@ -531,7 +532,7 @@ async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() 
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
     preferred = _with_population_continuation(
@@ -541,12 +542,13 @@ async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() 
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="scope",
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
     )
-    state = CONTINUATIONS.decode(
+    restarted_codec = CompositeContinuationCodec()
+    state = restarted_codec.decode(
         preferred.continuation_token,
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
@@ -574,17 +576,18 @@ async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() 
     second_preferred = _with_population_continuation(
         second,
         state=state,
-        continuations=CONTINUATIONS,
+        continuations=restarted_codec,
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="scope",
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
     )
 
     assert visibility.page_tokens == [None, b"2"]
+    assert state.sample_seed == "MDEyMzQ1Njc4OWFi"
     assert {run.workflow_id for run in first.answer.runs} == {"wf-0", "wf-1"}
     assert {run.workflow_id for run in second.answer.runs} == {"wf-2", "wf-3"}
     assert second_preferred.page.inspected == 2
@@ -601,8 +604,7 @@ async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() 
         first.inspection.pages_read + second.inspection.pages_read
     )
     assert second_preferred.inspection.candidate_collection_pages == (
-        first.inspection.candidate_collection_pages
-        + second.inspection.candidate_collection_pages
+        first.inspection.candidate_collection_pages + second.inspection.candidate_collection_pages
     )
     assert (
         second_preferred.cumulative.confirmed
@@ -615,9 +617,7 @@ async def test_population_resume_starts_at_next_signed_candidate_frame_cursor() 
 
 async def test_stalled_candidate_cursor_is_terminal_and_partial() -> None:
     class StalledVisibility(Visibility):
-        async def list_workflows_page(
-            self, context, target, *, query, page_size, page_token=None
-        ):
+        async def list_workflows_page(self, context, target, *, query, page_size, page_token=None):
             del target
             context.budget.reserve_temporal_call("list")
             context.budget.consume_page("list")
@@ -653,15 +653,15 @@ async def test_stalled_candidate_cursor_is_terminal_and_partial() -> None:
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
             candidate_page_token="MA",
         ),
     )
-    state = ContinuationState(
+    state = CompositeContinuationState(
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope_digest=CONTINUATIONS.scope_digest("stalled-scope"),
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         candidate_page_token="MA",
     )
 
@@ -672,7 +672,7 @@ async def test_stalled_candidate_cursor_is_terminal_and_partial() -> None:
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="stalled-scope",
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
@@ -712,7 +712,7 @@ async def test_continuation_augmentation_is_charged_to_output_budget() -> None:
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
     augmented = _with_population_continuation(
@@ -722,7 +722,7 @@ async def test_continuation_augmentation_is_charged_to_output_budget() -> None:
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="output-scope",
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
@@ -750,7 +750,7 @@ async def test_continuation_augmentation_is_charged_to_output_budget() -> None:
             tool="inspect_workflow_task_failures",
             target_ref="orders-prod",
             scope="output-scope",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
             started_at=_window().started_at_or_after,
             ended_at=_window().started_before,
             confirmed=lambda run: bool(run.findings),
@@ -786,7 +786,7 @@ async def test_terminal_sample_never_claims_complete_population() -> None:
             time_window=_window(),
             limits=limits,
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
     preferred = _with_population_continuation(
@@ -796,7 +796,7 @@ async def test_terminal_sample_never_claims_complete_population() -> None:
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="230-run-scope",
-        sample_seed="fixed",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
@@ -836,7 +836,7 @@ async def test_cumulative_group_cardinality_is_bounded() -> None:
             time_window=_window(),
             limits=limits,
             sampling_strategy="deterministic_hash",
-            sample_seed="groups",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
     preferred = _with_population_continuation(
@@ -846,7 +846,7 @@ async def test_cumulative_group_cardinality_is_bounded() -> None:
         tool="inspect_workflow_task_failures",
         target_ref="orders-prod",
         scope="many-groups",
-        sample_seed="groups",
+        sample_seed="MDEyMzQ1Njc4OWFi",
         started_at=_window().started_at_or_after,
         ended_at=_window().started_before,
         confirmed=lambda run: bool(run.findings),
@@ -892,7 +892,7 @@ async def test_stuck_population_deduplicates_current_queue_snapshots() -> None:
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -971,7 +971,7 @@ async def test_activity_queue_blast_radius_never_joins_on_workflow_task_queue() 
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
             group_by_custom_search_attributes=("Team",),
         ),
     )
@@ -1017,7 +1017,7 @@ async def test_history_limit_is_explicit_and_prevents_complete_claim() -> None:
                 max_concurrency=1,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="fixed",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -1072,7 +1072,7 @@ async def test_complete_multipage_frame_is_sampled_after_all_1900_candidates() -
                 max_concurrency=5,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="frame-wide",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -1112,7 +1112,7 @@ async def test_truncated_candidate_frame_forbids_extrapolation() -> None:
                 max_concurrency=2,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="bounded",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -1150,7 +1150,7 @@ async def test_recent_reverse_history_preserves_nondeterminism_divergence() -> N
                 max_concurrency=1,
             ),
             sampling_strategy="deterministic_hash",
-            sample_seed="recent-tail",
+            sample_seed="MDEyMzQ1Njc4OWFi",
         ),
     )
 
@@ -1188,7 +1188,7 @@ async def test_population_request_has_no_identity_ledger_resume_fields() -> None
             max_concurrency=2,
         ),
         sampling_strategy="deterministic_hash",
-        sample_seed="resume",
+        sample_seed="MDEyMzQ1Njc4OWFi",
     )
 
     first = await service.inspect_workflow_task_failures(

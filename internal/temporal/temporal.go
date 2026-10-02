@@ -1,5 +1,5 @@
-// Package temporal provides one Temporal client per target and limits the
-// calls each tool can make through it.
+// Package temporal provides one Temporal client per target and limits the calls each tool
+// can make through it. Each call's API key comes from a credential that sees the caller.
 package temporal
 
 import (
@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/identity"
 )
 
 // Clients holds a Temporal client for each target.
@@ -32,32 +33,12 @@ func NewClients(targets []config.Target, name, version string) (*Clients, error)
 	c := &Clients{byName: map[string]client.Client{}}
 	var errs []error
 	for i, t := range targets {
-		opts := client.Options{
-			HostPort:  t.Address,
-			Namespace: t.Namespace,
-			ConnectionOptions: client.ConnectionOptions{
-				DialOptions: []grpc.DialOption{
-					grpc.WithUnaryInterceptor(allowDeclared),
-					grpc.WithChainUnaryInterceptor(identify(name, version)),
-					grpc.WithUserAgent(name + "/" + version),
-				},
-			},
+		cred, err := apiKeyCredential(t.APIKey)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
+			continue
 		}
-		if k := t.APIKey; k != nil {
-			if k.Env != "" {
-				key := strings.TrimSpace(os.Getenv(k.Env))
-				if key == "" {
-					errs = append(errs, fmt.Errorf("targets[%d]: api_key: environment variable %s is unset or empty", i, k.Env))
-					continue
-				}
-				opts.Credentials = client.NewAPIKeyStaticCredentials(key)
-			} else {
-				opts.Credentials = client.NewAPIKeyDynamicCredentials(func(context.Context) (string, error) {
-					return readAPIKey(k.File)
-				})
-			}
-		}
-		cl, err := client.NewLazyClient(opts)
+		cl, err := lazyClient(t, name, version, cred)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("targets[%d]: address: %w", i, err))
 			continue
@@ -68,6 +49,44 @@ func NewClients(targets []config.Target, name, version string) (*Clients, error)
 		return nil, err
 	}
 	return c, nil
+}
+
+// A credential returns the API key for each Temporal call to target; caller is nil without auth.
+type credential func(ctx context.Context, caller *identity.Caller, target *config.Target) (string, error)
+
+func apiKeyCredential(k *config.APIKey) (credential, error) {
+	switch {
+	case k == nil:
+		return nil, nil
+	case k.Env != "":
+		key := strings.TrimSpace(os.Getenv(k.Env))
+		if key == "" {
+			return nil, fmt.Errorf("environment variable %s is unset or empty", k.Env)
+		}
+		return func(context.Context, *identity.Caller, *config.Target) (string, error) { return key, nil }, nil
+	default:
+		return func(context.Context, *identity.Caller, *config.Target) (string, error) { return readAPIKey(k.File) }, nil
+	}
+}
+
+func lazyClient(t config.Target, name, version string, cred credential) (client.Client, error) {
+	opts := client.Options{
+		HostPort:  t.Address,
+		Namespace: t.Namespace,
+		ConnectionOptions: client.ConnectionOptions{
+			DialOptions: []grpc.DialOption{
+				grpc.WithUnaryInterceptor(allowDeclared),
+				grpc.WithChainUnaryInterceptor(identify(name, version)),
+				grpc.WithUserAgent(name + "/" + version),
+			},
+		},
+	}
+	if cred != nil {
+		opts.Credentials = client.NewAPIKeyDynamicCredentials(func(ctx context.Context) (string, error) {
+			return cred(ctx, identity.CallerFrom(ctx), &t)
+		})
+	}
+	return client.NewLazyClient(opts)
 }
 
 // Client returns the client for the target with the given name.

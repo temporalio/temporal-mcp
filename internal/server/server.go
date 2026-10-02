@@ -1,4 +1,5 @@
-// Package server exposes the MCP tools over streamable HTTP.
+// Package server exposes the MCP tools over streamable HTTP. With auth configured, NewMux
+// puts the token check in front of /mcp and serves the protected resource metadata.
 package server
 
 import (
@@ -13,6 +14,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/identity"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -40,7 +42,11 @@ func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.Too
 	}
 	// The handler encodes the output itself: the SDK would re-encode it through float64, corrupting integers above 2^53.
 	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
-		_, out, err := h(temporal.WithTool(ctx, def.Name, rpcs), req, in)
+		ctx = temporal.WithTool(ctx, def.Name, rpcs)
+		if req.Extra != nil && req.Extra.TokenInfo != nil {
+			ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
+		}
+		_, out, err := h(ctx, req, in)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -77,16 +83,34 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) {
 	}, getWorkflow(cfg, clients))
 }
 
-// NewHandler returns an HTTP handler that serves the MCP streamable HTTP transport
-// for the given configuration, making Temporal calls through clients and logging
-// each tool call to logger.
-func NewHandler(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) http.Handler {
-	return newHandler(newServer(name, version, cfg, clients, logger))
+// NewMux returns an HTTP handler that serves the MCP streamable HTTP transport
+// at /mcp for the given configuration, making Temporal calls through clients.
+// With auth configured, /mcp requires a valid access token and the protected
+// resource metadata is served at the path the token challenge points to.
+// logger gets the per-call log and the reason for each rejected token or
+// verification failure.
+func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) http.Handler {
+	mux := http.NewServeMux()
+	handler := newHandler(newServer(name, version, cfg, clients, logger), cfg)
+	if cfg.Auth != nil {
+		metadataPath, metadata := identity.MetadataPath(cfg.Auth.Resource), identity.MetadataHandler(cfg.Auth)
+		// Matched exactly rather than as a ServeMux pattern, which would read wildcards or a method in the configured path.
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != metadataPath {
+				http.NotFound(w, r)
+				return
+			}
+			metadata.ServeHTTP(w, r)
+		})
+		handler = identity.RequireToken(cfg.Auth, logger, handler)
+	}
+	mux.Handle("/mcp", handler)
+	return mux
 }
 
 // newHandler serves s statelessly: go-sdk serves MCP 2026-07-28 only on a stateless handler.
-func newHandler(s *mcp.Server) http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true})
+func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true, DisableLocalhostProtection: cfg.Auth != nil})
 }
 
 func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) *mcp.Server {

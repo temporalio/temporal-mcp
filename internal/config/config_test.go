@@ -49,6 +49,15 @@ func TestParseLoopbackListen(t *testing.T) {
 	}
 }
 
+func TestParseAuth(t *testing.T) {
+	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n"
+		if _, err := parse([]byte(data)); err != nil {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+}
+
 func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
@@ -250,6 +259,55 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: secret}\n",
 			want: []string{"cannot unmarshal !!str `secret` into config.APIKey"},
+		},
+		{
+			name: "auth with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n",
+			want: []string{"auth: resource is required", "auth: issuers: at least one issuer is required"},
+		},
+		{
+			name: "bad auth URLs",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `auth:
+  resource: http://mcp.example.com/mcp
+  issuers:
+    - {issuer: "https://idp.example.com?tenant=1", audience: a}
+    - {issuer: "https://user@idp.example.com", audience: a}
+    - {issuer: "https://", audience: a}
+    - {audience: a}
+    - {issuer: "https://idp.example.com/#tenant", audience: a}
+  authorization_servers: ["not a url"]
+`,
+			want: []string{
+				`auth: resource: "http://mcp.example.com/mcp" must be an https URL (http only for a loopback host)`,
+				`auth: issuers[0]: issuer: "https://idp.example.com?tenant=1" must be`,
+				`auth: issuers[1]: issuer: "https://user@idp.example.com" must be`,
+				`auth: issuers[2]: issuer: "https://" must be`,
+				"auth: issuers[3]: issuer is required",
+				`auth: issuers[4]: issuer: "https://idp.example.com/#tenant" must be`,
+				`auth: authorization_servers[0]: "not a url" must be`,
+			},
+		},
+		{
+			name: "duplicate issuers and missing audiences",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `auth:
+  resource: https://mcp.example.com/mcp
+  issuers:
+    - {issuer: https://idp.example.com, audience: a}
+    - {issuer: https://idp.example.com, audience: b}
+    - {issuer: https://other.example.com, audience: " "}
+`,
+			want: []string{
+				`auth: issuers[1]: issuer "https://idp.example.com" conflicts with the issuer of issuers[0]`,
+				"auth: issuers[2]: audience is required",
+			},
+		},
+		{
+			name: "bad scopes",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n  scopes_supported: ['', 'a b']\n",
+			want: []string{
+				`auth: scopes_supported[0]: "" is not a scope`,
+				`auth: scopes_supported[1]: "a b" is not a scope`,
+			},
 		},
 		{
 			name: "all errors reported",

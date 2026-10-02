@@ -2,9 +2,12 @@ package temporal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +22,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/identity"
 )
 
 func closedAddress(t *testing.T) string {
@@ -90,6 +94,36 @@ func TestNewClientsAPIKeyFromEnv(t *testing.T) {
 			t.Errorf("code = %v, want %v (err %v)", got, codes.Unavailable, err)
 		}
 	})
+}
+
+func TestAPIKeyCredential(t *testing.T) {
+	t.Setenv("OPERATOR_MCP_TEST_API_KEY", " env-key\n")
+	path := filepath.Join(t.TempDir(), "key")
+	cred := func(k *config.APIKey) credential {
+		c, err := apiKeyCredential(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	env, file := cred(&config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}), cred(&config.APIKey{File: path})
+	for _, tt := range []struct {
+		cred        credential
+		write, want string
+	}{
+		{env, "", "env-key"},
+		{file, "file-key-1\n", "file-key-1"},
+		{file, "file-key-2\n", "file-key-2"},
+	} {
+		if tt.write != "" {
+			if err := os.WriteFile(path, []byte(tt.write), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, err := tt.cred(t.Context(), nil, nil); err != nil || got != tt.want {
+			t.Errorf("credential = %q, %v; want %q", got, err, tt.want)
+		}
+	}
 }
 
 func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
@@ -244,5 +278,38 @@ func TestClientIdentityHeaders(t *testing.T) {
 	slices.Sort(methods)
 	if want := []string{"DescribeNamespace", "DescribeWorkflowExecution", "GetSystemInfo", "GetSystemInfo"}; !slices.Equal(methods, want) {
 		t.Errorf("methods = %v, want %v", methods, want)
+	}
+}
+
+func TestCredentialReceivesCallContext(t *testing.T) {
+	target := config.Target{Name: "a", Address: closedAddress(t), Namespace: "default"}
+	type seen struct {
+		caller *identity.Caller
+		target *config.Target
+	}
+	calls := make(chan seen, 1)
+	c, err := lazyClient(target, "test", "0", func(_ context.Context, caller *identity.Caller, target *config.Target) (string, error) {
+		calls <- seen{caller, target}
+		return "", errors.New("no credential")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+
+	caller := &identity.Caller{Issuer: "https://idp.example", Subject: "alice"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = WithTool(identity.WithCaller(ctx, caller), "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName})
+	if _, err := c.WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err == nil || !strings.Contains(err.Error(), "no credential") {
+		t.Errorf("err = %v, want the credential's error", err)
+	}
+	select {
+	case got := <-calls:
+		if got.caller != caller || got.target.Name != "a" {
+			t.Errorf("credential got caller %+v and target %+v, want caller %+v and target a", got.caller, got.target, caller)
+		}
+	default:
+		t.Fatal("credential was not called")
 	}
 }

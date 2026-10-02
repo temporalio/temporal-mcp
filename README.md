@@ -1,11 +1,11 @@
 # operator-mcp
 
-`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`. It is written in Go.
+`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`.
 
 ## Prerequisites
 
 - Go 1.27 or later (see `go.mod`).
-- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests use to start a Temporal dev server. Without it, the first test run downloads the CLI.
+- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests in `internal/server` use to start a Temporal dev server. Without it, the first test run downloads the CLI.
 
 ## Build
 
@@ -39,10 +39,8 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 go test ./...
 ```
 
-With the race detector, which covers the in-process tests but not the server binary that the end-to-end tests start:
+With the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...
 ```
-
-The end-to-end tests in `main_test.go` build the `operator-mcp` binary, start a Temporal dev server, and talk to the running MCP server over HTTP.

@@ -16,6 +16,7 @@ type toolError struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+	cause     error
 }
 
 func (e *toolError) Error() string {

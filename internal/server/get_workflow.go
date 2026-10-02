@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -100,8 +102,27 @@ type failure struct {
 	Details              []payload           `json:"details"`
 	EncodedAttributes    *payload            `json:"encoded_attributes"`
 	LastHeartbeatDetails []payload           `json:"last_heartbeat_details"`
-	// Cause is a *failure; the output schema cannot describe a recursive type.
-	Cause any `json:"cause"`
+	Cause                *failure            `json:"cause"`
+}
+
+// failureFields builds failure's $defs entry; jsonschema.For[failure] would return the $ref override.
+type failureFields failure
+
+func getWorkflowOutputSchema() *jsonschema.Schema {
+	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+		reflect.TypeFor[failure](): {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
+	}}
+	def, err := jsonschema.For[failureFields](opts)
+	if err != nil {
+		panic(fmt.Errorf("get_workflow: failure schema: %w", err))
+	}
+	def.Type, def.Types = "", []string{"null", "object"}
+	schema, err := jsonschema.For[envelope[workflowRun]](opts)
+	if err != nil {
+		panic(fmt.Errorf("get_workflow: output schema: %w", err))
+	}
+	schema.Defs = map[string]*jsonschema.Schema{"failure": def}
+	return schema
 }
 
 type applicationFailure struct {

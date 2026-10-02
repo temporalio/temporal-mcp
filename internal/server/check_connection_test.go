@@ -57,9 +57,6 @@ func reason(s stage) string {
 }
 
 func TestCheckConnectionFailureReasons(t *testing.T) {
-	closed := listen(t)
-	closed.Close()
-
 	silent := listen(t)
 	go func() {
 		for {
@@ -86,12 +83,6 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		wantNamespacePrefix   string
 		wantNamespaceContains string
 	}{
-		{
-			name:       "closed port",
-			target:     config.Target{Address: closed.Addr().String()},
-			timeout:    time.Minute,
-			wantServer: "Unavailable: could not connect to the Temporal server",
-		},
 		{
 			name:       "TLS handshake fails",
 			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}},

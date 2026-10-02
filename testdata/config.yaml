@@ -1,0 +1,11 @@
+listen: 127.0.0.1:0
+targets:
+  - name: prod
+    aliases: [production, prod-us]
+    description: Production payments namespace.
+    address: prod.example.tmprl.cloud:7233
+    namespace: payments.abc12
+  - name: staging
+    description: Staging namespace on a local dev server.
+    address: localhost:7233
+    namespace: default

@@ -1,3 +1,6 @@
+// The get_workflow tool, which returns the current state of a workflow run and, for a
+// closed run, its result or failure.
+
 package server
 
 import (

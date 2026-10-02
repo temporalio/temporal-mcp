@@ -1,3 +1,6 @@
+// Middleware run on every tools/call request: one logs each call, the other drops null
+// arguments and turns every error, including a handler panic, into a toolError.
+
 package server
 
 import (

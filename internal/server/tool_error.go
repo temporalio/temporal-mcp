@@ -1,3 +1,6 @@
+// toolError, the structured error a tool returns, and the helpers that build one for an
+// unknown target or a failed Temporal call.
+
 package server
 
 import (

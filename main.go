@@ -1,4 +1,4 @@
-// The command runs an MCP server that gives AI agents read access to Temporal
+// Operator-mcp runs an MCP server that gives AI agents read access to Temporal
 // targets.
 package main
 

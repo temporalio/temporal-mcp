@@ -1,3 +1,6 @@
+// The check_connection tool, which checks that a target's Temporal server and namespace
+// are reachable, and the wording of failed Temporal calls, which hides server addresses.
+
 package server
 
 import (

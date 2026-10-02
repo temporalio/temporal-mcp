@@ -156,7 +156,8 @@ func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerF
 		if err != nil {
 			return nil, envelope[workflowRun]{}, err
 		}
-		if desc.GetWorkflowExecutionInfo().GetStatus() != enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING {
+		// Check the close time, not the status: a Paused run, for one, is open.
+		if desc.GetWorkflowExecutionInfo().GetCloseTime() != nil {
 			hist, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
 				return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{
 					Namespace:              t.Namespace,

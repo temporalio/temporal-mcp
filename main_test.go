@@ -24,7 +24,7 @@ func buildBinary(t *testing.T, buildArgs ...string) string {
 	return bin
 }
 
-func TestServerIdentity(t *testing.T) {
+func TestServerHandshake(t *testing.T) {
 	cmd := exec.Command(buildBinary(t, "-ldflags", "-X main.version=9.9.9-test"), "--config", filepath.Join("testdata", "config.yaml"))
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -72,6 +72,9 @@ func TestServerIdentity(t *testing.T) {
 	defer session.Close()
 	if got := session.InitializeResult().ServerInfo; got.Name != "temporal-operator" || got.Version != "9.9.9-test" {
 		t.Errorf("server info = %+v, want name temporal-operator and version 9.9.9-test", got)
+	}
+	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+		t.Errorf("protocol version = %s, want 2026-07-28: clients fell back to the 2025 session protocol, so check that the HTTP handler is still stateless", got)
 	}
 }
 

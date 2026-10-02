@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -34,13 +35,9 @@ func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*mcp
 	for _, add := range extra {
 		add(s)
 	}
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	serverSession, err := s.Connect(t.Context(), serverTransport, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { serverSession.Close() })
-	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), clientTransport, nil)
+	srv := httptest.NewServer(newHandler(s))
+	t.Cleanup(srv.Close)
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

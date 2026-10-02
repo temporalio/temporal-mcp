@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -82,8 +81,12 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) {
 // for the given configuration, making Temporal calls through clients and logging
 // each tool call to logger.
 func NewHandler(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) http.Handler {
-	s := newServer(name, version, cfg, clients, logger)
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{SessionTimeout: time.Hour})
+	return newHandler(newServer(name, version, cfg, clients, logger))
+}
+
+// newHandler serves s statelessly: go-sdk serves MCP 2026-07-28 only on a stateless handler.
+func newHandler(s *mcp.Server) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true})
 }
 
 func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) *mcp.Server {

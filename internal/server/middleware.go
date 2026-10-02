@@ -37,11 +37,13 @@ func logToolCalls(logger *slog.Logger) mcp.Middleware {
 			switch r, _ := res.(*mcp.CallToolResult); {
 			case err != nil:
 				level = slog.LevelWarn
+			case r.IsError && errors.As(r.GetError(), &te) && te.Code == "internal":
+				code, cause, level = te.Code, te.cause, slog.LevelError
+			case ctx.Err() != nil:
+				// The client cancelled or disconnected: it gets no result, and any Temporal error came from the cancellation.
+				code = "cancelled"
 			case r.IsError && errors.As(r.GetError(), &te):
 				code, cause = te.Code, te.cause
-				if code == "internal" {
-					level = slog.LevelError
-				}
 			}
 			attrs := []slog.Attr{
 				slog.String("tool", call.Params.Name),

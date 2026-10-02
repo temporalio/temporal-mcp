@@ -15,6 +15,37 @@ go build -o bin/ .
 
 This writes `bin/operator-mcp`.
 
+## Authorization
+
+A config with an `auth` section must also have an `authorization` section, which decides which tools each caller may use on which targets:
+
+```yaml
+authorization:
+  profiles:
+    oncall:
+      tools: [list_available_targets, check_connection, get_workflow]
+      targets: [payments-prod, payments-staging, orders-prod]
+    payments-dev:
+      tools: [list_available_targets, get_workflow]
+      targets: [payments-staging]
+  rules:
+    - {claim_name: groups, claim_value: temporal-oncall, profile: oncall}
+    - {claim_name: roles, claim_value: Temporal.PaymentsDev, profile: payments-dev}
+```
+
+- A profile lets a caller use each of its `tools` on each of its `targets`. Targets are named by `name`, not by alias.
+- A rule gives its `profile` to callers whose access token has the top-level claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry. Matching is exact and case-sensitive. A missing claim, or a claim of another type, does not match.
+- Copy rules from a decoded access token: `claim_name` is the claim's name exactly as it appears there, so names such as `cognito:groups` or `https://acme.example/roles` work as written, and `claim_value` is its value or one entry of its list.
+- Match only claims that users cannot set themselves, such as groups or roles your identity provider assigns. A rule on a claim users can edit, such as `email`, lets them choose their own profile.
+- A rule with `issuer` matches only tokens from that issuer, which must be the `issuer` URL of one of the `auth.issuers` entries.
+- A caller gets every profile whose rule it matches. Profiles combine per target: a profile that gives `get_workflow` on one target and another that gives `check_connection` on a second do not give `get_workflow` on the second.
+- `tools/list` shows a caller only the tools it may use on some target. `list_available_targets` lists every target the caller may use some tool on.
+- A caller that matches no rule may use no tool and sees no target. Its token is still accepted.
+
+Without an `auth` section, an `authorization` section is not allowed, and every caller may use every tool on every target.
+
+With Microsoft Entra ID, match [app roles](https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps) in the `roles` claim rather than groups: the `groups` claim holds group object IDs by default, not names, and is left out of tokens for users in more than 200 groups. Use the app role's Value as `claim_value`, not its Display name.
+
 ## Lint
 
 CI runs `go vet` and a `gofmt` check:

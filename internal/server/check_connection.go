@@ -25,7 +25,7 @@ import (
 const stageTimeout = 5 * time.Second
 
 type checkConnectionInput struct {
-	Target string `json:"target" jsonschema:"the name or an alias of a target from list_available_targets"`
+	Target string `json:"target" jsonschema:"the name or an alias of a target"`
 }
 
 type connectionCheck struct {
@@ -41,7 +41,7 @@ type stage struct {
 
 func checkConnection(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[checkConnectionInput, envelope[connectionCheck]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in checkConnectionInput) (*mcp.CallToolResult, envelope[connectionCheck], error) {
-		t, err := lookupTarget(cfg, in.Target)
+		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, envelope[connectionCheck]{}, err
 		}

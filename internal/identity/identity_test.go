@@ -150,7 +150,7 @@ var nop = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 
 func newHandler(a *config.Auth, next http.Handler) (http.Handler, *logBuffer) {
 	logs := &logBuffer{}
-	return RequireToken(a, slog.New(slog.NewTextHandler(logs, nil)), next), logs
+	return RequireToken(a, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})), next), logs
 }
 
 func request(ctx context.Context, h http.Handler, token string) *httptest.ResponseRecorder {
@@ -217,7 +217,8 @@ func TestRequireToken(t *testing.T) {
 		{"no exp", idp.sign(t, with(map[string]any{"exp": nil})), idp.URL, "token has no exp claim"},
 		{"no sub", idp.sign(t, with(map[string]any{"sub": nil})), idp.URL, "token has no sub claim"},
 		{"another issuer's audience", idp.sign(t, with(map[string]any{"aud": "second-audience"})), idp.URL, `expected audience "operator"`},
-		{"another issuer's iss", idp.sign(t, second.claims("second-audience")), second.URL, "no signing key verifies the token"},
+		{"another issuer's iss", idp.sign(t, second.claims("second-audience")), second.URL, ""},
+		{"alg the key does not allow", oidctest.SignIDToken(idp.key, idp.kid, "PS256", marshal(t, with(nil))), idp.URL, "no signing key matches the token"},
 		{"unknown issuer", idp.sign(t, with(map[string]any{"iss": "https://unknown.example/" + strings.Repeat("a", 100000)})), "", "unknown issuer"},
 		{"alg HS256", oidctest.SignIDToken([]byte("0123456789abcdef0123456789abcdef"), "k1", "HS256", marshal(t, with(nil))), "", "unsupported signature algorithm"},
 		{"long alg", unsigned(`{"alg":"`+strings.Repeat("A", 100000)+`","kid":"k1"}`, with(nil)), "", "unsupported signature algorithm"},
@@ -231,7 +232,7 @@ func TestRequireToken(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || info != nil || w.Body.String() != "invalid token\n" {
 				t.Errorf("status = %d, body %q; want 401 and %q", w.Code, w.Body, "invalid token\n")
 			}
-			logged := `level=WARN msg="rejected access token" reason=`
+			logged := `level=DEBUG msg="rejected access token" reason=`
 			if tt.issuer != "" {
 				logged = `level=WARN msg="rejected access token" issuer=` + tt.issuer + " reason="
 			}
@@ -258,8 +259,8 @@ func TestRequireToken(t *testing.T) {
 		if err := json.Unmarshal([]byte(marshal(t, claims)), &extra); err != nil {
 			t.Fatal(err)
 		}
-		if exp := time.Unix(claims["exp"].(int64), 0); info.UserID != iss.idp.URL+"#alice" || !info.Expiration.Equal(exp) || !reflect.DeepEqual(info.Extra, extra) {
-			t.Errorf("token info = %+v, want UserID %q, Expiration %v and Extra %#v", info, iss.idp.URL+"#alice", exp, extra)
+		if exp, c := time.Unix(claims["exp"].(int64), 0), CallerFromTokenInfo(info); c.Issuer != iss.idp.URL || c.Subject != "alice" || !info.Expiration.Equal(exp) || !reflect.DeepEqual(info.Extra, extra) {
+			t.Errorf("token info = %+v, want caller %s alice, Expiration %v and Extra %#v", info, iss.idp.URL, exp, extra)
 		}
 	}
 }
@@ -364,35 +365,43 @@ func TestRequireTokenSharesDiscovery(t *testing.T) {
 	}
 }
 
-func TestRequireTokenRefreshesKeysAtMostOncePerInterval(t *testing.T) {
+func TestRequireTokenKeyRefresh(t *testing.T) {
 	idp := newIssuer(t)
-	h, _ := newHandler(authConfig(idp.URL), nop)
-	ctx := context.Background()
+	h, logs := newHandler(authConfig(idp.URL), nop)
+	k1 := idp.sign(t, idp.claims("operator"))
+	expiredClaims := idp.claims("operator")
+	expiredClaims["exp"] = time.Now().Add(-time.Hour).Unix()
+	expiredK1 := idp.sign(t, expiredClaims)
+	claims, other := marshal(t, idp.claims("operator")), newKey(t)
+	forged, unknownKey := oidctest.SignIDToken(other, "k1", "RS256", claims), oidctest.SignIDToken(other, "unknown", "RS256", claims)
+	check := func(name, token string, want, fetches int) {
+		t.Helper()
+		if w, n := request(context.Background(), h, token), idp.count(keysPath); w.Code != want || n != fetches {
+			t.Errorf("%s: status = %d, JWKS requests = %d; want %d and %d", name, w.Code, n, want, fetches)
+		}
+	}
 
-	if w := request(ctx, h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK {
-		t.Fatalf("valid: status = %d, want 200; body %q", w.Code, w.Body)
-	}
-	other := newKey(t)
-	for range 20 {
-		claims := marshal(t, idp.claims("operator"))
-		for _, token := range []string{oidctest.SignIDToken(other, "k1", "RS256", claims), oidctest.SignIDToken(other, "unknown", "RS256", claims)} {
-			if w := request(ctx, h, token); w.Code != http.StatusUnauthorized {
-				t.Errorf("forged: status = %d, want 401; body %q", w.Code, w.Body)
-			}
-		}
-		if w := request(ctx, h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK {
-			t.Errorf("valid: status = %d, want 200; body %q", w.Code, w.Body)
-		}
-	}
-	if n := idp.count(keysPath); n != 1 {
-		t.Errorf("JWKS requests = %d, want 1", n)
+	check("first token", k1, http.StatusOK, 1)
+	setInterval(t, &keyRefreshInterval, 0)
+	check("cached key", k1, http.StatusOK, 1)
+	check("bad signature", forged, http.StatusUnauthorized, 1)
+	setInterval(t, &keyRefreshInterval, time.Hour)
+	check("unknown key within the interval", unknownKey, http.StatusInternalServerError, 1)
+	setInterval(t, &keyMaxAge, 0)
+	check("keys past max age within the interval", k1, http.StatusOK, 1)
+	if want := `level=WARN msg="cannot verify access token" issuer=` + idp.URL; !strings.Contains(logs.String(), want) || strings.Contains(logs.String(), "level=ERROR") {
+		t.Errorf("log %q does not contain %q, or contains an error", logs, want)
 	}
 
 	idp.rotate(t, "k2")
+	k2 := idp.sign(t, idp.claims("operator"))
+	check("rotated key within the interval", k2, http.StatusInternalServerError, 1)
 	setInterval(t, &keyRefreshInterval, 0)
-	if w := request(ctx, h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK {
-		t.Errorf("after rotation: status = %d, want 200; body %q", w.Code, w.Body)
-	}
+	check("removed key", k1, http.StatusUnauthorized, 2)
+	check("rotated key", k2, http.StatusOK, 3)
+	check("unknown key", unknownKey, http.StatusUnauthorized, 4)
+	setInterval(t, &keyRefreshInterval, time.Hour)
+	check("expired token with a removed key within the interval", expiredK1, http.StatusUnauthorized, 4)
 }
 
 func TestRequireTokenKeyFetchFailure(t *testing.T) {
@@ -406,21 +415,25 @@ func TestRequireTokenKeyFetchFailure(t *testing.T) {
 		http.Error(w, "jwks unavailable", http.StatusInternalServerError)
 	})
 	idp.rotate(t, "k2")
-	for _, interval := range []time.Duration{0, time.Hour} {
-		setInterval(t, &keyRefreshInterval, interval)
+	for _, tt := range []struct {
+		interval time.Duration
+		level    string
+	}{{0, "ERROR"}, {time.Hour, "WARN"}} {
+		setInterval(t, &keyRefreshInterval, tt.interval)
+		logged := len(logs.String())
 		w := request(context.Background(), h, idp.sign(t, idp.claims("operator")))
 		if w.Code != http.StatusInternalServerError || w.Body.String() != "cannot verify access tokens\n" {
-			t.Errorf("refresh interval %v: status = %d, body %q; want 500 and %q", interval, w.Code, w.Body, "cannot verify access tokens\n")
+			t.Errorf("refresh interval %v: status = %d, body %q; want 500 and %q", tt.interval, w.Code, w.Body, "cannot verify access tokens\n")
+		}
+		if want := "level=" + tt.level + ` msg="cannot verify access token" issuer=` + idp.URL; !strings.Contains(logs.String()[logged:], want) {
+			t.Errorf("refresh interval %v: log %q does not contain %q", tt.interval, logs.String()[logged:], want)
 		}
 	}
 	if w := request(context.Background(), h, cached); w.Code != http.StatusOK {
 		t.Errorf("cached key after the failure: status = %d, want 200; body %q", w.Code, w.Body)
 	}
-	if n := idp.count(keysPath); n != 2 {
-		t.Errorf("JWKS requests = %d, want 2", n)
-	}
-	if want := `level=ERROR msg="cannot verify access token" issuer=` + idp.URL; !strings.Contains(logs.String(), want) {
-		t.Errorf("log %q does not contain %q", logs, want)
+	if n, failures := idp.count(keysPath), strings.Count(logs.String(), `level=WARN msg="cannot fetch signing keys" issuer=`+idp.URL); n != 2 || failures != 1 {
+		t.Errorf("JWKS requests = %d, logged fetch failures = %d; want 2 and 1", n, failures)
 	}
 }
 
@@ -430,18 +443,23 @@ func TestRequireTokenSkipsUnusableKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encryption, err := json.Marshal(jose.JSONWebKey{Key: &newKey(t).PublicKey, KeyID: "enc", Algorithm: "RSA-OAEP", Use: "enc"})
-	if err != nil {
-		t.Fatal(err)
+	var unusable []string
+	for _, k := range []jose.JSONWebKey{{Algorithm: "RSA-OAEP"}, {Use: "enc"}} {
+		k.Key, k.KeyID = &idp.key.PublicKey, "k1"
+		b, err := json.Marshal(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unusable = append(unusable, string(b))
 	}
-	secp256k1 := `{"kty":"EC","crv":"secp256k1","kid":"secp256k1","x":"` + strings.Repeat("A", 43) + `","y":"` + strings.Repeat("A", 43) + `"}`
+	unusable = append(unusable, `{"kty":"oct","kid":"k1","k":"c2VjcmV0"}`, `{"kty":"EC","crv":"secp256k1","kid":"k1","x":"`+strings.Repeat("A", 43)+`","y":"`+strings.Repeat("A", 43)+`"}`)
 	for _, tt := range []struct {
 		name string
 		keys []string
 		want int
 	}{
-		{"usable key among unusable ones", []string{secp256k1, string(encryption), string(k1)}, http.StatusOK},
-		{"no usable key", []string{secp256k1, string(encryption)}, http.StatusInternalServerError},
+		{"usable key among unusable ones", append(unusable, string(k1)), http.StatusOK},
+		{"no usable key", unusable, http.StatusInternalServerError},
 	} {
 		set := `{"keys":[` + strings.Join(tt.keys, ",") + `]}`
 		idp.override(keysPath, func(w http.ResponseWriter, _ *http.Request) {

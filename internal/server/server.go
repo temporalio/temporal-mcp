@@ -90,8 +90,12 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) {
 // logger gets the per-call log and the reason for each rejected token or
 // verification failure.
 func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) http.Handler {
+	return newMux(newServer(name, version, cfg, clients, logger), cfg, logger)
+}
+
+func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	handler := newHandler(newServer(name, version, cfg, clients, logger), cfg)
+	handler := newHandler(s, cfg)
 	if cfg.Auth != nil {
 		metadataPath, metadata := identity.MetadataPath(cfg.Auth.Resource), identity.MetadataHandler(cfg.Auth)
 		// Matched exactly rather than as a ServeMux pattern, which would read wildcards or a method in the configured path.

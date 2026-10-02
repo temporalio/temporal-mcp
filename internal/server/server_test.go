@@ -20,7 +20,6 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -216,32 +215,6 @@ func TestToolCalls(t *testing.T) {
 	}
 }
 
-func TestToolContextCarriesCaller(t *testing.T) {
-	claims := map[string]any{"iss": "https://idp.example", "sub": "alice", "groups": []any{"ops"}}
-	callers := make(chan *identity.Caller, 1)
-	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output(), func(s *mcp.Server) {
-		s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-				if call, ok := req.(*mcp.CallToolRequest); ok {
-					call.Extra = &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "https://idp.example#alice", Extra: claims}}
-				}
-				return next(ctx, method, req)
-			}
-		})
-		addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
-			callers <- identity.CallerFrom(ctx)
-			return nil, struct{}{}, nil
-		})
-	})
-	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "whoami"}); err != nil {
-		t.Fatal(err)
-	}
-	want := &identity.Caller{Issuer: "https://idp.example", Subject: "alice", Claims: claims}
-	if got := <-callers; !reflect.DeepEqual(got, want) {
-		t.Errorf("caller = %+v, want %+v", got, want)
-	}
-}
-
 func TestNewMux(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -252,11 +225,18 @@ func TestNewMux(t *testing.T) {
 	idp.SetIssuer("http://" + issuer.Listener.Addr().String())
 	issuer.Start()
 	t.Cleanup(issuer.Close)
-	token := oidctest.SignIDToken(key, "k1", "RS256", fmt.Sprintf(`{"iss":%q,"sub":"alice","aud":"operator","exp":%d}`, issuer.URL, time.Now().Add(time.Hour).Unix()))
+	claims := fmt.Sprintf(`{"iss":%q,"sub":"alice","aud":"operator","exp":%d}`, issuer.URL, time.Now().Add(time.Hour).Unix())
+	token := oidctest.SignIDToken(key, "k1", "RS256", claims)
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	authCfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuer.URL, Audience: "operator"}}}}
-	withAuth := httptest.NewServer(NewMux("temporal-operator", "0", authCfg, nil, logger))
+	s := newServer("temporal-operator", "0", authCfg, nil, logger)
+	callers := make(chan *identity.Caller, 1)
+	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
+		callers <- identity.CallerFrom(ctx)
+		return nil, struct{}{}, nil
+	})
+	withAuth := httptest.NewServer(newMux(s, authCfg, logger))
 	t.Cleanup(withAuth.Close)
 	withoutAuth := httptest.NewServer(NewMux("temporal-operator", "0", &config.Config{}, nil, logger))
 	t.Cleanup(withoutAuth.Close)
@@ -295,4 +275,28 @@ func TestNewMux(t *testing.T) {
 			}
 		})
 	}
+
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: withAuth.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer(token)}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "whoami"}); err != nil {
+		t.Fatal(err)
+	}
+	want := &identity.Caller{Issuer: issuer.URL, Subject: "alice"}
+	if err := json.Unmarshal([]byte(claims), &want.Claims); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-callers; !reflect.DeepEqual(got, want) {
+		t.Errorf("caller = %+v, want %+v", got, want)
+	}
+}
+
+type bearer string
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+string(b))
+	return http.DefaultTransport.RoundTrip(r)
 }

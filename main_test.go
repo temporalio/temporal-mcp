@@ -3,6 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -24,8 +30,9 @@ func buildBinary(t *testing.T, buildArgs ...string) string {
 	return bin
 }
 
-func TestServerHandshake(t *testing.T) {
-	cmd := exec.Command(buildBinary(t, "-ldflags", "-X main.version=9.9.9-test"), "--config", filepath.Join("testdata", "config.yaml"))
+func startServer(t *testing.T, bin, configPath string) string {
+	t.Helper()
+	cmd := exec.Command(bin, "--config", configPath)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +72,11 @@ func TestServerHandshake(t *testing.T) {
 		for range lines {
 		}
 	}()
+	return url
+}
+
+func TestServerHandshake(t *testing.T) {
+	url := startServer(t, buildBinary(t, "-ldflags", "-X main.version=9.9.9-test"), filepath.Join("testdata", "config.yaml"))
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -128,5 +140,41 @@ func TestExitsWithoutServing(t *testing.T) {
 				t.Errorf("output %q does not contain %q", out, tt.want)
 			}
 		})
+	}
+}
+
+func TestAuthIssuerDownAtStartup(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := "http://" + ln.Addr().String()
+	ln.Close()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := oidctest.SignIDToken(key, "k1", "RS256", fmt.Sprintf(`{"iss":%q,"sub":"alice","aud":"operator","exp":%d}`, issuer, time.Now().Add(time.Hour).Unix()))
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("listen: 127.0.0.1:0\n"+
+		"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"+
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: %q, audience: operator}]\n", issuer)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, startServer(t, buildBinary(t), configPath), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e-test","version":"0"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
 }

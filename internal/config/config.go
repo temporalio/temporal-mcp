@@ -8,17 +8,40 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
 
 // Config is the server configuration.
 type Config struct {
-	// Listen is the host:port the HTTP server binds to. The host must be a loopback IP.
+	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
 	Listen  string   `yaml:"listen"`
 	Targets []Target `yaml:"targets"`
+	// Auth, when set, requires every MCP request to carry a valid access token.
+	Auth *Auth `yaml:"auth"`
+}
+
+// Auth configures the server as an OAuth resource server that accepts JWT access tokens from the configured issuers.
+type Auth struct {
+	// Resource is the URL at which clients reach this server's MCP endpoint.
+	Resource string   `yaml:"resource"`
+	Issuers  []Issuer `yaml:"issuers"`
+	// AuthorizationServers are the authorization servers advertised to clients; the issuers if empty.
+	AuthorizationServers []string `yaml:"authorization_servers"`
+	// ScopesSupported are the scopes advertised to clients. They do not grant or deny access.
+	ScopesSupported []string `yaml:"scopes_supported"`
+}
+
+// Issuer is an identity provider whose access tokens the server accepts.
+type Issuer struct {
+	// Issuer is the exact iss claim of the provider's tokens.
+	Issuer string `yaml:"issuer"`
+	// Audience is the value the aud claim of a token for this server must contain.
+	Audience string `yaml:"audience"`
 }
 
 // Target is a named Temporal namespace at an address that the server can read from.
@@ -64,16 +87,30 @@ func parse(data []byte) (*Config, error) {
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
+	// An auth key with no value decodes to nil; validate it as an empty section rather than run without auth.
+	if cfg.Auth == nil && hasAuthKey(data) {
+		cfg.Auth = &Auth{}
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
+func hasAuthKey(data []byte) bool {
+	var doc struct {
+		Auth yaml.Node `yaml:"auth"`
+	}
+	return yaml.Unmarshal(data, &doc) == nil && doc.Auth.Kind != 0
+}
+
 func (c *Config) validate() error {
 	var errs []error
-	if err := validateListen(c.Listen); err != nil {
+	if err := validateListen(c.Listen, c.Auth != nil); err != nil {
 		errs = append(errs, err)
+	}
+	if c.Auth != nil {
+		errs = append(errs, c.Auth.validate()...)
 	}
 	if len(c.Targets) == 0 {
 		errs = append(errs, errors.New("targets: at least one target is required"))
@@ -148,7 +185,7 @@ func targetRef(from, to int) string {
 	return fmt.Sprintf("targets[%d]", to)
 }
 
-func validateListen(listen string) error {
+func validateListen(listen string, authenticated bool) error {
 	if listen == "" {
 		return errors.New("listen is required")
 	}
@@ -156,9 +193,66 @@ func validateListen(listen string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	if authenticated {
+		return nil
+	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil || !addr.IsLoopback() {
-		return fmt.Errorf("listen: host %q must be a loopback IP address such as 127.0.0.1 or ::1, because the server has no authentication", host)
+		return fmt.Errorf("listen: host %q must be a loopback IP address such as 127.0.0.1 or ::1, because the config has no auth section", host)
 	}
 	return nil
+}
+
+func (a *Auth) validate() []error {
+	var errs []error
+	if err := validateURL("auth: resource", a.Resource); err != nil {
+		errs = append(errs, err)
+	}
+	if len(a.Issuers) == 0 {
+		errs = append(errs, errors.New("auth: issuers: at least one issuer is required"))
+	}
+	seen := map[string]int{}
+	for i, iss := range a.Issuers {
+		label := fmt.Sprintf("auth: issuers[%d]", i)
+		if err := validateURL(label+": issuer", iss.Issuer); err != nil {
+			errs = append(errs, err)
+		} else if j, ok := seen[iss.Issuer]; ok {
+			errs = append(errs, fmt.Errorf("%s: issuer %q conflicts with the issuer of issuers[%d]", label, iss.Issuer, j))
+		} else {
+			seen[iss.Issuer] = i
+		}
+		if strings.TrimSpace(iss.Audience) == "" {
+			errs = append(errs, fmt.Errorf("%s: audience is required", label))
+		}
+	}
+	for i, s := range a.AuthorizationServers {
+		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for i, s := range a.ScopesSupported {
+		if s == "" || strings.ContainsFunc(s, unicode.IsSpace) {
+			errs = append(errs, fmt.Errorf("auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain no spaces", i, s))
+		}
+	}
+	return errs
+}
+
+func validateURL(label, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !loopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+		return fmt.Errorf("%s: %q must be an https URL (http only for a loopback host) with a host and no user info, query or fragment", label, value)
+	}
+	return nil
+}
+
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }

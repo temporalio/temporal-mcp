@@ -92,7 +92,8 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) []st
 // only what cfg's authorization gives it, and the protected resource metadata
 // is served at the path the token challenge points to.
 // logger gets the per-call log and the reason for each rejected token or
-// verification failure.
+// verification failure. When auth has more than one issuer, it also gets a
+// warning for each rule without an issuer.
 // It fails if cfg has an auth section but no authorization, or if an
 // authorization profile names a tool the server does not have.
 func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) (http.Handler, error) {
@@ -102,6 +103,13 @@ func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients,
 	s, tools := newServer(name, version, cfg, clients, logger)
 	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
 		return nil, err
+	}
+	if cfg.Auth != nil && len(cfg.Auth.Issuers) > 1 {
+		for i, r := range cfg.Authorization.Rules {
+			if r.Issuer == "" {
+				logger.Warn("rule has no issuer, so it matches tokens from every issuer in auth: issuers; set issuer to limit it", "rule", fmt.Sprintf("authorization: rules[%d]", i), "profile", r.Profile)
+			}
+		}
 	}
 	return newMux(s, cfg, logger), nil
 }

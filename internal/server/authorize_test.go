@@ -82,6 +82,8 @@ authorization:
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Dev, profile: dev}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Orders, profile: orders}
     - {claim_name: email, claim_value: alice@acme.example, issuer: %[2]q, profile: oncall}
+    - {claim_name: scope, claim_value: temporal.orders, profile: orders}
+    - {claim_name: scp, claim_value: temporal.orders, profile: orders}
 `, closed, idpA, idpB)
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -198,12 +200,27 @@ authorization:
 		},
 		{
 			name:  "value differing only in case",
-			token: signA(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev"}),
+			token: signA(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev", "scope": "openid Temporal.Orders"}),
 			tools: []string{},
 		},
 		{
 			name:  "substring or superstring of a value",
-			token: signA(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin"}),
+			token: signA(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin", "scope": "openid temporal.orders.admin temporal"}),
+			tools: []string{},
+		},
+		{
+			name:  "scope string holding several scopes",
+			token: signA(map[string]any{"scope": "openid temporal.orders email"}),
+			tools: []string{"get_workflow"},
+		},
+		{
+			name:  "scp string holding several scopes",
+			token: signA(map[string]any{"scp": "openid temporal.orders email"}),
+			tools: []string{"get_workflow"},
+		},
+		{
+			name:  "space-separated string in a claim other than scope",
+			token: signA(map[string]any{"https://acme.example/roles": "Temporal.Admin Temporal.Dev"}),
 			tools: []string{},
 		},
 	}
@@ -286,6 +303,49 @@ func TestNewMuxRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
 	if _, err := NewMux("temporal-operator", "0", cfg, nil, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("NewMux with auth and no authorization succeeded, want an error")
+	}
+}
+
+func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
+	one := []config.Issuer{{Issuer: "https://a.example.com", Audience: "operator"}}
+	two := []config.Issuer{one[0], {Issuer: "https://b.example.com", Audience: "operator"}}
+	const warning = `level=WARN msg="rule has no issuer, so it matches tokens from every issuer in auth: issuers; set issuer to limit it" rule="authorization: rules[%d]" profile=p` + "\n"
+	noTime := &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}}
+	for _, tc := range []struct {
+		name    string
+		issuers []config.Issuer
+		issuer  string
+		want    string
+	}{
+		{"two issuers, rules without issuer", two, "", fmt.Sprintf(warning, 1) + fmt.Sprintf(warning, 2)},
+		{"one issuer, rules without issuer", one, "", ""},
+		{"two issuers, rules with issuer", two, "https://b.example.com", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: tc.issuers},
+				Authorization: &config.Authorization{
+					Profiles: map[string]config.Profile{"p": {Tools: []string{"get_workflow"}, Targets: []string{"t"}}},
+					Rules: []config.Rule{
+						{ClaimName: "sub", ClaimValue: "alice", Issuer: "https://a.example.com", Profile: "p"},
+						{ClaimName: "sub", ClaimValue: "bob", Issuer: tc.issuer, Profile: "p"},
+						{ClaimName: "sub", ClaimValue: "carol", Issuer: tc.issuer, Profile: "p"},
+					},
+				},
+			}
+			var logs strings.Builder
+			if _, err := NewMux("temporal-operator", "0", cfg, nil, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
+				t.Fatal(err)
+			}
+			if got := logs.String(); got != tc.want {
+				t.Errorf("startup log = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

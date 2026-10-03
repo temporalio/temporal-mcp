@@ -44,7 +44,9 @@ type Profile struct {
 
 // Rule gives Profile to callers whose access token has the top-level claim
 // named ClaimName as a string equal to ClaimValue, or as an array with a string
-// element equal to it. With Issuer set, the token must also come from that issuer.
+// element equal to it. A string claim named scope or scp counts as an array of
+// its space-separated entries. With Issuer set, the token must also come from
+// that issuer.
 type Rule struct {
 	ClaimName  string `yaml:"claim_name"`
 	ClaimValue string `yaml:"claim_value"`
@@ -245,6 +247,8 @@ func (a *Authorization) validate(c *Config) []error {
 		}
 		if r.ClaimValue == "" {
 			errs = append(errs, fmt.Errorf("%s: claim_value is required", label))
+		} else if (r.ClaimName == "scope" || r.ClaimName == "scp") && strings.Contains(r.ClaimValue, " ") {
+			errs = append(errs, fmt.Errorf("%s: claim_value %q contains a space, which no %s entry does; write one scope per rule", label, r.ClaimValue, r.ClaimName))
 		}
 		if r.Issuer != "" && !slices.ContainsFunc(c.Auth.Issuers, func(iss Issuer) bool { return iss.Issuer == r.Issuer }) {
 			errs = append(errs, fmt.Errorf("%s: issuer %q is not one of auth: issuers", label, r.Issuer))

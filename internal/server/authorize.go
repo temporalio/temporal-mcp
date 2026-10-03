@@ -94,6 +94,9 @@ func matches(r config.Rule, caller *identity.Caller) bool {
 	}
 	switch v := caller.Claims[r.ClaimName].(type) {
 	case string:
+		if r.ClaimName == "scope" || r.ClaimName == "scp" {
+			return slices.Contains(strings.Split(v, " "), r.ClaimValue)
+		}
 		return v == r.ClaimValue
 	case []any:
 		return slices.Contains(v, any(r.ClaimValue))

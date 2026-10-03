@@ -351,6 +351,7 @@ func TestParseInvalid(t *testing.T) {
     - {claim_name: groups, claim_value: a}
     - {claim_name: " groups ", claim_value: a, profile: empty}
     - {claim_name: groups, claim_value: true, profile: empty}
+    - {claim_name: scp, claim_value: "openid temporal.orders", profile: empty}
 `,
 			want: []string{
 				`authorization: profiles: "bad-targets": targets[0]: unknown target "production"; profiles name targets by name, not alias`,
@@ -364,6 +365,7 @@ func TestParseInvalid(t *testing.T) {
 				"authorization: rules[4]: profile is required",
 				`authorization: rules[5]: claim_name " groups " has leading or trailing whitespace, which no claim name matches`,
 				`authorization: rules[6]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
+				`authorization: rules[7]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
 			},
 		},
 		{

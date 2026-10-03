@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -301,4 +302,55 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+string(b))
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestPanicGetsInternalError(t *testing.T) {
+	var logs bytes.Buffer
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs, func(s *mcp.Server) {
+		s.AddPrompt(&mcp.Prompt{Name: "boom"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			panic("boom-value")
+		})
+	})
+	_, err := session.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: "boom"})
+	var wire *jsonrpc.Error
+	if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
+		t.Errorf("prompts/get that panics: err = %v, want an internal error", err)
+	}
+	if _, err := session.ListTools(t.Context(), nil); err != nil {
+		t.Errorf("tools/list after a panic: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &got); err != nil {
+		t.Fatalf("log %q: %v", logs.String(), err)
+	}
+	if e, _ := got["error"].(string); !strings.HasPrefix(e, "panic: boom-value\ngoroutine ") {
+		t.Errorf("log error = %q, want the panic and its stack", e)
+	}
+	delete(got, "time")
+	delete(got, "error")
+	if want := map[string]any{"level": "ERROR", "msg": "request panicked", "method": "prompts/get"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("log = %#v, want %#v", got, want)
+	}
+}
+
+type panicOnToolCallLog struct{ bytes.Buffer }
+
+func (l *panicOnToolCallLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"msg":"tool call"`)) {
+		panic("boom-value")
+	}
+	return l.Buffer.Write(p)
+}
+
+func TestToolCallLogPanicGetsInternalError(t *testing.T) {
+	var logs panicOnToolCallLog
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs)
+	_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets", Arguments: map[string]any{}})
+	var wire *jsonrpc.Error
+	if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
+		t.Errorf("tools/call whose log line panics: err = %v, want an internal error", err)
+	}
+	if want := `"msg":"request panicked","method":"tools/call"`; !strings.Contains(logs.String(), want) {
+		t.Errorf("log %q does not contain %q", logs.String(), want)
+	}
 }

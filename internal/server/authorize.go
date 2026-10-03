@@ -35,12 +35,15 @@ func authorize(cfg *config.Config) mcp.Middleware {
 			switch r := req.(type) {
 			case *mcp.ListToolsRequest:
 				res, err := next(ctx, method, req)
-				list, ok := res.(*mcp.ListToolsResult)
-				if cfg.Auth == nil || err != nil || !ok {
+				if cfg.Auth == nil || err != nil {
 					return res, err
 				}
+				list, ok := res.(*mcp.ListToolsResult)
+				if !ok || list == nil {
+					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
+				}
 				g := grants(cfg.Authorization, req)
-				list.Tools = slices.DeleteFunc(list.Tools, func(t *mcp.Tool) bool { return len(g[t.Name]) == 0 })
+				list.Tools = slices.DeleteFunc(list.Tools, func(t *mcp.Tool) bool { return t == nil || len(g[t.Name]) == 0 })
 				list.CacheScope = "private"
 				return list, err
 			case *mcp.CallToolRequest:

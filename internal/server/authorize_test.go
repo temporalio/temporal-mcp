@@ -396,3 +396,20 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		t.Errorf("calling a target the tool was not granted: err = %v, want PermissionDenied", err)
 	}
 }
+
+func TestToolsListFailsClosedOnUnexpectedResult(t *testing.T) {
+	cfg := &config.Config{
+		Auth:          &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}},
+		Authorization: &config.Authorization{},
+	}
+	for _, result := range []mcp.Result{&mcp.ListPromptsResult{}, (*mcp.ListToolsResult)(nil)} {
+		next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
+			return result, nil
+		}
+		res, err := authorize(cfg)(next)(t.Context(), "tools/list", &mcp.ListToolsRequest{Params: &mcp.ListToolsParams{}})
+		var wire *jsonrpc.Error
+		if res != nil || !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
+			t.Errorf("tools/list with next returning %#v = %#v, %v; want no result and an internal error", result, res, err)
+		}
+	}
+}

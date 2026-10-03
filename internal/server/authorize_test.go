@@ -256,6 +256,15 @@ authorization:
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging", "extra": true})
 	})
+
+	t.Run("invalid cursor", func(t *testing.T) {
+		session := connectAs(t, tests[5].token)
+		_, err := session.ListTools(t.Context(), &mcp.ListToolsParams{Cursor: "x"})
+		var wire *jsonrpc.Error
+		if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInvalidParams {
+			t.Errorf("tools/list with an invalid cursor: err = %v, want invalid params", err)
+		}
+	})
 }
 
 func TestNoAuthAllowsEveryTool(t *testing.T) {

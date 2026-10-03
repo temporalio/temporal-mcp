@@ -36,7 +36,7 @@ func authorize(cfg *config.Config) mcp.Middleware {
 			case *mcp.ListToolsRequest:
 				res, err := next(ctx, method, req)
 				list, ok := res.(*mcp.ListToolsResult)
-				if cfg.Auth == nil || !ok {
+				if cfg.Auth == nil || err != nil || !ok {
 					return res, err
 				}
 				g := grants(cfg.Authorization, req)

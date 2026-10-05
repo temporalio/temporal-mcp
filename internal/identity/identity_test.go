@@ -232,6 +232,9 @@ func TestRequireToken(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || info != nil || w.Body.String() != "invalid token\n" {
 				t.Errorf("status = %d, body %q; want 401 and %q", w.Code, w.Body, "invalid token\n")
 			}
+			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`; got != want {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+			}
 			logged := `level=DEBUG msg="rejected access token" reason=`
 			if tt.issuer != "" {
 				logged = `level=WARN msg="rejected access token" issuer=` + tt.issuer + " reason="
@@ -476,9 +479,13 @@ func TestRequireTokenWithScopes(t *testing.T) {
 	idp := newIssuer(t)
 	a := authConfig(idp.URL)
 	a.ScopesSupported = []string{"openid", "temporal.read"}
-	w, _, _ := serve(a, "")
-	if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`; w.Code != http.StatusUnauthorized || got != want {
-		t.Errorf("status = %d, WWW-Authenticate = %q; want 401 and %q", w.Code, got, want)
+	for token, want := range map[string]string{
+		"":             `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`,
+		"opaque-token": `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read", error="invalid_token"`,
+	} {
+		if w, _, _ := serve(a, token); w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != want {
+			t.Errorf("token %q: status = %d, WWW-Authenticate = %q; want 401 and %q", token, w.Code, w.Header().Get("WWW-Authenticate"), want)
+		}
 	}
 	if w, info, _ := serve(a, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK || info == nil {
 		t.Errorf("valid token: status = %d, token info %+v; want 200 and the token's info", w.Code, info)

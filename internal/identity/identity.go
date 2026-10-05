@@ -95,8 +95,9 @@ func MetadataHandler(a *config.Auth) http.Handler {
 // RequireToken returns a handler that serves a request with next only if it
 // carries a valid access token from one of a's issuers. A missing or invalid
 // token gets a 401 with a WWW-Authenticate challenge that points to the
-// protected resource metadata and lists a's scopes. A token that cannot be
-// checked yet gets a 500 with no challenge: when the issuer's discovery or
+// protected resource metadata and lists a's scopes, and for an invalid token
+// also has error="invalid_token". A token that cannot be checked yet gets a
+// 500 with no challenge: when the issuer's discovery or
 // signing keys are unavailable, or when the token's key is unknown and the
 // request skipped fetching the keys because they were last fetched less than
 // a minute before it, since the key may be newer than that fetch. When the
@@ -106,31 +107,36 @@ func MetadataHandler(a *config.Auth) http.Handler {
 // verify access tokens"); the reason for a rejected token or a 500 goes to
 // logger.
 func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.Handler {
-	require := auth.RequireBearerToken(newVerifier(a.Issuers, logger), &auth.RequireBearerTokenOptions{
+	verify := newVerifier(a.Issuers, logger)
+	opts := &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: metadataURL(a.Resource),
 		ClockSkew:           jwt.DefaultLeeway,
-	})
-	if len(a.ScopesSupported) == 0 {
-		return require(next)
 	}
-	scope := strings.Join(a.ScopesSupported, " ")
-	inner := require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w.(scopeChallenge).ResponseWriter, r)
-	}))
+	var scope string
+	if len(a.ScopesSupported) > 0 {
+		scope = fmt.Sprintf(", scope=%q", strings.Join(a.ScopesSupported, " "))
+	}
+	unwrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w.(*challenge).ResponseWriter, r)
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inner.ServeHTTP(scopeChallenge{w, scope}, r)
+		c := &challenge{ResponseWriter: w, params: scope}
+		auth.RequireBearerToken(func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
+			c.params += `, error="invalid_token"`
+			return verify(ctx, token, r)
+		}, opts)(unwrapped).ServeHTTP(c, r)
 	})
 }
 
-type scopeChallenge struct {
+type challenge struct {
 	http.ResponseWriter
-	scope string
+	params string
 }
 
-func (w scopeChallenge) WriteHeader(code int) {
+func (w *challenge) WriteHeader(code int) {
 	if code == http.StatusUnauthorized {
 		h := w.Header()
-		h.Set("WWW-Authenticate", fmt.Sprintf("%s, scope=%q", h.Get("WWW-Authenticate"), w.scope))
+		h.Set("WWW-Authenticate", h.Get("WWW-Authenticate")+w.params)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }

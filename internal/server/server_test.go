@@ -237,6 +237,10 @@ func TestNewMux(t *testing.T) {
 	})
 	withAuth := httptest.NewServer(newMux(s, authCfg, logger))
 	t.Cleanup(withAuth.Close)
+	noSlashCfg := *authCfg
+	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
+	noSlash := httptest.NewServer(newMux(s, &noSlashCfg, logger))
+	t.Cleanup(noSlash.Close)
 	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, logger)
 	if err != nil {
 		t.Fatal(err)
@@ -253,6 +257,8 @@ func TestNewMux(t *testing.T) {
 	}{
 		{"no token", withAuth, http.MethodPost, "/mcp", "", "", http.StatusUnauthorized, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp/"`},
 		{"metadata at the challenged path", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp/", "", "", http.StatusOK, ""},
+		{"metadata without the trailing slash", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp", "", "", http.StatusOK, ""},
+		{"no metadata with a slash the resource lacks", noSlash, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp/", "", "", http.StatusNotFound, ""},
 		{"token under a public host", withAuth, http.MethodPost, "/mcp", "mcp.example.com", token, http.StatusOK, ""},
 		{"no auth under a public host", withoutAuth, http.MethodPost, "/mcp", "mcp.example.com", "", http.StatusForbidden, ""},
 	}

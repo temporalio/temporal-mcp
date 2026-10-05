@@ -248,8 +248,8 @@ func TestNewMux(t *testing.T) {
 		want                      int
 		challenge                 string
 	}{
-		{"no token", withAuth, http.MethodPost, "/mcp", "", "", http.StatusUnauthorized, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp"`},
-		{"metadata at the challenged path", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp", "", "", http.StatusOK, ""},
+		{"no token", withAuth, http.MethodPost, "/mcp", "", "", http.StatusUnauthorized, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp/"`},
+		{"metadata at the challenged path", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp/", "", "", http.StatusOK, ""},
 		{"token under a public host", withAuth, http.MethodPost, "/mcp", "mcp.example.com", token, http.StatusOK, ""},
 		{"no auth under a public host", withoutAuth, http.MethodPost, "/mcp", "mcp.example.com", "", http.StatusForbidden, ""},
 	}

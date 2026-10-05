@@ -510,6 +510,18 @@ func TestRequireTokenClockSkew(t *testing.T) {
 	}
 }
 
+func TestMetadataPath(t *testing.T) {
+	for resource, want := range map[string]string{
+		"https://mcp.example.com":      "/.well-known/oauth-protected-resource",
+		"https://mcp.example.com/":     "/.well-known/oauth-protected-resource",
+		"https://mcp.example.com/mcp/": "/.well-known/oauth-protected-resource/mcp/",
+	} {
+		if got := MetadataPath(resource); got != want {
+			t.Errorf("MetadataPath(%q) = %q, want %q", resource, got, want)
+		}
+	}
+}
+
 func TestMetadataHandler(t *testing.T) {
 	issuers := []config.Issuer{{Issuer: "https://a.example", Audience: "x"}, {Issuer: "https://b.example/tenant", Audience: "y"}}
 	tests := []struct {

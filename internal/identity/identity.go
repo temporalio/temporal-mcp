@@ -139,7 +139,10 @@ func (w scopeChallenge) WriteHeader(code int) {
 // resource, which the WWW-Authenticate challenge points to.
 func MetadataPath(resource string) string {
 	u, _ := url.Parse(resource)
-	return "/.well-known/oauth-protected-resource" + strings.TrimSuffix(u.Path, "/")
+	if u.Path == "/" {
+		return "/.well-known/oauth-protected-resource"
+	}
+	return "/.well-known/oauth-protected-resource" + u.Path
 }
 
 func metadataURL(resource string) string {

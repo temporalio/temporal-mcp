@@ -232,6 +232,9 @@ func TestRequireToken(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || info != nil || w.Body.String() != "invalid token\n" {
 				t.Errorf("status = %d, body %q; want 401 and %q", w.Code, w.Body, "invalid token\n")
 			}
+			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`; got != want {
+				t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+			}
 			logged := `level=DEBUG msg="rejected access token" reason=`
 			if tt.issuer != "" {
 				logged = `level=WARN msg="rejected access token" issuer=` + tt.issuer + " reason="
@@ -472,13 +475,120 @@ func TestRequireTokenSkipsUnusableKeys(t *testing.T) {
 	}
 }
 
+type handlerTransport struct{ http.Handler }
+
+func (h handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Result(), nil
+}
+
+func TestRequireTokenLimitsIssuerResponses(t *testing.T) {
+	const remote = "https://idp.example"
+	padding := strings.Repeat(" ", 1<<20)
+	errorBody := strings.Repeat("x", 600)
+	for _, tt := range []struct {
+		name      string
+		discovery func(idp *fakeIssuer) string
+		keys      func(idp *fakeIssuer) string
+		redirect  bool
+	}{
+		{name: "discovery over 1 MiB", discovery: func(idp *fakeIssuer) string { return discovery(remote, remote+keysPath) + padding }},
+		{name: "key set over 1 MiB", keys: func(idp *fakeIssuer) string { return keySet(t, idp) + padding }},
+		{name: "jwks_uri over http on a loopback host from a remote issuer", discovery: func(idp *fakeIssuer) string { return discovery(remote, "http://localhost/moved") }},
+		{name: "key set from a remote issuer redirected over http to a loopback host", redirect: true},
+		{name: "discovery names another issuer", discovery: func(idp *fakeIssuer) string { return discovery("https://other.example", remote+keysPath) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			idp := newIssuer(t)
+			idp.oidc.SetIssuer(remote)
+			old := httpClient.Transport
+			httpClient.Transport = handlerTransport{idp.Config.Handler}
+			t.Cleanup(func() { httpClient.Transport = old })
+			for path, body := range map[string]func(*fakeIssuer) string{discoveryPath: tt.discovery, keysPath: tt.keys} {
+				if body != nil {
+					idp.override(path, func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, body(idp)) })
+				}
+			}
+			if tt.redirect {
+				idp.override(keysPath, func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "http://localhost/moved", http.StatusFound)
+				})
+			}
+			idp.override("/moved", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, keySet(t, idp)) })
+			claims := idp.claims("operator")
+			claims["iss"] = remote
+			if w, _, logs := serve(authConfig(remote), idp.sign(t, claims)); w.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500; body %q, log %.300q", w.Code, w.Body, logs)
+			}
+			if n := idp.count("/moved"); n != 0 {
+				t.Errorf("requests to the loopback host = %d, want 0", n)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name, path, reason string
+		respond            func(w http.ResponseWriter, idp *fakeIssuer)
+	}{
+		{name: "error body", path: discoveryPath, reason: "502 Bad Gateway", respond: func(w http.ResponseWriter, _ *fakeIssuer) { http.Error(w, errorBody, http.StatusBadGateway) }},
+		{name: "long status line", path: discoveryPath, reason: "502 xxx", respond: func(w http.ResponseWriter, _ *fakeIssuer) {
+			if conn, buf, err := http.NewResponseController(w).Hijack(); err == nil {
+				defer conn.Close()
+				fmt.Fprintf(buf, "HTTP/1.1 502 %s\r\n\r\n", strings.Repeat("x", 1<<20))
+				buf.Flush()
+			}
+		}},
+		{name: "long issuer", path: discoveryPath, respond: func(w http.ResponseWriter, idp *fakeIssuer) {
+			io.WriteString(w, discovery("https://idp.example/"+errorBody, idp.URL+keysPath))
+		}},
+		{name: "long jwks_uri", path: discoveryPath, respond: func(w http.ResponseWriter, idp *fakeIssuer) {
+			io.WriteString(w, discovery(idp.URL, idp.URL+"/"+errorBody))
+		}},
+		{name: "long kid and crv of malformed keys", path: keysPath, reason: "skipped signing key", respond: func(w http.ResponseWriter, _ *fakeIssuer) {
+			io.WriteString(w, `{"keys":[{"kty":"RSA","kid":"`+errorBody+`"},{"kty":"EC","crv":"`+errorBody+`"}]}`)
+		}},
+		{name: "redirect to a long http URL", path: keysPath, reason: "https URL", respond: func(w http.ResponseWriter, _ *fakeIssuer) {
+			w.Header().Set("Location", "http://idp.example/"+errorBody)
+			w.WriteHeader(http.StatusFound)
+		}},
+		{name: "redirect to a long unparsable URL", path: keysPath, respond: func(w http.ResponseWriter, _ *fakeIssuer) {
+			w.Header().Set("Location", "/%zz"+errorBody)
+			w.WriteHeader(http.StatusFound)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			idp := newIssuer(t)
+			idp.override(tt.path, func(w http.ResponseWriter, _ *http.Request) { tt.respond(w, idp) })
+			w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator")))
+			if w.Code != http.StatusInternalServerError || strings.Contains(logs, strings.Repeat("x", 513)) || !strings.Contains(logs, tt.reason) {
+				t.Errorf("status = %d, log %.1000q; want 500 and a log with %q and at most 512 bytes of each value from the issuer", w.Code, logs, tt.reason)
+			}
+		})
+	}
+}
+
+func discovery(issuer, jwksURL string) string {
+	return fmt.Sprintf(`{"issuer":%q,"jwks_uri":%q}`, issuer, jwksURL)
+}
+
+func keySet(t *testing.T, idp *fakeIssuer) string {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return marshal(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &idp.key.PublicKey, KeyID: idp.kid, Algorithm: "RS256", Use: "sig"}}})
+}
+
 func TestRequireTokenWithScopes(t *testing.T) {
 	idp := newIssuer(t)
 	a := authConfig(idp.URL)
 	a.ScopesSupported = []string{"openid", "temporal.read"}
-	w, _, _ := serve(a, "")
-	if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`; w.Code != http.StatusUnauthorized || got != want {
-		t.Errorf("status = %d, WWW-Authenticate = %q; want 401 and %q", w.Code, got, want)
+	for token, want := range map[string]string{
+		"":             `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`,
+		"opaque-token": `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read", error="invalid_token"`,
+	} {
+		if w, _, _ := serve(a, token); w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != want {
+			t.Errorf("token %q: status = %d, WWW-Authenticate = %q; want 401 and %q", token, w.Code, w.Header().Get("WWW-Authenticate"), want)
+		}
 	}
 	if w, info, _ := serve(a, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK || info == nil {
 		t.Errorf("valid token: status = %d, token info %+v; want 200 and the token's info", w.Code, info)
@@ -507,6 +617,18 @@ func TestRequireTokenClockSkew(t *testing.T) {
 				t.Errorf("status = %d, want %d; body %q", w.Code, tt.want, w.Body)
 			}
 		})
+	}
+}
+
+func TestMetadataPath(t *testing.T) {
+	for resource, want := range map[string]string{
+		"https://mcp.example.com":      "/.well-known/oauth-protected-resource",
+		"https://mcp.example.com/":     "/.well-known/oauth-protected-resource",
+		"https://mcp.example.com/mcp/": "/.well-known/oauth-protected-resource/mcp/",
+	} {
+		if got := MetadataPath(resource); got != want {
+			t.Errorf("MetadataPath(%q) = %q, want %q", resource, got, want)
+		}
 	}
 }
 

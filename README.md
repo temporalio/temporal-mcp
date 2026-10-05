@@ -15,6 +15,10 @@ go build -o bin/ .
 
 This writes `bin/operator-mcp`.
 
+## Auth
+
+Each issuer's `audience` must identify this server as an API, such as its resource URL or API identifier, never the client app users sign in with. ID tokens issued to that app have the same `aud`, so they would pass as access tokens. With Microsoft Entra ID v2, the audience is the client ID of the API's app registration, which must be a different registration from the one the MCP client signs in with.
+
 ## Authorization
 
 A config with an `auth` section must also have an `authorization` section, which decides which tools each caller may use on which targets:

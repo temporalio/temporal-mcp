@@ -13,7 +13,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -70,6 +69,9 @@ type Issuer struct {
 	// Issuer is the exact iss claim of the provider's tokens.
 	Issuer string `yaml:"issuer"`
 	// Audience is the value the aud claim of a token for this server must contain.
+	// It must identify this server as an API, such as its resource URL or API
+	// identifier, never the client app users sign in with: ID tokens issued to
+	// that app have the same aud and would pass as access tokens.
 	Audience string `yaml:"audience"`
 }
 
@@ -332,8 +334,8 @@ func (a *Auth) validate() []error {
 		}
 	}
 	for i, s := range a.ScopesSupported {
-		if s == "" || strings.ContainsFunc(s, unicode.IsSpace) {
-			errs = append(errs, fmt.Errorf("auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain no spaces", i, s))
+		if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+			errs = append(errs, fmt.Errorf(`auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, i, s))
 		}
 	}
 	return errs
@@ -344,13 +346,14 @@ func validateURL(label, value string) error {
 		return fmt.Errorf("%s is required", label)
 	}
 	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !loopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
 		return fmt.Errorf("%s: %q must be an https URL (http only for a loopback host) with a host and no user info, query or fragment", label, value)
 	}
 	return nil
 }
 
-func loopbackHost(host string) bool {
+// LoopbackHost reports whether host is localhost or a loopback IP address.
+func LoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}

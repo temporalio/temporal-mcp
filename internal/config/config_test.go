@@ -59,7 +59,7 @@ func TestParseLoopbackListen(t *testing.T) {
 
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
-		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n" + validAuthorization
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
 		if _, err := parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
@@ -311,10 +311,13 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "bad scopes",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n  scopes_supported: ['', 'a b']\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n  scopes_supported: ['', 'a b', 'a\"b', 'a\\b', 'é']\n",
 			want: []string{
 				`auth: scopes_supported[0]: "" is not a scope`,
 				`auth: scopes_supported[1]: "a b" is not a scope`,
+				`auth: scopes_supported[2]: "a\"b" is not a scope`,
+				`auth: scopes_supported[3]: "a\\b" is not a scope`,
+				`auth: scopes_supported[4]: "é" is not a scope`,
 			},
 		},
 		{

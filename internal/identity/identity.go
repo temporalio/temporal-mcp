@@ -12,6 +12,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -38,6 +39,12 @@ var signingAlgorithms = []jose.SignatureAlgorithm{
 }
 
 var registeredClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti"}
+
+const (
+	maxResponseBytes = 1 << 20
+	maxLoggedChars   = 512
+	maxURLBytes      = 512
+)
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
@@ -96,42 +103,47 @@ func MetadataHandler(a *config.Auth) http.Handler {
 // RequireToken returns a handler that serves a request with next only if it
 // carries a valid access token from one of a's issuers. A missing or invalid
 // token gets a 401 with a WWW-Authenticate challenge that points to the
-// protected resource metadata and lists a's scopes. A token that cannot be
-// checked yet gets a 500 with no challenge: when the issuer's discovery or
-// signing keys are unavailable, or when the token's key is unknown and the
-// request skipped fetching the keys because they were last fetched less than
-// a minute before it, since the key may be newer than that fetch. When the
-// request skipped fetching, an expired token gets a 401 instead, whether that
-// last fetch succeeded or failed.
-// Response bodies are fixed ("no bearer token", "invalid token", "cannot
-// verify access tokens"); the reason for a rejected token or a 500 goes to
-// logger.
+// protected resource metadata and lists a's scopes, and for an invalid token
+// also has error="invalid_token". A token that cannot be checked yet gets a
+// 500 with no challenge: when the issuer's discovery or signing keys are
+// unavailable, or when the token's key is unknown and the request skipped
+// fetching the keys because they were last fetched less than a minute before
+// it, since the key may be newer than that fetch. When the request skipped
+// fetching, an expired token gets a 401 instead, whether that last fetch
+// succeeded or failed. Response bodies are fixed ("no bearer token",
+// "invalid token", "cannot verify access tokens"); the reason for a rejected
+// token or a 500 goes to logger.
 func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.Handler {
-	require := auth.RequireBearerToken(newVerifier(a.Issuers, logger), &auth.RequireBearerTokenOptions{
+	verify := newVerifier(a.Issuers, logger)
+	opts := &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: metadataURL(a.Resource),
 		ClockSkew:           jwt.DefaultLeeway,
-	})
-	if len(a.ScopesSupported) == 0 {
-		return require(next)
 	}
-	scope := strings.Join(a.ScopesSupported, " ")
-	inner := require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w.(scopeChallenge).ResponseWriter, r)
-	}))
+	var scope string
+	if len(a.ScopesSupported) > 0 {
+		scope = fmt.Sprintf(", scope=%q", strings.Join(a.ScopesSupported, " "))
+	}
+	unwrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w.(*challenge).ResponseWriter, r)
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inner.ServeHTTP(scopeChallenge{w, scope}, r)
+		c := &challenge{ResponseWriter: w, params: scope}
+		auth.RequireBearerToken(func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
+			c.params += `, error="invalid_token"`
+			return verify(ctx, token, r)
+		}, opts)(unwrapped).ServeHTTP(c, r)
 	})
 }
 
-type scopeChallenge struct {
+type challenge struct {
 	http.ResponseWriter
-	scope string
+	params string
 }
 
-func (w scopeChallenge) WriteHeader(code int) {
+func (w *challenge) WriteHeader(code int) {
 	if code == http.StatusUnauthorized {
 		h := w.Header()
-		h.Set("WWW-Authenticate", fmt.Sprintf("%s, scope=%q", h.Get("WWW-Authenticate"), w.scope))
+		h.Set("WWW-Authenticate", h.Get("WWW-Authenticate")+w.params)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
@@ -140,7 +152,10 @@ func (w scopeChallenge) WriteHeader(code int) {
 // resource, which the WWW-Authenticate challenge points to.
 func MetadataPath(resource string) string {
 	u, _ := url.Parse(resource)
-	return "/.well-known/oauth-protected-resource" + strings.TrimSuffix(u.Path, "/")
+	if u.Path == "/" {
+		return "/.well-known/oauth-protected-resource"
+	}
+	return "/.well-known/oauth-protected-resource" + u.Path
 }
 
 func metadataURL(resource string) string {
@@ -201,6 +216,7 @@ func (c *call) wait(ctx context.Context) error {
 
 type issuer struct {
 	url          string
+	loopback     bool
 	verifyConfig *oidc.Config
 	logger       *slog.Logger
 	mu           sync.Mutex
@@ -235,22 +251,74 @@ func (i *issuer) discover(ctx context.Context) (string, error) {
 }
 
 func (i *issuer) discoverJWKSURL() error {
-	p, err := oidc.NewProvider(oidc.ClientContext(context.Background(), httpClient), i.url)
-	if err != nil {
-		return fmt.Errorf("discovering issuer %s: %w", i.url, err)
-	}
 	var meta struct {
+		Issuer  string `json:"issuer"`
 		JWKSURL string `json:"jwks_uri"`
 	}
-	if err := p.Claims(&meta); err != nil {
+	if err := i.get(strings.TrimSuffix(i.url, "/")+"/.well-known/openid-configuration", &meta); err != nil {
 		return fmt.Errorf("discovering issuer %s: %w", i.url, err)
 	}
+	if meta.Issuer != i.url {
+		return fmt.Errorf("discovering issuer %s: discovery document names issuer %.*q", i.url, maxLoggedChars, meta.Issuer)
+	}
 	if meta.JWKSURL == "" {
-		return fmt.Errorf("discovering issuer %s: no jwks_uri", i.url)
+		return fmt.Errorf("discovering issuer %s: discovery document has no jwks_uri", i.url)
+	}
+	if len(meta.JWKSURL) > maxURLBytes {
+		return fmt.Errorf("discovering issuer %s: jwks_uri is longer than %d bytes", i.url, maxURLBytes)
+	}
+	if u, err := url.Parse(meta.JWKSURL); err != nil || !i.allowedURL(u) || u.Host == "" {
+		return fmt.Errorf("discovering issuer %s: jwks_uri %q must be an https URL (http only for a loopback host, when the issuer is on one)", i.url, meta.JWKSURL)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.jwksURL = meta.JWKSURL
+	return nil
+}
+
+func (i *issuer) allowedURL(u *url.URL) bool {
+	return u.Scheme == "https" || u.Scheme == "http" && i.loopback && config.LoopbackHost(u.Hostname())
+}
+
+func (i *issuer) get(u string, v any) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%.*s", maxLoggedChars, err)
+		}
+	}()
+	client := *httpClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !i.allowedURL(req.URL) {
+			return errors.New("redirect must go to an https URL (http only for a loopback host, when the issuer is on one)")
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	resp, err := client.Get(u)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("%s: %w", u, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxLoggedChars))
+		return fmt.Errorf("%s: %s: %q", u, resp.Status, body)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("%s: %w", u, err)
+	}
+	if len(body) > maxResponseBytes {
+		return fmt.Errorf("%s: response is larger than %d bytes", u, maxResponseBytes)
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("%s: %w", u, err)
+	}
 	return nil
 }
 
@@ -300,19 +368,11 @@ func (i *issuer) signingKeys(ctx context.Context, jwksURL string, header jose.He
 }
 
 func (i *issuer) fetchKeys(jwksURL string) error {
-	resp, err := httpClient.Get(jwksURL)
-	if err != nil {
-		return fmt.Errorf("fetching signing keys: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetching signing keys from %s: %s", jwksURL, resp.Status)
-	}
 	var set struct {
 		Keys []json.RawMessage `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil {
-		return fmt.Errorf("fetching signing keys from %s: %w", jwksURL, err)
+	if err := i.get(jwksURL, &set); err != nil {
+		return fmt.Errorf("fetching signing keys: %w", err)
 	}
 	var keys []jose.JSONWebKey
 	for _, raw := range set.Keys {
@@ -322,7 +382,7 @@ func (i *issuer) fetchKeys(jwksURL string) error {
 				KeyID string `json:"kid"`
 			}
 			json.Unmarshal(raw, &meta)
-			i.logger.Warn("skipped signing key", "issuer", i.url, "kid", meta.KeyID, "error", err)
+			i.logger.Warn("skipped signing key", "issuer", i.url, "kid", fmt.Sprintf("%.*s", maxLoggedChars, meta.KeyID), "error", fmt.Sprintf("%.*s", maxLoggedChars, err))
 			continue
 		}
 		if !k.IsPublic() || k.Use == "enc" || k.Algorithm != "" && !slices.Contains(signingAlgorithms, jose.SignatureAlgorithm(k.Algorithm)) {
@@ -331,7 +391,7 @@ func (i *issuer) fetchKeys(jwksURL string) error {
 		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("fetching signing keys from %s: no usable signing key", jwksURL)
+		return fmt.Errorf("fetching signing keys: %s: no usable signing key", jwksURL)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -433,7 +493,8 @@ func newVerifier(issuers []config.Issuer, logger *slog.Logger) auth.TokenVerifie
 	}
 	byIssuer := map[string]*issuer{}
 	for _, iss := range issuers {
-		byIssuer[iss.Issuer] = &issuer{url: iss.Issuer, verifyConfig: &oidc.Config{ClientID: iss.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
+		u, err := url.Parse(iss.Issuer)
+		byIssuer[iss.Issuer] = &issuer{url: iss.Issuer, loopback: err == nil && config.LoopbackHost(u.Hostname()), verifyConfig: &oidc.Config{ClientID: iss.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
 	}
 	verify := func(ctx context.Context, token string) (string, *auth.TokenInfo, error) {
 		jws, err := jose.ParseSignedCompact(token, signingAlgorithms)

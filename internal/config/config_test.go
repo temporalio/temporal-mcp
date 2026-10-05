@@ -41,6 +41,14 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+const validAuthorization = `
+authorization:
+  profiles:
+    oncall: {tools: [get_workflow], targets: [prod]}
+  rules:
+    - {claim_name: "cognito:groups", claim_value: oncall, profile: oncall}
+`
+
 func TestParseLoopbackListen(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "127.0.0.1:0"} {
 		if _, err := parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
@@ -51,7 +59,7 @@ func TestParseLoopbackListen(t *testing.T) {
 
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
-		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n"
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
 		if _, err := parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
@@ -310,6 +318,57 @@ func TestParseInvalid(t *testing.T) {
 				`auth: scopes_supported[2]: "a\"b" is not a scope`,
 				`auth: scopes_supported[3]: "a\\b" is not a scope`,
 				`auth: scopes_supported[4]: "é" is not a scope`,
+			},
+		},
+		{
+			name: "auth without authorization",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n",
+			want: []string{"authorization: required with an auth section"},
+		},
+		{
+			name: "authorization without auth",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + validAuthorization,
+			want: []string{"authorization: not allowed without an auth section"},
+		},
+		{
+			name: "authorization with no value and no auth",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "authorization:\n",
+			want: []string{"authorization: not allowed without an auth section"},
+		},
+		{
+			name: "authorization with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\nauthorization:\n",
+			want: []string{"authorization: rules: at least one rule is required"},
+		},
+		{
+			name: "bad profiles and rules",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n" + `authorization:
+  profiles:
+    empty: {}
+    bad-targets: {tools: [get_workflow], targets: [production, staging]}
+  rules:
+    - {claim_name: groups, profile: empty}
+    - {claim_name: " ", claim_value: a, profile: empty}
+    - {claim_name: email, claim_value: a, issuer: https://other.example.com, profile: empty}
+    - {claim_name: groups, claim_value: a, profile: missing}
+    - {claim_name: groups, claim_value: a}
+    - {claim_name: " groups ", claim_value: a, profile: empty}
+    - {claim_name: groups, claim_value: true, profile: empty}
+    - {claim_name: scp, claim_value: "openid temporal.orders", profile: empty}
+`,
+			want: []string{
+				`authorization: profiles: "bad-targets": targets[0]: unknown target "production"; profiles name targets by name, not alias`,
+				`authorization: profiles: "bad-targets": targets[1]: unknown target "staging"`,
+				`authorization: profiles: "empty": tools: at least one tool is required`,
+				`authorization: profiles: "empty": targets: at least one target is required`,
+				"authorization: rules[0]: claim_value is required",
+				"authorization: rules[1]: claim_name is required",
+				`authorization: rules[2]: issuer "https://other.example.com" is not one of auth: issuers`,
+				`authorization: rules[3]: profile "missing" is not one of authorization: profiles`,
+				"authorization: rules[4]: profile is required",
+				`authorization: rules[5]: claim_name " groups " has leading or trailing whitespace, which no claim name matches`,
+				`authorization: rules[6]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
+				`authorization: rules[7]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
 			},
 		},
 		{

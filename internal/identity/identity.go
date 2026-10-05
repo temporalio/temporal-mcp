@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -190,12 +191,18 @@ type call struct {
 	err      error
 }
 
-func startCall(f func() error) *call {
+func (i *issuer) startCall(f func() error) *call {
 	c := &call{done: make(chan struct{}), started: time.Now()}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				i.logger.Error("fetch from issuer panicked", "issuer", i.url, "error", fmt.Sprintf("panic: %v\n%s", r, debug.Stack()))
+				c.err = fmt.Errorf("panic: %v", r)
+			}
+			c.finished = time.Now()
+			close(c.done)
+		}()
 		c.err = f()
-		c.finished = time.Now()
-		close(c.done)
 	}()
 	return c
 }
@@ -238,7 +245,7 @@ func (i *issuer) discover(ctx context.Context) (string, error) {
 	}
 	c := i.discovery
 	if c == nil || c.isDone() && time.Since(c.finished) >= discoveryRetryInterval {
-		c = startCall(i.discoverJWKSURL)
+		c = i.startCall(i.discoverJWKSURL)
 		i.discovery = c
 	}
 	i.mu.Unlock()
@@ -326,7 +333,7 @@ func (i *issuer) signingKeys(ctx context.Context, jwksURL string, header jose.He
 	c := i.fetch
 	rateLimited := c != nil && c.isDone()
 	if c == nil || rateLimited && time.Since(c.started) >= keyRefreshInterval {
-		c, rateLimited = startCall(func() error {
+		c, rateLimited = i.startCall(func() error {
 			err := i.fetchKeys(jwksURL)
 			if err != nil {
 				i.logger.Warn("cannot fetch signing keys", "issuer", i.url, "error", err)

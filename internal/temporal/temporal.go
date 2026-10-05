@@ -75,7 +75,7 @@ func lazyClient(t config.Target, name, version string, cred credential) (client.
 		Namespace: t.Namespace,
 		ConnectionOptions: client.ConnectionOptions{
 			DialOptions: []grpc.DialOption{
-				grpc.WithUnaryInterceptor(restrictToTool(t.Name)),
+				grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
 				grpc.WithChainUnaryInterceptor(identify(name, version)),
 				grpc.WithUserAgent(name + "/" + version),
 			},
@@ -115,8 +115,11 @@ type tool struct {
 }
 
 // WithTool returns a context for Temporal calls made by the named tool, which
-// may call only the given WorkflowService RPCs (full gRPC method names) and
-// only on the targets with the given names.
+// may call only the given Temporal RPCs (full gRPC method names) and
+// only on the targets with the given names. A request with a namespace field
+// must set it to the target's configured namespace; an empty one is rejected.
+// RPCs whose requests lack the field, such as ListNamespaces and the Nexus
+// endpoint RPCs, are limited only by the RPC list.
 // A Temporal call whose context lacks a tool is rejected.
 func WithTool(ctx context.Context, name string, rpcs, targets []string) context.Context {
 	return context.WithValue(ctx, toolKey{}, tool{name, rpcs, targets})
@@ -134,7 +137,7 @@ func identify(name, version string) grpc.UnaryClientInterceptor {
 	}
 }
 
-func restrictToTool(target string) grpc.UnaryClientInterceptor {
+func restrictToTool(target, namespace string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		t, ok := ctx.Value(toolKey{}).(tool)
 		if !ok {
@@ -145,6 +148,9 @@ func restrictToTool(target string) grpc.UnaryClientInterceptor {
 		}
 		if !slices.Contains(t.targets, target) {
 			return status.Errorf(codes.PermissionDenied, "tool %s is not allowed to call target %s", t.name, target)
+		}
+		if r, ok := req.(interface{ GetNamespace() string }); ok && r.GetNamespace() != namespace {
+			return status.Errorf(codes.PermissionDenied, "tool %s is not allowed to call namespace %q through target %s", t.name, r.GetNamespace(), target)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}

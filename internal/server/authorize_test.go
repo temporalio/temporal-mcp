@@ -23,6 +23,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/api/common/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"google.golang.org/grpc/codes"
@@ -364,7 +365,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		},
 		Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: idp, Audience: "operator"}}},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"skips_lookup"}, Targets: []string{"granted"}}},
+			Profiles: map[string]config.Profile{"p": {Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -374,14 +375,32 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	s, _ := newServer("temporal-operator", "0", cfg, clients, logger)
+	calls := map[string]struct {
+		rpc  string
+		call func(context.Context) error
+	}{
+		"skips_lookup": {workflowservice.WorkflowService_GetSystemInfo_FullMethodName, func(ctx context.Context) error {
+			_, err := clients.Client("ungranted").WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
+			return err
+		}},
+		"crosses_namespace": {workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName, func(ctx context.Context) error {
+			_, err := clients.Client("granted").WorkflowService().DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{Namespace: "b", Execution: &common.WorkflowExecution{WorkflowId: "w"}})
+			return err
+		}},
+		"empty_namespace": {workflowservice.WorkflowService_DescribeNamespace_FullMethodName, func(ctx context.Context) error {
+			_, err := clients.Client("granted").WorkflowService().DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Id: "b-id"})
+			return err
+		}},
+	}
 	errs := make(chan error, 1)
-	addTool(s, &mcp.Tool{Name: "skips_lookup"}, []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err := clients.Client("ungranted").WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
-		errs <- err
-		return nil, struct{}{}, nil
-	})
+	for name, c := range calls {
+		addTool(s, &mcp.Tool{Name: name}, []string{c.rpc}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			errs <- c.call(ctx)
+			return nil, struct{}{}, nil
+		})
+	}
 	srv := httptest.NewServer(newMux(s, cfg, logger))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer(sign(map[string]any{}))}}, nil)
@@ -389,11 +408,13 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { session.Close() })
-	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "skips_lookup"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errs; serviceerror.ToStatus(err).Code() != codes.PermissionDenied {
-		t.Errorf("calling a target the tool was not granted: err = %v, want PermissionDenied", err)
+	for name := range calls {
+		if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-errs; serviceerror.ToStatus(err).Code() != codes.PermissionDenied {
+			t.Errorf("%s: err = %v, want PermissionDenied", name, err)
+		}
 	}
 }
 

@@ -475,6 +475,109 @@ func TestRequireTokenSkipsUnusableKeys(t *testing.T) {
 	}
 }
 
+func TestRequireTokenLimitsIssuerResponses(t *testing.T) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var addr string
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address == "idp.example:80" {
+			address = addr
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	old := httpClient.Transport
+	httpClient.Transport = transport
+	t.Cleanup(func() { httpClient.Transport = old })
+
+	padding := strings.Repeat(" ", 1<<20)
+	errorBody := strings.Repeat("x", 600)
+	for _, tt := range []struct {
+		name      string
+		discovery func(idp *fakeIssuer) string
+		keys      func(idp *fakeIssuer) string
+		redirect  bool
+	}{
+		{name: "discovery over 1 MiB", discovery: func(idp *fakeIssuer) string { return discovery(idp.URL, idp.URL+keysPath) + padding }},
+		{name: "key set over 1 MiB", keys: func(idp *fakeIssuer) string { return keySet(t, idp) + padding }},
+		{name: "jwks_uri over http to another host", discovery: func(idp *fakeIssuer) string { return discovery(idp.URL, "http://idp.example"+keysPath) }},
+		{name: "key set redirected over http to another host", redirect: true},
+		{name: "discovery names another issuer", discovery: func(idp *fakeIssuer) string { return discovery("https://other.example", idp.URL+keysPath) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			idp := newIssuer(t)
+			addr = idp.Listener.Addr().String()
+			for path, body := range map[string]func(*fakeIssuer) string{discoveryPath: tt.discovery, keysPath: tt.keys} {
+				if body != nil {
+					idp.override(path, func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, body(idp)) })
+				}
+			}
+			if tt.redirect {
+				idp.override(keysPath, func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "http://idp.example/moved", http.StatusFound)
+				})
+				idp.override("/moved", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, keySet(t, idp)) })
+			}
+			if w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator"))); w.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500; body %q, log %.300q", w.Code, w.Body, logs)
+			}
+			if n := idp.count("/moved"); n != 0 {
+				t.Errorf("redirected requests = %d, want 0", n)
+			}
+		})
+	}
+
+	t.Run("error body", func(t *testing.T) {
+		idp := newIssuer(t)
+		idp.override(discoveryPath, func(w http.ResponseWriter, _ *http.Request) { http.Error(w, errorBody, http.StatusBadGateway) })
+		w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator")))
+		if w.Code != http.StatusInternalServerError || !strings.Contains(logs, "502 Bad Gateway") || strings.Contains(logs, strings.Repeat("x", 513)) {
+			t.Errorf("status = %d, log %q; want 500 and a log with the status and at most 512 bytes of the body", w.Code, logs)
+		}
+	})
+
+	for name, doc := range map[string]func(idp *fakeIssuer) string{
+		"long issuer":   func(idp *fakeIssuer) string { return discovery("https://idp.example/"+errorBody, idp.URL+keysPath) },
+		"long jwks_uri": func(idp *fakeIssuer) string { return discovery(idp.URL, idp.URL+"/"+errorBody) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			idp := newIssuer(t)
+			idp.override(discoveryPath, func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, doc(idp)) })
+			w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator")))
+			if w.Code != http.StatusInternalServerError || strings.Contains(logs, strings.Repeat("x", 513)) {
+				t.Errorf("status = %d, log %.1000q; want 500 and a log with at most 512 bytes of the discovered value", w.Code, logs)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name, location, reason string
+	}{
+		{name: "redirect to a long http URL", location: "http://idp.example/" + errorBody, reason: "https URL"},
+		{name: "redirect to a long unparsable URL", location: "/%zz" + errorBody},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			idp := newIssuer(t)
+			idp.override(keysPath, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", tt.location)
+				w.WriteHeader(http.StatusFound)
+			})
+			w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator")))
+			if w.Code != http.StatusInternalServerError || strings.Contains(logs, strings.Repeat("x", 513)) || !strings.Contains(logs, tt.reason) {
+				t.Errorf("status = %d, log %.1000q; want 500 and a log with %q and at most 512 bytes of the Location", w.Code, logs, tt.reason)
+			}
+		})
+	}
+}
+
+func discovery(issuer, jwksURL string) string {
+	return fmt.Sprintf(`{"issuer":%q,"jwks_uri":%q}`, issuer, jwksURL)
+}
+
+func keySet(t *testing.T, idp *fakeIssuer) string {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return marshal(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &idp.key.PublicKey, KeyID: idp.kid, Algorithm: "RS256", Use: "sig"}}})
+}
+
 func TestRequireTokenWithScopes(t *testing.T) {
 	idp := newIssuer(t)
 	a := authConfig(idp.URL)

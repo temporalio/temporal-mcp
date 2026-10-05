@@ -242,13 +242,14 @@ func validateURL(label, value string) error {
 		return fmt.Errorf("%s is required", label)
 	}
 	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !loopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
 		return fmt.Errorf("%s: %q must be an https URL (http only for a loopback host) with a host and no user info, query or fragment", label, value)
 	}
 	return nil
 }
 
-func loopbackHost(host string) bool {
+// LoopbackHost reports whether host is localhost or a loopback IP address.
+func LoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}

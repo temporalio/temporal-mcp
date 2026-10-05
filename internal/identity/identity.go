@@ -41,23 +41,12 @@ var signingAlgorithms = []jose.SignatureAlgorithm{
 var registeredClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti"}
 
 const (
-	maxResponseBytes  = 1 << 20
-	maxErrorBodyBytes = 512
-	maxURLBytes       = 512
+	maxResponseBytes = 1 << 20
+	maxLoggedChars   = 512
+	maxURLBytes      = 512
 )
 
-var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if !allowedURL(req.URL) {
-			return errors.New("redirect must go to an https URL (http only for a loopback host)")
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	},
-}
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 var (
 	discoveryRetryInterval = 30 * time.Second
@@ -227,6 +216,7 @@ func (c *call) wait(ctx context.Context) error {
 
 type issuer struct {
 	url          string
+	loopback     bool
 	verifyConfig *oidc.Config
 	logger       *slog.Logger
 	mu           sync.Mutex
@@ -265,11 +255,11 @@ func (i *issuer) discoverJWKSURL() error {
 		Issuer  string `json:"issuer"`
 		JWKSURL string `json:"jwks_uri"`
 	}
-	if err := get(strings.TrimSuffix(i.url, "/")+"/.well-known/openid-configuration", &meta); err != nil {
+	if err := i.get(strings.TrimSuffix(i.url, "/")+"/.well-known/openid-configuration", &meta); err != nil {
 		return fmt.Errorf("discovering issuer %s: %w", i.url, err)
 	}
 	if meta.Issuer != i.url {
-		return fmt.Errorf("discovering issuer %s: discovery document names issuer %.*q", i.url, maxErrorBodyBytes, meta.Issuer)
+		return fmt.Errorf("discovering issuer %s: discovery document names issuer %.*q", i.url, maxLoggedChars, meta.Issuer)
 	}
 	if meta.JWKSURL == "" {
 		return fmt.Errorf("discovering issuer %s: discovery document has no jwks_uri", i.url)
@@ -277,8 +267,8 @@ func (i *issuer) discoverJWKSURL() error {
 	if len(meta.JWKSURL) > maxURLBytes {
 		return fmt.Errorf("discovering issuer %s: jwks_uri is longer than %d bytes", i.url, maxURLBytes)
 	}
-	if u, err := url.Parse(meta.JWKSURL); err != nil || !allowedURL(u) || u.Host == "" {
-		return fmt.Errorf("discovering issuer %s: jwks_uri %q must be an https URL (http only for a loopback host)", i.url, meta.JWKSURL)
+	if u, err := url.Parse(meta.JWKSURL); err != nil || !i.allowedURL(u) || u.Host == "" {
+		return fmt.Errorf("discovering issuer %s: jwks_uri %q must be an https URL (http only for a loopback host, when the issuer is on one)", i.url, meta.JWKSURL)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -286,22 +276,37 @@ func (i *issuer) discoverJWKSURL() error {
 	return nil
 }
 
-func allowedURL(u *url.URL) bool {
-	return u.Scheme == "https" || u.Scheme == "http" && config.LoopbackHost(u.Hostname())
+func (i *issuer) allowedURL(u *url.URL) bool {
+	return u.Scheme == "https" || u.Scheme == "http" && i.loopback && config.LoopbackHost(u.Hostname())
 }
 
-func get(u string, v any) error {
-	resp, err := httpClient.Get(u)
+func (i *issuer) get(u string, v any) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%.*s", maxLoggedChars, err)
+		}
+	}()
+	client := *httpClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !i.allowedURL(req.URL) {
+			return errors.New("redirect must go to an https URL (http only for a loopback host, when the issuer is on one)")
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	resp, err := client.Get(u)
 	if err != nil {
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return fmt.Errorf("%s: %.*s", u, maxErrorBodyBytes, err)
+		return fmt.Errorf("%s: %w", u, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxLoggedChars))
 		return fmt.Errorf("%s: %s: %q", u, resp.Status, body)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -366,7 +371,7 @@ func (i *issuer) fetchKeys(jwksURL string) error {
 	var set struct {
 		Keys []json.RawMessage `json:"keys"`
 	}
-	if err := get(jwksURL, &set); err != nil {
+	if err := i.get(jwksURL, &set); err != nil {
 		return fmt.Errorf("fetching signing keys: %w", err)
 	}
 	var keys []jose.JSONWebKey
@@ -377,7 +382,7 @@ func (i *issuer) fetchKeys(jwksURL string) error {
 				KeyID string `json:"kid"`
 			}
 			json.Unmarshal(raw, &meta)
-			i.logger.Warn("skipped signing key", "issuer", i.url, "kid", meta.KeyID, "error", err)
+			i.logger.Warn("skipped signing key", "issuer", i.url, "kid", fmt.Sprintf("%.*s", maxLoggedChars, meta.KeyID), "error", fmt.Sprintf("%.*s", maxLoggedChars, err))
 			continue
 		}
 		if !k.IsPublic() || k.Use == "enc" || k.Algorithm != "" && !slices.Contains(signingAlgorithms, jose.SignatureAlgorithm(k.Algorithm)) {
@@ -488,7 +493,8 @@ func newVerifier(issuers []config.Issuer, logger *slog.Logger) auth.TokenVerifie
 	}
 	byIssuer := map[string]*issuer{}
 	for _, iss := range issuers {
-		byIssuer[iss.Issuer] = &issuer{url: iss.Issuer, verifyConfig: &oidc.Config{ClientID: iss.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
+		u, err := url.Parse(iss.Issuer)
+		byIssuer[iss.Issuer] = &issuer{url: iss.Issuer, loopback: err == nil && config.LoopbackHost(u.Hostname()), verifyConfig: &oidc.Config{ClientID: iss.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
 	}
 	verify := func(ctx context.Context, token string) (string, *auth.TokenInfo, error) {
 		jws, err := jose.ParseSignedCompact(token, signingAlgorithms)

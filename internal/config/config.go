@@ -40,6 +40,9 @@ type Issuer struct {
 	// Issuer is the exact iss claim of the provider's tokens.
 	Issuer string `yaml:"issuer"`
 	// Audience is the value the aud claim of a token for this server must contain.
+	// It must identify this server as an API, such as its resource URL or API
+	// identifier, never the client app users sign in with: ID tokens issued to
+	// that app have the same aud and would pass as access tokens.
 	Audience string `yaml:"audience"`
 }
 

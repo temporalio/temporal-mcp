@@ -46,16 +46,22 @@ func checkConnection(cfg *config.Config, clients *temporal.Clients) mcp.ToolHand
 			return nil, envelope[connectionCheck]{}, err
 		}
 		svc := clients.Client(t.Name).WorkflowService()
-		server := runStage(ctx, "server", t, func(ctx context.Context, opts ...grpc.CallOption) error {
+		server, err := runStage(ctx, "server", t, func(ctx context.Context, opts ...grpc.CallOption) error {
 			_, err := svc.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}, opts...)
 			return err
 		})
+		if err != nil {
+			return nil, envelope[connectionCheck]{}, err
+		}
 		namespace := stage{Name: "namespace", Status: "skipped", Reason: new("not run because the server stage failed")}
 		if server.Status == "ok" {
-			namespace = runStage(ctx, "namespace", t, func(ctx context.Context, opts ...grpc.CallOption) error {
+			namespace, err = runStage(ctx, "namespace", t, func(ctx context.Context, opts ...grpc.CallOption) error {
 				_, err := svc.DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Namespace: t.Namespace}, opts...)
 				return err
 			})
+			if err != nil {
+				return nil, envelope[connectionCheck]{}, err
+			}
 		}
 		return nil, envelope[connectionCheck]{
 			Target:   &t.Name,
@@ -65,17 +71,20 @@ func checkConnection(cfg *config.Config, clients *temporal.Clients) mcp.ToolHand
 	}
 }
 
-func runStage(ctx context.Context, name string, t *config.Target, call func(context.Context, ...grpc.CallOption) error) stage {
-	ctx, cancel := context.WithTimeout(ctx, stageTimeout)
+func runStage(ctx context.Context, name string, t *config.Target, call func(context.Context, ...grpc.CallOption) error) (stage, error) {
+	stageCtx, cancel := context.WithTimeout(ctx, stageTimeout)
 	defer cancel()
 	var p peer.Peer
 	start := time.Now()
-	err := call(ctx, grpc.Peer(&p))
+	err := call(stageCtx, grpc.Peer(&p))
+	if err != nil && ctx.Err() != nil {
+		return stage{}, ctx.Err()
+	}
 	s := stage{Name: name, Status: "ok", LatencyMS: new(time.Since(start).Milliseconds())}
 	if err != nil {
 		s.Status, s.Reason = "failed", new(fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p)))
 	}
-	return s
+	return s, nil
 }
 
 func rpcErrorMessage(err error, t *config.Target, p *peer.Peer) string {

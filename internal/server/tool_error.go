@@ -33,7 +33,7 @@ func lookupTarget(ctx context.Context, cfg *config.Config, name string) (*config
 	t, ok := cfg.Lookup(name)
 	granted := ok && slices.Contains(toolTargets(ctx), t.Name)
 	if rec := auditRecordFrom(ctx); rec != nil && ok {
-		rec.Target, rec.denied = &t.Name, !granted
+		rec.denied = !granted
 	}
 	if !granted {
 		return nil, &toolError{Code: "not_found", Message: fmt.Sprintf("unknown target %q", name)}

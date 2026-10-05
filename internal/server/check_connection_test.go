@@ -100,7 +100,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		{
 			name:       "no response",
 			target:     config.Target{Address: silent.Addr().String()},
-			timeout:    time.Second,
+			timeout:    time.Minute,
 			wantServer: "DeadlineExceeded: timed out waiting for the Temporal server",
 		},
 	}

@@ -157,7 +157,7 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 // newServer returns the MCP server and the names of its tools.
 func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
 	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
-	s.AddReceivingMiddleware(recoverPanics(logger), audit(records, logger, s.access), normalizeToolCalls, authorize(cfg))
+	s.AddReceivingMiddleware(recoverPanics(logger), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
 	return s, addTools(s, cfg, clients)
 }
 

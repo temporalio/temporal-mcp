@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/grpc"
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/temporal"
@@ -49,9 +51,20 @@ func TestAudit(t *testing.T) {
 	}
 	closed := ln.Addr().String()
 	ln.Close()
+	var cancelCall context.CancelFunc
+	hanging := listen(t)
+	hang := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, _ any, _ *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
+		cancelCall()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}))
+	workflowservice.RegisterWorkflowServiceServer(hang, workflowservice.UnimplementedWorkflowServiceServer{})
+	go hang.Serve(hanging)
+	t.Cleanup(hang.Stop)
 	targets := []config.Target{
 		{Name: "granted", Aliases: []string{"g"}, Description: "x", Address: closed, Namespace: "a"},
 		{Name: "ungranted", Aliases: []string{"u"}, Description: "x", Address: closed, Namespace: "b"},
+		{Name: "hanging", Description: "x", Address: hanging.Addr().String(), Namespace: "c"},
 	}
 	clients, err := temporal.NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -61,7 +74,7 @@ func TestAudit(t *testing.T) {
 		Targets: targets,
 		Auth:    &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: issuer, Audience: "operator"}}},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "fail", "boom", "block"}, Targets: []string{"granted"}}},
+			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -86,11 +99,18 @@ func TestAudit(t *testing.T) {
 	addTool(s, &mcp.Tool{Name: "boom"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 		panic("boom-value")
 	})
-	var cancelCall context.CancelFunc
+	addTool(s, &mcp.Tool{Name: "deadline"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
+		return nil, struct{}{}, context.DeadlineExceeded
+	})
 	addTool(s, &mcp.Tool{Name: "block"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		cancelCall()
 		<-ctx.Done()
 		return nil, struct{}{}, ctx.Err()
+	})
+	addTool(s, &mcp.Tool{Name: "cancel_and_panic"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
+		cancelCall()
+		<-ctx.Done()
+		panic("boom-value")
 	})
 	token := sign(map[string]any{})
 	var callToken atomic.Pointer[string]
@@ -125,21 +145,33 @@ func TestAudit(t *testing.T) {
 		{name: "ok", session: authed, tool: "check_connection", args: `{"target":"g","unused":null}`,
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "unused": nil}, "outcome": "ok", "temporal_calls": 1.0})},
 		{name: "denied tool", session: authed, tool: "get_workflow", args: `{"target":"g","workflow_id":"w"}`, callErr: `unknown tool "get_workflow"`,
-			record: alice(map[string]any{"tool": "get_workflow", "access": "read", "target": "g", "arguments": map[string]any{"target": "g", "workflow_id": "w"}, "outcome": "denied", "temporal_calls": 0.0})},
+			record: alice(map[string]any{"tool": "get_workflow", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "workflow_id": "w"}, "outcome": "denied", "temporal_calls": 0.0})},
 		{name: "denied target", session: authed, tool: "check_connection", args: `{"target":"u"}`,
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "ungranted", "arguments": map[string]any{"target": "u"}, "outcome": "denied", "temporal_calls": 0.0})},
+		{name: "unknown target", session: authed, tool: "check_connection", args: `{"target":"nope"}`,
+			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "nope", "arguments": map[string]any{"target": "nope"}, "outcome": "not_found", "temporal_calls": 0.0})},
 		{name: "unknown tool", session: authed, tool: "no_such_tool", args: `{"target":"g"}`, callErr: `unknown tool "no_such_tool"`,
-			record: alice(map[string]any{"tool": "no_such_tool", "access": nil, "target": "g", "arguments": map[string]any{"target": "g"}, "outcome": "unknown_tool", "temporal_calls": 0.0})},
+			record: alice(map[string]any{"tool": "no_such_tool", "access": nil, "target": "granted", "arguments": map[string]any{"target": "g"}, "outcome": "unknown_tool", "temporal_calls": 0.0})},
 		{name: "invalid arguments", session: authed, tool: "check_connection", args: `{"target":"g","extra":1}`,
-			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "g", "arguments": map[string]any{"target": "g", "extra": 1.0}, "outcome": "invalid_argument", "temporal_calls": 0.0})},
-		{name: "internal error", session: authed, tool: "fail", args: `{}`,
-			record: alice(map[string]any{"tool": "fail", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
+			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "extra": 1.0}, "outcome": "invalid_argument", "temporal_calls": 0.0})},
+		{name: "internal error", session: authed, tool: "fail", args: `{"target":null}`,
+			record: alice(map[string]any{"tool": "fail", "access": "write", "target": nil, "arguments": map[string]any{"target": nil}, "outcome": "internal", "temporal_calls": 0.0}),
 			log:    `level=ERROR msg="tool call failed" tool=fail error="dial tcp 10.0.0.1:7233: connection refused"`},
 		{name: "panicking tool", session: authed, tool: "boom", args: `{}`,
 			record: alice(map[string]any{"tool": "boom", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
 			log:    `level=ERROR msg="tool call failed" tool=boom error="panic: boom-value\ngoroutine `},
 		{name: "cancelled", session: authed, tool: "block", args: `{}`, callErr: "context canceled",
 			record: alice(map[string]any{"tool": "block", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "cancelled", "temporal_calls": 0.0})},
+		{name: "deadline exceeded in a live call", session: authed, tool: "deadline", args: `{}`,
+			record: alice(map[string]any{"tool": "deadline", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
+			log:    `level=ERROR msg="tool call failed" tool=deadline error="context deadline exceeded"`},
+		{name: "cancelled check_connection", session: unauthed, tool: "check_connection", args: `{"target":"hanging"}`, callErr: "context canceled",
+			record: map[string]any{"issuer": nil, "subject": nil, "tool": "check_connection", "access": "read", "target": "hanging", "arguments": map[string]any{"target": "hanging"}, "outcome": "cancelled", "temporal_calls": 1.0}},
+		{name: "cancelled get_workflow", session: unauthed, tool: "get_workflow", args: `{"target":"hanging","workflow_id":"w"}`, callErr: "context canceled",
+			record: map[string]any{"issuer": nil, "subject": nil, "tool": "get_workflow", "access": "read", "target": "hanging", "arguments": map[string]any{"target": "hanging", "workflow_id": "w"}, "outcome": "cancelled", "temporal_calls": 1.0}},
+		{name: "cancelled call that panics", session: authed, tool: "cancel_and_panic", args: `{}`, callErr: "context canceled",
+			record: alice(map[string]any{"tool": "cancel_and_panic", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
+			log:    `level=ERROR msg="tool call failed" tool=cancel_and_panic error="panic: boom-value\ngoroutine `},
 		{name: "rejected token", session: authed, token: "not-a-token", tool: "check_connection", args: `{"target":"g"}`, callErr: "Unauthorized"},
 		{name: "write failure", session: unauthed, tool: "list_available_targets", failWrite: true, callErr: "internal error",
 			log: `level=ERROR msg="cannot write audit record" tool=list_available_targets error="disk full"`},

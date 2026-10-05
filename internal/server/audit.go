@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/identity"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
@@ -45,7 +46,7 @@ func auditRecordFrom(ctx context.Context) *auditRecord {
 
 // audit writes a record of each tools/call request to w. A call whose record cannot be
 // written fails with an internal error. access gives each tool's access, read or write.
-func audit(w io.Writer, logger *slog.Logger, access map[string]string) mcp.Middleware {
+func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[string]string) mcp.Middleware {
 	var mu sync.Mutex
 	var dirty bool
 	write := func(line []byte) error {
@@ -76,9 +77,12 @@ func audit(w io.Writer, logger *slog.Logger, access map[string]string) mcp.Middl
 			}
 			var fields map[string]json.RawMessage
 			if json.Unmarshal(call.Params.Arguments, &fields) == nil {
-				var target string
-				if json.Unmarshal(fields["target"], &target) == nil {
-					rec.Target = &target
+				var target *string
+				if json.Unmarshal(fields["target"], &target) == nil && target != nil {
+					if t, ok := cfg.Lookup(*target); ok {
+						target = &t.Name
+					}
+					rec.Target = target
 				}
 			}
 			res, err := next(temporal.CountCalls(context.WithValue(ctx, auditKey{}, rec), &rec.calls), method, req)
@@ -90,17 +94,20 @@ func audit(w io.Writer, logger *slog.Logger, access map[string]string) mcp.Middl
 				rec.Outcome = "unknown_tool"
 			case rec.denied:
 				rec.Outcome = "denied"
-			case (err != nil || r.IsError) && ctx.Err() != nil:
-				// The client cancelled or disconnected, so the error came from the cancellation.
-				rec.Outcome = "cancelled"
 			case err != nil:
 				rec.Outcome, cause = "internal", err
 			case r.IsError && errors.As(r.GetError(), &te) && te.Code == "internal":
 				rec.Outcome, cause = te.Code, te.cause
+			case r.IsError && ctx.Err() != nil:
+				// The client cancelled or disconnected, so the error came from the cancellation.
+				rec.Outcome = "cancelled"
 			case r.IsError && errors.As(r.GetError(), &te):
 				rec.Outcome = te.Code
 			default:
 				rec.Outcome = "ok"
+			}
+			if ctx.Err() != nil && (errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)) {
+				rec.Outcome, cause = "cancelled", nil
 			}
 			if cause != nil {
 				logger.ErrorContext(ctx, "tool call failed", "tool", rec.Tool, "error", cause.Error())

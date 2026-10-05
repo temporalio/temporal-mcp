@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -231,8 +230,8 @@ func (a *Auth) validate() []error {
 		}
 	}
 	for i, s := range a.ScopesSupported {
-		if s == "" || strings.ContainsFunc(s, unicode.IsSpace) {
-			errs = append(errs, fmt.Errorf("auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain no spaces", i, s))
+		if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+			errs = append(errs, fmt.Errorf(`auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, i, s))
 		}
 	}
 	return errs

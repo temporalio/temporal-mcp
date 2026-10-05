@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -119,9 +120,11 @@ func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler
 	handler := newHandler(s, cfg)
 	if cfg.Auth != nil {
 		metadataPath, metadata := identity.MetadataPath(cfg.Auth.Resource), identity.MetadataHandler(cfg.Auth)
+		// The TypeScript SDK drops the trailing slash when it builds the metadata path itself, so that path is served too.
+		trimmedPath := strings.TrimSuffix(metadataPath, "/")
 		// Matched exactly rather than as a ServeMux pattern, which would read wildcards or a method in the configured path.
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != metadataPath {
+			if r.URL.Path != metadataPath && r.URL.Path != trimmedPath {
 				http.NotFound(w, r)
 				return
 			}

@@ -34,9 +34,9 @@ authorization:
 ```
 
 - A profile lets a caller use each of its `tools` on each of its `targets`. Targets are named by `name`, not by alias.
-- A rule gives its `profile` to callers whose access token has the top-level claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry; a `scope` or `scp` string counts as a list separated by spaces. Matching is exact and case-sensitive. A missing claim, or a claim of another type, does not match.
+- A rule gives its `profile` to callers whose access token has the top-level claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry; a `scope` or `scp` string counts as a list separated by spaces. A scope records what the client was granted, not who the user is, so prefer groups or roles. Matching is exact and case-sensitive. A missing claim, or a claim of another type, does not match.
 - Copy rules from a decoded access token: `claim_name` is the claim's name exactly as it appears there, so names such as `cognito:groups` or `https://acme.example/roles` work as written, and `claim_value` is its value or one entry of its list.
-- Match only claims that users cannot set themselves, such as groups or roles your identity provider assigns. A rule on a claim users can edit, such as `email`, lets them choose their own profile.
+- Match only claims that neither the user nor the client can set, such as groups or roles your identity provider assigns, and configure only issuers that issue tokens to your users alone. A rule on a claim the user or client can choose, such as `email`, lets them choose their own profile, and on an issuer that issues tokens to anyone, such as a CI provider's OIDC endpoint, it lets anyone get that profile.
 - A rule with `issuer` matches only tokens from that issuer, which must be the `issuer` URL of one of the `auth.issuers` entries.
 - A caller gets every profile whose rule it matches. Profiles combine per target: a profile that gives `get_workflow` on one target and another that gives `check_connection` on a second do not give `get_workflow` on the second.
 - `tools/list` shows a caller only the tools it may use on some target. `list_available_targets` lists every target the caller may use some tool on.

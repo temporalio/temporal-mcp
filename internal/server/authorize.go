@@ -51,6 +51,9 @@ func authorize(cfg *config.Config) mcp.Middleware {
 				if cfg.Auth != nil {
 					g := grants(cfg.Authorization, req)
 					if targets = g[r.Params.Name]; len(targets) == 0 {
+						if rec := auditRecordFrom(ctx); rec != nil {
+							rec.denied = true
+						}
 						return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", r.Params.Name)}
 					}
 					if r.Params.Name == "list_available_targets" {

@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"go.temporal.io/sdk/client"
+	tlog "go.temporal.io/sdk/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -27,9 +30,10 @@ type Clients struct {
 
 // NewClients returns the clients for targets. Calls identify this server by
 // name and version in the gRPC user agent and the client-name and
-// client-version headers. It fails if an API key's environment variable is
-// unset or empty, or if a target's address cannot be parsed.
-func NewClients(targets []config.Target, name, version string) (*Clients, error) {
+// client-version headers. The clients log to logger. It fails if an API key's
+// environment variable is unset or empty, or if a target's address cannot be
+// parsed.
+func NewClients(targets []config.Target, name, version string, logger *slog.Logger) (*Clients, error) {
 	c := &Clients{byName: map[string]client.Client{}}
 	var errs []error
 	for i, t := range targets {
@@ -38,7 +42,7 @@ func NewClients(targets []config.Target, name, version string) (*Clients, error)
 			errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
 			continue
 		}
-		cl, err := lazyClient(t, name, version, cred)
+		cl, err := lazyClient(t, name, version, cred, logger)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("targets[%d]: address: %w", i, err))
 			continue
@@ -69,10 +73,11 @@ func apiKeyCredential(k *config.APIKey) (credential, error) {
 	}
 }
 
-func lazyClient(t config.Target, name, version string, cred credential) (client.Client, error) {
+func lazyClient(t config.Target, name, version string, cred credential, logger *slog.Logger) (client.Client, error) {
 	opts := client.Options{
 		HostPort:  t.Address,
 		Namespace: t.Namespace,
+		Logger:    tlog.NewStructuredLogger(logger),
 		ConnectionOptions: client.ConnectionOptions{
 			DialOptions: []grpc.DialOption{
 				grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
@@ -125,6 +130,14 @@ func WithTool(ctx context.Context, name string, rpcs, targets []string) context.
 	return context.WithValue(ctx, toolKey{}, tool{name, rpcs, targets})
 }
 
+type callsKey struct{}
+
+// CountCalls returns a context whose Temporal calls are counted in n: those that
+// pass the limits set by WithTool, each counted once however often it is retried.
+func CountCalls(ctx context.Context, n *atomic.Int64) context.Context {
+	return context.WithValue(ctx, callsKey{}, n)
+}
+
 func identify(name, version string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		md, _ := metadata.FromOutgoingContext(ctx)
@@ -151,6 +164,9 @@ func restrictToTool(target, namespace string) grpc.UnaryClientInterceptor {
 		}
 		if r, ok := req.(interface{ GetNamespace() string }); ok && r.GetNamespace() != namespace {
 			return status.Errorf(codes.PermissionDenied, "tool %s is not allowed to call namespace %q through target %s", t.name, r.GetNamespace(), target)
+		}
+		if n, ok := ctx.Value(callsKey{}).(*atomic.Int64); ok {
+			n.Add(1)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}

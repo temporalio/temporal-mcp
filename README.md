@@ -50,6 +50,10 @@ Without an `auth` section, an `authorization` section is not allowed, and every 
 
 With Microsoft Entra ID, match [app roles](https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps) in the `roles` claim rather than groups: the `groups` claim holds group object IDs by default, not names, and is left out of tokens for users in more than 200 groups. Use the app role's Value as `claim_value`, not its Display name.
 
+## Audit
+
+`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr.
+
 ## Lint
 
 CI runs `go vet` and a `gofmt` check:

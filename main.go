@@ -26,13 +26,13 @@ const (
 var version = "dev"
 
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
@@ -54,12 +54,13 @@ func run(args []string, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	clients, err := temporal.NewClients(cfg.Targets, name, version)
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	handler, err := server.NewMux(serverName, version, cfg, clients, slog.New(slog.NewTextHandler(stderr, nil)))
+	handler, err := server.NewMux(serverName, version, cfg, clients, stdout, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}

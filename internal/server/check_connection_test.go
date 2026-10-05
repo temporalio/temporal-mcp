@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -107,7 +108,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.target.Name, tt.target.Description, tt.target.Namespace = "a", "x", "default"
 			cfg := &config.Config{Targets: []config.Target{tt.target}}
-			clients, err := temporal.NewClients(cfg.Targets, "test", "0")
+			clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}

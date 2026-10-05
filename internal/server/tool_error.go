@@ -31,7 +31,11 @@ func (e *toolError) Error() string {
 
 func lookupTarget(ctx context.Context, cfg *config.Config, name string) (*config.Target, error) {
 	t, ok := cfg.Lookup(name)
-	if !ok || !slices.Contains(toolTargets(ctx), t.Name) {
+	granted := ok && slices.Contains(toolTargets(ctx), t.Name)
+	if rec := auditRecordFrom(ctx); rec != nil && ok {
+		rec.Target, rec.denied = &t.Name, !granted
+	}
+	if !granted {
 		return nil, &toolError{Code: "not_found", Message: fmt.Sprintf("unknown target %q", name)}
 	}
 	return t, nil

@@ -114,6 +114,9 @@ func TestExitsWithoutServing(t *testing.T) {
 		return path
 	}
 	noTargets := writeConfig("listen: 0.0.0.0:0\ntargets: []\n")
+	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n" +
+		"authorization:\n  profiles: {p: {tools: [get_workflow, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: OPERATOR_MCP_TEST_UNSET_KEY}}\n")
 	tests := []struct {
 		name     string
@@ -125,6 +128,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unexpected arguments", []string{"--config", filepath.Join("testdata", "config.yaml"), "extra"}, 1, `unexpected arguments ["extra"]`},
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
+		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflow`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,7 +162,8 @@ func TestAuthIssuerDownAtStartup(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	config := fmt.Sprintf("listen: 127.0.0.1:0\n"+
 		"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"+
-		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: %q, audience: operator}]\n", issuer)
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: %q, audience: operator}]\n"+
+		"authorization:\n  profiles: {p: {tools: [get_workflow], targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n", issuer)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,6 @@
-// Middleware run on every tools/call request: one logs each call, the other drops null
-// arguments and turns every error, including a handler panic, into a toolError.
+// Middleware for MCP requests: one turns a panic in any request into an internal error, one
+// logs each tools/call request, and one drops null tool arguments and turns every tool error,
+// including a handler panic, into a toolError.
 
 package server
 
@@ -14,8 +15,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// recoverPanics answers a request that panics with an internal error: the SDK does not recover, so the panic would end the process.
+func recoverPanics(logger *slog.Logger) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorContext(ctx, "request panicked", "method", method, "error", fmt.Sprintf("panic: %v\n%s", r, debug.Stack()))
+					res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
+				}
+			}()
+			return next(ctx, method, req)
+		}
+	}
+}
 
 func logToolCalls(logger *slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
@@ -60,7 +77,7 @@ func logToolCalls(logger *slog.Logger) mcp.Middleware {
 	}
 }
 
-// normalizeToolCalls drops null-valued arguments and makes every tool error a toolError, including a handler panic, which would otherwise end the process; for arguments that are not a JSON object it calls next first so an unknown tool still gets the SDK's error.
+// normalizeToolCalls drops null-valued arguments and makes every tool error a toolError, including a handler panic; for arguments that are not a JSON object it calls next first so an unknown tool still gets the SDK's error.
 func normalizeToolCalls(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (res mcp.Result, err error) {
 		call, ok := req.(*mcp.CallToolRequest)

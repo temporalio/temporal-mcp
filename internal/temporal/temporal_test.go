@@ -36,7 +36,7 @@ func closedAddress(t *testing.T) string {
 	return addr
 }
 
-func TestToolCallsAreLimitedToDeclaredRPCs(t *testing.T) {
+func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 	clients, err := NewClients([]config.Target{{Name: "a", Address: closedAddress(t), Namespace: "default"}}, "test", "0")
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +51,9 @@ func TestToolCallsAreLimitedToDeclaredRPCs(t *testing.T) {
 		ctx  context.Context
 		want codes.Code
 	}{
-		{"declared", WithTool(ctx, "t", declared), codes.Unavailable},
-		{"undeclared", WithTool(ctx, "t", []string{workflowservice.WorkflowService_DescribeNamespace_FullMethodName}), codes.PermissionDenied},
+		{"declared", WithTool(ctx, "t", declared, []string{"a"}), codes.Unavailable},
+		{"undeclared", WithTool(ctx, "t", []string{workflowservice.WorkflowService_DescribeNamespace_FullMethodName}, []string{"a"}), codes.PermissionDenied},
+		{"another target", WithTool(ctx, "t", declared, []string{"b"}), codes.PermissionDenied},
 		{"no tool", ctx, codes.PermissionDenied},
 	}
 	for _, tt := range tests {
@@ -88,7 +89,7 @@ func TestNewClientsAPIKeyFromEnv(t *testing.T) {
 		targets[0].Address = closedAddress(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName})
+		ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{"a"})
 		_, err := newClient(t, targets[0]).WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
 		if got := serviceerror.ToStatus(err).Code(); got != codes.Unavailable {
 			t.Errorf("code = %v, want %v (err %v)", got, codes.Unavailable, err)
@@ -165,7 +166,7 @@ func TestAPIKeyTargetsUseTLS(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName})
+			ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{"a"})
 			target := config.Target{Name: "a", Address: ln.Addr().String(), Namespace: "default", APIKey: tt.apiKey}
 			_, _ = newClient(t, target).WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
 
@@ -247,7 +248,7 @@ func TestClientIdentityHeaders(t *testing.T) {
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
-	})
+	}, []string{"a"})
 
 	raw := newClient(t, target).WorkflowService()
 	if _, err := raw.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err != nil {
@@ -300,7 +301,7 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 	caller := &identity.Caller{Issuer: "https://idp.example", Subject: "alice"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx = WithTool(identity.WithCaller(ctx, caller), "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName})
+	ctx = WithTool(identity.WithCaller(ctx, caller), "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{"a"})
 	if _, err := c.WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err == nil || !strings.Contains(err.Error(), "no credential") {
 		t.Errorf("err = %v, want the credential's error", err)
 	}

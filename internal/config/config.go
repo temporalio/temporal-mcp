@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -23,6 +25,33 @@ type Config struct {
 	Targets []Target `yaml:"targets"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
 	Auth *Auth `yaml:"auth"`
+	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
+	Authorization *Authorization `yaml:"authorization"`
+}
+
+// Authorization gives each caller the profiles of the rules its access token
+// matches. A caller that matches no rule may use no tool on any target.
+type Authorization struct {
+	Profiles map[string]Profile `yaml:"profiles"`
+	Rules    []Rule             `yaml:"rules"`
+}
+
+// Profile is permission to use each of Tools on each of Targets, which are target names.
+type Profile struct {
+	Tools   []string `yaml:"tools"`
+	Targets []string `yaml:"targets"`
+}
+
+// Rule gives Profile to callers whose access token has the top-level claim
+// named ClaimName as a string equal to ClaimValue, or as an array with a string
+// element equal to it. A string claim named scope or scp counts as an array of
+// its space-separated entries. With Issuer set, the token must also come from
+// that issuer.
+type Rule struct {
+	ClaimName  string `yaml:"claim_name"`
+	ClaimValue string `yaml:"claim_value"`
+	Issuer     string `yaml:"issuer"`
+	Profile    string `yaml:"profile"`
 }
 
 // Auth configures the server as an OAuth resource server that accepts JWT access tokens from the configured issuers.
@@ -87,21 +116,42 @@ func parse(data []byte) (*Config, error) {
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
-	// An auth key with no value decodes to nil; validate it as an empty section rather than run without auth.
-	if cfg.Auth == nil && hasAuthKey(data) {
+	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
+	if cfg.Auth == nil && hasKey(data, "auth") {
 		cfg.Auth = &Auth{}
 	}
-	if err := cfg.validate(); err != nil {
+	if cfg.Authorization == nil && hasKey(data, "authorization") {
+		cfg.Authorization = &Authorization{}
+	}
+	if err := errors.Join(cfg.validate(), nonStringRuleValues(data)); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
-func hasAuthKey(data []byte) bool {
+func nonStringRuleValues(data []byte) error {
 	var doc struct {
-		Auth yaml.Node `yaml:"auth"`
+		Authorization struct {
+			Rules []struct {
+				ClaimValue yaml.Node `yaml:"claim_value"`
+			}
+		}
 	}
-	return yaml.Unmarshal(data, &doc) == nil && doc.Auth.Kind != 0
+	if yaml.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	var errs []error
+	for i, r := range doc.Authorization.Rules {
+		if v := r.ClaimValue; v.Kind == yaml.ScalarNode && v.ShortTag() != "!!str" && v.ShortTag() != "!!null" {
+			errs = append(errs, fmt.Errorf("authorization: rules[%d]: claim_value: %s is not a string, and rules match only string claim values; quote it to match the string %q", i, v.Value, v.Value))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func hasKey(data []byte, key string) bool {
+	var doc map[string]yaml.Node
+	return yaml.Unmarshal(data, &doc) == nil && doc[key].Kind != 0
 }
 
 func (c *Config) validate() error {
@@ -158,7 +208,58 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s: api_key: exactly one of env or file is required", label))
 		}
 	}
+	switch {
+	case c.Auth != nil && c.Authorization == nil:
+		errs = append(errs, errors.New("authorization: required with an auth section"))
+	case c.Auth == nil && c.Authorization != nil:
+		errs = append(errs, errors.New("authorization: not allowed without an auth section, whose access tokens carry the claims that rules match"))
+	case c.Authorization != nil:
+		errs = append(errs, c.Authorization.validate(c)...)
+	}
 	return errors.Join(errs...)
+}
+
+func (a *Authorization) validate(c *Config) []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
+		p, label := a.Profiles[name], fmt.Sprintf("authorization: profiles: %q", name)
+		if len(p.Tools) == 0 {
+			errs = append(errs, fmt.Errorf("%s: tools: at least one tool is required", label))
+		}
+		if len(p.Targets) == 0 {
+			errs = append(errs, fmt.Errorf("%s: targets: at least one target is required", label))
+		}
+		for k, target := range p.Targets {
+			if !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Name == target }) {
+				errs = append(errs, fmt.Errorf("%s: targets[%d]: unknown target %q; profiles name targets by name, not alias", label, k, target))
+			}
+		}
+	}
+	if len(a.Rules) == 0 {
+		errs = append(errs, errors.New("authorization: rules: at least one rule is required"))
+	}
+	for i, r := range a.Rules {
+		label := fmt.Sprintf("authorization: rules[%d]", i)
+		if strings.TrimSpace(r.ClaimName) == "" {
+			errs = append(errs, fmt.Errorf("%s: claim_name is required", label))
+		} else if r.ClaimName != strings.TrimSpace(r.ClaimName) {
+			errs = append(errs, fmt.Errorf("%s: claim_name %q has leading or trailing whitespace, which no claim name matches", label, r.ClaimName))
+		}
+		if r.ClaimValue == "" {
+			errs = append(errs, fmt.Errorf("%s: claim_value is required", label))
+		} else if (r.ClaimName == "scope" || r.ClaimName == "scp") && strings.Contains(r.ClaimValue, " ") {
+			errs = append(errs, fmt.Errorf("%s: claim_value %q contains a space, which no %s entry does; write one scope per rule", label, r.ClaimValue, r.ClaimName))
+		}
+		if r.Issuer != "" && !slices.ContainsFunc(c.Auth.Issuers, func(iss Issuer) bool { return iss.Issuer == r.Issuer }) {
+			errs = append(errs, fmt.Errorf("%s: issuer %q is not one of auth: issuers", label, r.Issuer))
+		}
+		if r.Profile == "" {
+			errs = append(errs, fmt.Errorf("%s: profile is required", label))
+		} else if _, ok := a.Profiles[r.Profile]; !ok {
+			errs = append(errs, fmt.Errorf("%s: profile %q is not one of authorization: profiles", label, r.Profile))
+		}
+	}
+	return errs
 }
 
 // Lookup returns the target whose name is exactly name or that has an alias equal to name ignoring case.

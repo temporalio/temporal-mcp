@@ -1,12 +1,14 @@
-// toolError, the structured error a tool returns, and the helpers that build one for an
-// unknown target or a failed Temporal call.
+// toolError, the structured error a tool returns, and the helpers that build one for a
+// target that is unknown or not authorized, or for a failed Temporal call.
 
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"go.temporal.io/api/serviceerror"
 	"google.golang.org/grpc/codes"
@@ -27,10 +29,10 @@ func (e *toolError) Error() string {
 	return string(b)
 }
 
-func lookupTarget(cfg *config.Config, name string) (*config.Target, error) {
+func lookupTarget(ctx context.Context, cfg *config.Config, name string) (*config.Target, error) {
 	t, ok := cfg.Lookup(name)
-	if !ok {
-		return nil, &toolError{Code: "not_found", Message: fmt.Sprintf("unknown target %q; list_available_targets lists the targets", name)}
+	if !ok || !slices.Contains(toolTargets(ctx), t.Name) {
+		return nil, &toolError{Code: "not_found", Message: fmt.Sprintf("unknown target %q", name)}
 	}
 	return t, nil
 }

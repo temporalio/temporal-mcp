@@ -31,7 +31,7 @@ import (
 const callTimeout = 10 * time.Second
 
 type getWorkflowInput struct {
-	Target     string `json:"target" jsonschema:"the name or an alias of a target from list_available_targets"`
+	Target     string `json:"target" jsonschema:"the name or an alias of a target"`
 	WorkflowID string `json:"workflow_id" jsonschema:"the workflow ID"`
 	RunID      string `json:"run_id,omitempty" jsonschema:"the run ID; the latest run of the workflow if omitted"`
 }
@@ -135,7 +135,7 @@ type applicationFailure struct {
 
 func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[getWorkflowInput, envelope[workflowRun]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in getWorkflowInput) (*mcp.CallToolResult, envelope[workflowRun], error) {
-		t, err := lookupTarget(cfg, in.Target)
+		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, envelope[workflowRun]{}, err
 		}

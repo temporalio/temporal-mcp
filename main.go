@@ -59,12 +59,16 @@ func run(args []string, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
+	handler, err := server.NewMux(serverName, version, cfg, clients, slog.New(slog.NewTextHandler(stderr, nil)))
+	if err != nil {
+		return fmt.Errorf("invalid config %s: %w", *configPath, err)
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
 
-	handler := server.NewMux(serverName, version, cfg, clients, slog.New(slog.NewTextHandler(stderr, nil)))
 	return (&http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}).Serve(ln)
 }

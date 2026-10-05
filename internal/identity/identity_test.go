@@ -542,3 +542,47 @@ func TestMetadataHandler(t *testing.T) {
 		})
 	}
 }
+
+type panicOn string
+
+func (p panicOn) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Path == string(p) {
+		panic("boom-value")
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestRequireTokenFetchPanic(t *testing.T) {
+	idp := newIssuer(t)
+	h, logs := newHandler(authConfig(idp.URL), nop)
+	setInterval(t, &discoveryRetryInterval, 0)
+	setInterval(t, &keyRefreshInterval, 0)
+	client := httpClient
+	t.Cleanup(func() { httpClient = client })
+	for _, path := range []string{discoveryPath, keysPath} {
+		httpClient = &http.Client{Transport: panicOn(path)}
+		logged := len(logs.String())
+		if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusInternalServerError || w.Body.String() != "cannot verify access tokens\n" {
+			t.Errorf("panic fetching %s: status = %d, body %q; want 500 and %q", path, w.Code, w.Body, "cannot verify access tokens\n")
+		}
+		if want := `level=ERROR msg="fetch from issuer panicked" issuer=` + idp.URL + ` error="panic: boom-value\ngoroutine `; !strings.Contains(logs.String()[logged:], want) {
+			t.Errorf("panic fetching %s: log %q does not contain %q", path, logs.String()[logged:], want)
+		}
+	}
+	httpClient = client
+	if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK {
+		t.Errorf("after the panics: status = %d, want 200; body %q", w.Code, w.Body)
+	}
+	setInterval(t, &discoveryRetryInterval, time.Hour)
+	setInterval(t, &keyRefreshInterval, time.Hour)
+	for _, path := range []string{discoveryPath, keysPath} {
+		h, _ := newHandler(authConfig(idp.URL), nop)
+		httpClient = &http.Client{Transport: panicOn(path)}
+		request(context.Background(), h, idp.sign(t, idp.claims("operator")))
+		httpClient = client
+		fetches := idp.count(path)
+		if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusInternalServerError || idp.count(path) != fetches {
+			t.Errorf("request within the retry interval after a panic fetching %s: status = %d, %d new fetches; want 500 and none", path, w.Code, idp.count(path)-fetches)
+		}
+	}
+}

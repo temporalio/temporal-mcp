@@ -3,8 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +15,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -37,7 +35,7 @@ func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*mcp
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newServer("temporal-operator", "0", cfg, clients, slog.New(slog.NewJSONHandler(logs, nil)))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, slog.New(slog.NewJSONHandler(logs, nil)))
 	for _, add := range extra {
 		add(s)
 	}
@@ -152,7 +150,7 @@ func TestToolCalls(t *testing.T) {
 		logError      string
 		protocolError bool
 	}{
-		{"check_connection", `{"target":"nope"}`, "INFO", "nope", "not_found", `unknown target "nope"; list_available_targets lists the targets`, "", false},
+		{"check_connection", `{"target":"nope"}`, "INFO", "nope", "not_found", `unknown target "nope"`, "", false},
 		{"get_workflow", `{"target":"production","workflow_id":"wf-secret-1","extra":"arg-secret-2"}`, "INFO", "production", "invalid_argument", "", "", false},
 		{"check_connection", `{"target":"nope","TARGET":"tgt-secret-4"}`, "INFO", "nope", "invalid_argument", "", "", false},
 		{"get_workflow", `["dev"]`, "INFO", "", "invalid_argument", "arguments must be a JSON object", "", false},
@@ -216,21 +214,22 @@ func TestToolCalls(t *testing.T) {
 }
 
 func TestNewMux(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	issuerURL, sign := newTestIssuer(t)
+	token := sign(map[string]any{})
+	claims, err := base64.RawURLEncoding.DecodeString(strings.Split(token, ".")[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	idp := &oidctest.Server{PublicKeys: []oidctest.PublicKey{{PublicKey: &key.PublicKey, KeyID: "k1", Algorithm: "RS256"}}}
-	issuer := httptest.NewUnstartedServer(idp)
-	idp.SetIssuer("http://" + issuer.Listener.Addr().String())
-	issuer.Start()
-	t.Cleanup(issuer.Close)
-	claims := fmt.Sprintf(`{"iss":%q,"sub":"alice","aud":"operator","exp":%d}`, issuer.URL, time.Now().Add(time.Hour).Unix())
-	token := oidctest.SignIDToken(key, "k1", "RS256", claims)
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	authCfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuer.URL, Audience: "operator"}}}}
-	s := newServer("temporal-operator", "0", authCfg, nil, logger)
+	authCfg := &config.Config{
+		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuerURL, Audience: "operator"}}},
+		Authorization: &config.Authorization{
+			Profiles: map[string]config.Profile{"p": {Tools: []string{"whoami"}, Targets: []string{"prod"}}},
+			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
+		},
+	}
+	s, _ := newServer("temporal-operator", "0", authCfg, nil, logger)
 	callers := make(chan *identity.Caller, 1)
 	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		callers <- identity.CallerFrom(ctx)
@@ -238,7 +237,11 @@ func TestNewMux(t *testing.T) {
 	})
 	withAuth := httptest.NewServer(newMux(s, authCfg, logger))
 	t.Cleanup(withAuth.Close)
-	withoutAuth := httptest.NewServer(NewMux("temporal-operator", "0", &config.Config{}, nil, logger))
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutAuth := httptest.NewServer(h)
 	t.Cleanup(withoutAuth.Close)
 
 	tests := []struct {
@@ -284,8 +287,8 @@ func TestNewMux(t *testing.T) {
 	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "whoami"}); err != nil {
 		t.Fatal(err)
 	}
-	want := &identity.Caller{Issuer: issuer.URL, Subject: "alice"}
-	if err := json.Unmarshal([]byte(claims), &want.Claims); err != nil {
+	want := &identity.Caller{Issuer: issuerURL, Subject: "alice"}
+	if err := json.Unmarshal(claims, &want.Claims); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-callers; !reflect.DeepEqual(got, want) {
@@ -299,4 +302,55 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+string(b))
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestPanicGetsInternalError(t *testing.T) {
+	var logs bytes.Buffer
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs, func(s *mcp.Server) {
+		s.AddPrompt(&mcp.Prompt{Name: "boom"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			panic("boom-value")
+		})
+	})
+	_, err := session.GetPrompt(t.Context(), &mcp.GetPromptParams{Name: "boom"})
+	var wire *jsonrpc.Error
+	if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
+		t.Errorf("prompts/get that panics: err = %v, want an internal error", err)
+	}
+	if _, err := session.ListTools(t.Context(), nil); err != nil {
+		t.Errorf("tools/list after a panic: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &got); err != nil {
+		t.Fatalf("log %q: %v", logs.String(), err)
+	}
+	if e, _ := got["error"].(string); !strings.HasPrefix(e, "panic: boom-value\ngoroutine ") {
+		t.Errorf("log error = %q, want the panic and its stack", e)
+	}
+	delete(got, "time")
+	delete(got, "error")
+	if want := map[string]any{"level": "ERROR", "msg": "request panicked", "method": "prompts/get"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("log = %#v, want %#v", got, want)
+	}
+}
+
+type panicOnToolCallLog struct{ bytes.Buffer }
+
+func (l *panicOnToolCallLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"msg":"tool call"`)) {
+		panic("boom-value")
+	}
+	return l.Buffer.Write(p)
+}
+
+func TestToolCallLogPanicGetsInternalError(t *testing.T) {
+	var logs panicOnToolCallLog
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs)
+	_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets", Arguments: map[string]any{}})
+	var wire *jsonrpc.Error
+	if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
+		t.Errorf("tools/call whose log line panics: err = %v, want an internal error", err)
+	}
+	if want := `"msg":"request panicked","method":"tools/call"`; !strings.Contains(logs.String(), want) {
+		t.Errorf("log %q does not contain %q", logs.String(), want)
+	}
 }

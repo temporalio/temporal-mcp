@@ -113,10 +113,10 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
 			defer cancel()
-			ctx = temporal.WithTool(ctx, "check_connection", []string{
+			ctx = temporal.WithTool(context.WithValue(ctx, targetsKey{}, []string{"a"}), "check_connection", []string{
 				workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 				workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-			})
+			}, []string{"a"})
 
 			_, env, err := checkConnection(cfg, clients)(ctx, nil, checkConnectionInput{Target: "a"})
 			if err != nil {

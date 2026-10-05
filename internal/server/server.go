@@ -1,13 +1,16 @@
 // Package server exposes the MCP tools over streamable HTTP. With auth configured, NewMux
-// puts the token check in front of /mcp and serves the protected resource metadata.
+// puts the token check in front of /mcp, limits each caller to the tools and targets that
+// the authorization section gives it, and serves the protected resource metadata.
 package server
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -32,7 +35,7 @@ type nextCall struct {
 
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
-func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) {
+func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
 	if def.OutputSchema == nil {
 		schema, err := jsonschema.For[Out](&jsonschema.ForOptions{})
 		if err != nil {
@@ -42,7 +45,7 @@ func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.Too
 	}
 	// The handler encodes the output itself: the SDK would re-encode it through float64, corrupting integers above 2^53.
 	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
-		ctx = temporal.WithTool(ctx, def.Name, rpcs)
+		ctx = temporal.WithTool(ctx, def.Name, rpcs, toolTargets(ctx))
 		if req.Extra != nil && req.Extra.TokenInfo != nil {
 			ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
 		}
@@ -56,23 +59,23 @@ func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.Too
 		}
 		return &mcp.CallToolResult{StructuredContent: json.RawMessage(b), Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil, nil
 	})
+	return def.Name
 }
 
-func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) {
-	addTool(s, &mcp.Tool{
+// addTools registers the server's tools on s and returns their names.
+func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) []string {
+	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
-		Description: "List the Temporal targets this server can read from.",
+		Description: "List the Temporal targets you can read from.",
 		Annotations: readOnlyAnnotations,
-	}, nil, listAvailableTargets(cfg))
-	addTool(s, &mcp.Tool{
+	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
 		Description: "Check that this server can reach a target's Temporal server and namespace.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-	}, checkConnection(cfg, clients))
-	addTool(s, &mcp.Tool{
+	}, checkConnection(cfg, clients)), addTool(s, &mcp.Tool{
 		Name:         "get_workflow",
 		Description:  "Get the current state of a workflow run. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut.",
 		Annotations:  readOnlyAnnotations,
@@ -80,17 +83,35 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) {
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
-	}, getWorkflow(cfg, clients))
+	}, getWorkflow(cfg, clients))}
 }
 
 // NewMux returns an HTTP handler that serves the MCP streamable HTTP transport
 // at /mcp for the given configuration, making Temporal calls through clients.
-// With auth configured, /mcp requires a valid access token and the protected
-// resource metadata is served at the path the token challenge points to.
+// With auth configured, /mcp requires a valid access token, each caller may use
+// only what cfg's authorization gives it, and the protected resource metadata
+// is served at the path the token challenge points to.
 // logger gets the per-call log and the reason for each rejected token or
-// verification failure.
-func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) http.Handler {
-	return newMux(newServer(name, version, cfg, clients, logger), cfg, logger)
+// verification failure. When auth has more than one issuer, it also gets a
+// warning for each rule without an issuer.
+// It fails if cfg has an auth section but no authorization, or if an
+// authorization profile names a tool the server does not have.
+func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) (http.Handler, error) {
+	if cfg.Auth != nil && cfg.Authorization == nil {
+		return nil, errors.New("authorization: required with an auth section")
+	}
+	s, tools := newServer(name, version, cfg, clients, logger)
+	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
+		return nil, err
+	}
+	if cfg.Auth != nil && len(cfg.Auth.Issuers) > 1 {
+		for i, r := range cfg.Authorization.Rules {
+			if r.Issuer == "" {
+				logger.Warn("rule has no issuer, so it matches tokens from every issuer in auth: issuers; set issuer to limit it", "rule", fmt.Sprintf("authorization: rules[%d]", i), "profile", r.Profile)
+			}
+		}
+	}
+	return newMux(s, cfg, logger), nil
 }
 
 func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
@@ -117,11 +138,11 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true, DisableLocalhostProtection: cfg.Auth != nil})
 }
 
-func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) *mcp.Server {
+// newServer returns the MCP server and the names of its tools.
+func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) (*mcp.Server, []string) {
 	s := mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil)
-	s.AddReceivingMiddleware(logToolCalls(logger), normalizeToolCalls)
-	addTools(s, cfg, clients)
-	return s
+	s.AddReceivingMiddleware(recoverPanics(logger), logToolCalls(logger), normalizeToolCalls, authorize(cfg))
+	return s, addTools(s, cfg, clients)
 }
 
 type targetList struct {
@@ -136,20 +157,23 @@ type targetInfo struct {
 }
 
 func listAvailableTargets(cfg *config.Config) mcp.ToolHandlerFor[struct{}, envelope[targetList]] {
-	targets := targetList{Targets: make([]targetInfo, 0, len(cfg.Targets))}
-	for _, t := range cfg.Targets {
-		aliases := t.Aliases
-		if aliases == nil {
-			aliases = []string{}
+	return func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, envelope[targetList], error) {
+		targets := targetList{Targets: []targetInfo{}}
+		for _, t := range cfg.Targets {
+			if !slices.Contains(toolTargets(ctx), t.Name) {
+				continue
+			}
+			aliases := t.Aliases
+			if aliases == nil {
+				aliases = []string{}
+			}
+			targets.Targets = append(targets.Targets, targetInfo{
+				Name:        t.Name,
+				Aliases:     aliases,
+				Namespace:   t.Namespace,
+				Description: t.Description,
+			})
 		}
-		targets.Targets = append(targets.Targets, targetInfo{
-			Name:        t.Name,
-			Aliases:     aliases,
-			Namespace:   t.Namespace,
-			Description: t.Description,
-		})
-	}
-	return func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, envelope[targetList], error) {
 		return nil, envelope[targetList]{Result: targets, Complete: true}, nil
 	}
 }

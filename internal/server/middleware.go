@@ -1,6 +1,6 @@
-// Middleware for MCP requests: one turns a panic in any request into an internal error, one
-// logs each tools/call request, and one drops null tool arguments and turns every tool error,
-// including a handler panic, into a toolError.
+// Middleware for MCP requests: one turns a panic in any request into an internal error, and
+// one drops null tool arguments and turns every tool error, including a handler panic, into a
+// toolError.
 
 package server
 
@@ -13,7 +13,6 @@ import (
 	"maps"
 	"runtime/debug"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,49 +29,6 @@ func recoverPanics(logger *slog.Logger) mcp.Middleware {
 				}
 			}()
 			return next(ctx, method, req)
-		}
-	}
-}
-
-func logToolCalls(logger *slog.Logger) mcp.Middleware {
-	return func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			call, ok := req.(*mcp.CallToolRequest)
-			if !ok {
-				return next(ctx, method, req)
-			}
-			var target string
-			var fields map[string]json.RawMessage
-			if json.Unmarshal(call.Params.Arguments, &fields) == nil {
-				_ = json.Unmarshal(fields["target"], &target)
-			}
-			start := time.Now()
-			res, err := next(ctx, method, req)
-			level, code := slog.LevelInfo, ""
-			var cause error
-			var te *toolError
-			switch r, _ := res.(*mcp.CallToolResult); {
-			case err != nil:
-				level = slog.LevelWarn
-			case r.IsError && errors.As(r.GetError(), &te) && te.Code == "internal":
-				code, cause, level = te.Code, te.cause, slog.LevelError
-			case ctx.Err() != nil:
-				// The client cancelled or disconnected: it gets no result, and any Temporal error came from the cancellation.
-				code = "cancelled"
-			case r.IsError && errors.As(r.GetError(), &te):
-				code, cause = te.Code, te.cause
-			}
-			attrs := []slog.Attr{
-				slog.String("tool", call.Params.Name),
-				slog.String("target", target),
-				slog.Duration("duration", time.Since(start)),
-				slog.String("error_code", code),
-			}
-			if cause != nil {
-				attrs = append(attrs, slog.String("error", cause.Error()))
-			}
-			logger.LogAttrs(ctx, level, "tool call", attrs...)
-			return res, err
 		}
 	}
 }

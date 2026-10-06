@@ -25,21 +25,21 @@ import (
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
-func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*mcp.Server)) *mcp.ClientSession {
+func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0")
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer("temporal-operator", "0", cfg, clients, slog.New(slog.NewJSONHandler(logs, nil)))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, t.Output(), slog.New(slog.NewJSONHandler(logs, nil)))
 	for _, add := range extra {
 		add(s)
 	}
-	srv := httptest.NewServer(newHandler(s, cfg))
+	srv := httptest.NewServer(newHandler(s.Server, cfg))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)
 	if err != nil {
@@ -126,9 +126,8 @@ func TestListAvailableTargets(t *testing.T) {
 }
 
 func TestToolCalls(t *testing.T) {
-	var logs bytes.Buffer
-	testTool := func(name string, err error) func(*mcp.Server) {
-		return func(s *mcp.Server) {
+	testTool := func(name string, err error) func(*toolServer) {
+		return func(s *toolServer) {
 			addTool(s, &mcp.Tool{Name: name}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 				if err == nil {
 					panic("boom-value")
@@ -137,28 +136,26 @@ func TestToolCalls(t *testing.T) {
 			})
 		}
 	}
-	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs,
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output(),
 		testTool("fail", errors.New("dial tcp 10.0.0.1:7233: connection refused")),
 		testTool("wrapped", fmt.Errorf("lookup: %w", &toolError{Code: "not_found", Message: "no such thing"})),
 		testTool("boom", nil))
 
 	calls := []struct {
 		name, args    string
-		level, target string
 		errorCode     string
 		message       string
-		logError      string
 		protocolError bool
 	}{
-		{"check_connection", `{"target":"nope"}`, "INFO", "nope", "not_found", `unknown target "nope"`, "", false},
-		{"get_workflow", `{"target":"production","workflow_id":"wf-secret-1","extra":"arg-secret-2"}`, "INFO", "production", "invalid_argument", "", "", false},
-		{"check_connection", `{"target":"nope","TARGET":"tgt-secret-4"}`, "INFO", "nope", "invalid_argument", "", "", false},
-		{"get_workflow", `["dev"]`, "INFO", "", "invalid_argument", "arguments must be a JSON object", "", false},
-		{"fail", ``, "ERROR", "", "internal", "internal error", "dial tcp 10.0.0.1:7233: connection refused", false},
-		{"wrapped", ``, "INFO", "", "not_found", "no such thing", "", false},
-		{"boom", ``, "ERROR", "", "internal", "internal error", "panic: boom-value\ngoroutine ", false},
-		{"no_such_tool", `{"target":"nope"}`, "WARN", "nope", "", "", "", true},
-		{"no_such_tool", `"dev"`, "WARN", "", "", "", "", true},
+		{"check_connection", `{"target":"nope"}`, "not_found", `unknown target "nope"`, false},
+		{"get_workflow", `{"target":"production","workflow_id":"wf","extra":"x"}`, "invalid_argument", "", false},
+		{"check_connection", `{"target":"nope","TARGET":"other"}`, "invalid_argument", "", false},
+		{"get_workflow", `["dev"]`, "invalid_argument", "arguments must be a JSON object", false},
+		{"fail", ``, "internal", "internal error", false},
+		{"wrapped", ``, "not_found", "no such thing", false},
+		{"boom", ``, "internal", "internal error", false},
+		{"no_such_tool", `{"target":"nope"}`, "", "", true},
+		{"no_such_tool", `"dev"`, "", "", true},
 	}
 	for _, c := range calls {
 		params := &mcp.CallToolParams{Name: c.name}
@@ -184,33 +181,6 @@ func TestToolCalls(t *testing.T) {
 			t.Errorf("%s %s: error = %#v, want %#v", c.name, c.args, got, want)
 		}
 	}
-
-	if strings.Contains(logs.String(), "secret") {
-		t.Errorf("log contains a tool argument value other than the target:\n%s", logs.String())
-	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != len(calls) {
-		t.Fatalf("got %d log lines, want one per tool call:\n%s", len(lines), logs.String())
-	}
-	for i, c := range calls {
-		var got map[string]any
-		if err := json.Unmarshal([]byte(lines[i]), &got); err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := got["duration"].(float64); !ok {
-			t.Errorf("line %d duration = %#v, want a number", i, got["duration"])
-		}
-		if e, _ := got["error"].(string); !strings.HasPrefix(e, c.logError) || (c.logError == "") != (got["error"] == nil) {
-			t.Errorf("line %d error = %#v, want prefix %q", i, got["error"], c.logError)
-		}
-		for _, k := range []string{"time", "duration", "error"} {
-			delete(got, k)
-		}
-		want := map[string]any{"level": c.level, "msg": "tool call", "tool": c.name, "target": c.target, "error_code": c.errorCode}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("line %d = %#v, want %#v", i, got, want)
-		}
-	}
 }
 
 func TestNewMux(t *testing.T) {
@@ -229,19 +199,19 @@ func TestNewMux(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	s, _ := newServer("temporal-operator", "0", authCfg, nil, logger)
+	s, _ := newServer("temporal-operator", "0", authCfg, nil, t.Output(), logger)
 	callers := make(chan *identity.Caller, 1)
 	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		callers <- identity.CallerFrom(ctx)
 		return nil, struct{}{}, nil
 	})
-	withAuth := httptest.NewServer(newMux(s, authCfg, logger))
+	withAuth := httptest.NewServer(newMux(s.Server, authCfg, logger))
 	t.Cleanup(withAuth.Close)
 	noSlashCfg := *authCfg
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
-	noSlash := httptest.NewServer(newMux(s, &noSlashCfg, logger))
+	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, logger)
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +282,7 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestPanicGetsInternalError(t *testing.T) {
 	var logs bytes.Buffer
-	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs, func(s *mcp.Server) {
+	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs, func(s *toolServer) {
 		s.AddPrompt(&mcp.Prompt{Name: "boom"}, func(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 			panic("boom-value")
 		})
@@ -336,27 +306,5 @@ func TestPanicGetsInternalError(t *testing.T) {
 	delete(got, "error")
 	if want := map[string]any{"level": "ERROR", "msg": "request panicked", "method": "prompts/get"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("log = %#v, want %#v", got, want)
-	}
-}
-
-type panicOnToolCallLog struct{ bytes.Buffer }
-
-func (l *panicOnToolCallLog) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte(`"msg":"tool call"`)) {
-		panic("boom-value")
-	}
-	return l.Buffer.Write(p)
-}
-
-func TestToolCallLogPanicGetsInternalError(t *testing.T) {
-	var logs panicOnToolCallLog
-	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), &logs)
-	_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets", Arguments: map[string]any{}})
-	var wire *jsonrpc.Error
-	if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
-		t.Errorf("tools/call whose log line panics: err = %v, want an internal error", err)
-	}
-	if want := `"msg":"request panicked","method":"tools/call"`; !strings.Contains(logs.String(), want) {
-		t.Errorf("log %q does not contain %q", logs.String(), want)
 	}
 }

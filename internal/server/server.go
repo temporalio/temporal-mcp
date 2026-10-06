@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -36,7 +37,13 @@ type nextCall struct {
 
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
-func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
+// A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it.
+type toolServer struct {
+	*mcp.Server
+	access map[string]string
+}
+
+func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
 	if def.OutputSchema == nil {
 		schema, err := jsonschema.For[Out](&jsonschema.ForOptions{})
 		if err != nil {
@@ -44,8 +51,12 @@ func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.Too
 		}
 		def.OutputSchema = schema
 	}
+	s.access[def.Name] = "write"
+	if def.Annotations != nil && def.Annotations.ReadOnlyHint {
+		s.access[def.Name] = "read"
+	}
 	// The handler encodes the output itself: the SDK would re-encode it through float64, corrupting integers above 2^53.
-	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s.Server, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		ctx = temporal.WithTool(ctx, def.Name, rpcs, toolTargets(ctx))
 		if req.Extra != nil && req.Extra.TokenInfo != nil {
 			ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
@@ -64,7 +75,7 @@ func addTool[In, Out any](s *mcp.Server, def *mcp.Tool, rpcs []string, h mcp.Too
 }
 
 // addTools registers the server's tools on s and returns their names.
-func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) []string {
+func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []string {
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
 		Description: "List the Temporal targets you can read from.",
@@ -92,16 +103,18 @@ func addTools(s *mcp.Server, cfg *config.Config, clients *temporal.Clients) []st
 // With auth configured, /mcp requires a valid access token, each caller may use
 // only what cfg's authorization gives it, and the protected resource metadata
 // is served at the path the token challenge points to.
-// logger gets the per-call log and the reason for each rejected token or
-// verification failure. When auth has more than one issuer, it also gets a
-// warning for each rule without an issuer.
+// records gets an audit record of each tool call, as a line of JSON; a call
+// whose record cannot be written fails. logger gets the cause of each internal
+// error and the reason for each rejected token or verification failure. When
+// auth has more than one issuer, it also gets a warning for each rule without
+// an issuer.
 // It fails if cfg has an auth section but no authorization, or if an
 // authorization profile names a tool the server does not have.
-func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) (http.Handler, error) {
+func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, records io.Writer, logger *slog.Logger) (http.Handler, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")
 	}
-	s, tools := newServer(name, version, cfg, clients, logger)
+	s, tools := newServer(name, version, cfg, clients, records, logger)
 	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
 		return nil, err
 	}
@@ -112,7 +125,7 @@ func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients,
 			}
 		}
 	}
-	return newMux(s, cfg, logger), nil
+	return newMux(s.Server, cfg, logger), nil
 }
 
 func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
@@ -142,9 +155,9 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 }
 
 // newServer returns the MCP server and the names of its tools.
-func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, logger *slog.Logger) (*mcp.Server, []string) {
-	s := mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil)
-	s.AddReceivingMiddleware(recoverPanics(logger), logToolCalls(logger), normalizeToolCalls, authorize(cfg))
+func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
+	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
+	s.AddReceivingMiddleware(recoverPanics(logger), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
 	return s, addTools(s, cfg, clients)
 }
 

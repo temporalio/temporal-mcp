@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -93,11 +94,11 @@ authorization:
 	if err != nil {
 		t.Fatal(err)
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0")
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewMux("temporal-operator", "0", cfg, clients, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	h, err := NewMux("temporal-operator", "0", cfg, clients, t.Output(), slog.New(slog.NewTextHandler(t.Output(), nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 
 func TestNewMuxRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
-	if _, err := NewMux("temporal-operator", "0", cfg, nil, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := NewMux("temporal-operator", "0", cfg, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("NewMux with auth and no authorization succeeded, want an error")
 	}
 }
@@ -340,7 +341,7 @@ func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
 				},
 			}
 			var logs strings.Builder
-			if _, err := NewMux("temporal-operator", "0", cfg, nil, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
+			if _, err := NewMux("temporal-operator", "0", cfg, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
 				t.Fatal(err)
 			}
 			if got := logs.String(); got != tc.want {
@@ -369,12 +370,12 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0")
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, _ := newServer("temporal-operator", "0", cfg, clients, logger)
+	s, _ := newServer("temporal-operator", "0", cfg, clients, t.Output(), logger)
 	calls := map[string]struct {
 		rpc  string
 		call func(context.Context) error
@@ -401,7 +402,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 			return nil, struct{}{}, nil
 		})
 	}
-	srv := httptest.NewServer(newMux(s, cfg, logger))
+	srv := httptest.NewServer(newMux(s.Server, cfg, logger))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer(sign(map[string]any{}))}}, nil)
 	if err != nil {

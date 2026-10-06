@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func closedAddress(t *testing.T) string {
 }
 
 func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
-	clients, err := NewClients([]config.Target{{Name: "a", Address: closedAddress(t), Namespace: "default"}}, "test", "0")
+	clients, err := NewClients([]config.Target{{Name: "a", Address: closedAddress(t), Namespace: "default"}}, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestNewClientsAPIKeyFromEnv(t *testing.T) {
 	for _, value := range []string{"", "  \n"} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
 			t.Setenv("OPERATOR_MCP_TEST_API_KEY", value)
-			_, err := NewClients(targets, "test", "0")
+			_, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
 			if want := "targets[0]: api_key: environment variable OPERATOR_MCP_TEST_API_KEY is unset or empty"; err == nil || !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to contain %q", err, want)
 			}
@@ -80,7 +81,7 @@ func TestNewClientsAPIKeyFromEnv(t *testing.T) {
 	}
 
 	t.Setenv("OPERATOR_MCP_TEST_API_KEY", "key")
-	if _, err := NewClients(targets, "test", "0"); err != nil {
+	if _, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler)); err != nil {
 		t.Error(err)
 	}
 
@@ -128,7 +129,7 @@ func TestAPIKeyCredential(t *testing.T) {
 }
 
 func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
-	_, err := NewClients([]config.Target{{Name: "a", Address: "%zz.example:7233", Namespace: "default"}}, "test", "0")
+	_, err := NewClients([]config.Target{{Name: "a", Address: "%zz.example:7233", Namespace: "default"}}, "test", "0", slog.New(slog.DiscardHandler))
 	if want := "targets[0]: address:"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v, want it to contain %q", err, want)
 	}
@@ -230,7 +231,7 @@ func serve(t *testing.T, svc workflowservice.WorkflowServiceServer) string {
 
 func newClient(t *testing.T, target config.Target) client.Client {
 	t.Helper()
-	clients, err := NewClients([]config.Target{target}, "operator-mcp", "1.2.3")
+	clients, err := NewClients([]config.Target{target}, "operator-mcp", "1.2.3", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +293,7 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 	c, err := lazyClient(target, "test", "0", func(_ context.Context, caller *identity.Caller, target *config.Target) (string, error) {
 		calls <- seen{caller, target}
 		return "", errors.New("no credential")
-	})
+	}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

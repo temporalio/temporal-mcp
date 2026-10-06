@@ -57,7 +57,7 @@ func TestSearchWorkflowsPageTokenSize(t *testing.T) {
 				t.Fatal(err)
 			}
 			ctx := temporal.WithTool(context.WithValue(t.Context(), targetsKey{}, []string{"a"}), "search_workflows", []string{workflowservice.WorkflowService_ListWorkflowExecutions_FullMethodName}, []string{"a"})
-			search := searchWorkflows(cfg, clients)
+			search := searchWorkflows(cfg, clients, &searchAttributeNames{})
 			_, env, err := search(ctx, nil, searchWorkflowsInput{Target: "a", PageSize: 25})
 			if err != nil {
 				t.Fatal(err)

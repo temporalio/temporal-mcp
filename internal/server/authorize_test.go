@@ -25,8 +25,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/api/common/v1"
+	"go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -64,12 +67,18 @@ func TestAuthorization(t *testing.T) {
 	}
 	closed := ln.Addr().String()
 	ln.Close()
+	staging := listen(t)
+	gs := grpc.NewServer()
+	workflowservice.RegisterWorkflowServiceServer(gs, fakeWorkflowService{})
+	operatorservice.RegisterOperatorServiceServer(gs, fakeOperatorService{})
+	go gs.Serve(staging)
+	t.Cleanup(gs.Stop)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
-  - {name: payments-staging, description: x, address: %[1]q, namespace: b}
+  - {name: payments-staging, description: x, address: %[4]q, namespace: b}
   - {name: orders-prod, description: x, address: %[1]q, namespace: c}
 auth:
   resource: https://mcp.example.com/mcp
@@ -79,14 +88,16 @@ authorization:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
     dev: {tools: [list_available_targets, get_workflow, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
     orders: {tools: [get_workflow], targets: [orders-prod]}
+    search: {tools: [search_workflows], targets: [payments-staging]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Dev, profile: dev}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Orders, profile: orders}
+    - {claim_name: "https://acme.example/roles", claim_value: Temporal.Search, profile: search}
     - {claim_name: email, claim_value: alice@acme.example, issuer: %[2]q, profile: oncall}
     - {claim_name: scope, claim_value: temporal.orders, profile: orders}
     - {claim_name: scp, claim_value: temporal.orders, profile: orders}
-`, closed, idpA, idpB)
+`, closed, idpA, idpB, staging.Addr().String())
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +284,17 @@ authorization:
 		notFound(t, session, "list_search_attributes", map[string]any{"target": "payments-prod"})
 	})
 
+	t.Run("unknown field", func(t *testing.T) {
+		for role, hint := range map[string]bool{"Temporal.Dev": true, "Temporal.Search": false} {
+			session := connectAs(t, signB(map[string]any{"https://acme.example/roles": []any{role}}))
+			res, _ := call(t, session, "search_workflows", map[string]any{"target": "payments-staging", "fields": []any{"customerId"}})
+			got := errorContent(t, res)
+			if msg, _ := got["message"].(string); got["code"] != "invalid_argument" || !strings.Contains(msg, `"customerId" (did you mean CustomerId?)`) || strings.Contains(msg, "list_search_attributes") != hint {
+				t.Errorf("%s: error = %#v, want invalid_argument suggesting CustomerId, pointing to list_search_attributes: %v", role, got, hint)
+			}
+		}
+	})
+
 	t.Run("tool the caller lacks", func(t *testing.T) {
 		session := connectAs(t, tests[1].token)
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging"})
@@ -287,6 +309,14 @@ authorization:
 			t.Errorf("tools/list with an invalid cursor: err = %v, want invalid params", err)
 		}
 	})
+}
+
+type fakeOperatorService struct {
+	operatorservice.UnimplementedOperatorServiceServer
+}
+
+func (fakeOperatorService) ListSearchAttributes(context.Context, *operatorservice.ListSearchAttributesRequest) (*operatorservice.ListSearchAttributesResponse, error) {
+	return &operatorservice.ListSearchAttributesResponse{CustomAttributes: map[string]enums.IndexedValueType{"CustomerId": enums.INDEXED_VALUE_TYPE_KEYWORD}}, nil
 }
 
 func TestNoAuthAllowsEveryTool(t *testing.T) {

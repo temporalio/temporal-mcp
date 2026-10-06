@@ -73,6 +73,11 @@ func toolTargets(ctx context.Context) []string {
 	return targets
 }
 
+// mayUse reports whether the caller of req may use tool on the target with the given name.
+func mayUse(cfg *config.Config, req mcp.Request, tool, target string) bool {
+	return cfg.Auth == nil || slices.Contains(grants(cfg.Authorization, req)[tool], target)
+}
+
 // grants returns, for each tool, the targets the caller of req may use it on:
 // those of every profile that gives it the tool through a rule its token matches.
 func grants(a *config.Authorization, req mcp.Request) map[string][]string {

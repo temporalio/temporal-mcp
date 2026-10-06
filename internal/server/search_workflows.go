@@ -11,12 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/grpc"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -27,7 +31,7 @@ const maxContinuation = 4096
 
 type searchWorkflowsInput struct {
 	Target       string   `json:"target" jsonschema:"the name or an alias of a target"`
-	Query        string   `json:"query" jsonschema:"a Visibility query, such as WorkflowType = 'OrderWorkflow' AND ExecutionStatus = 'Running'; empty for every run"`
+	Query        string   `json:"query,omitempty" jsonschema:"a Visibility query, such as WorkflowType = 'OrderWorkflow' AND ExecutionStatus = 'Running'; omit it for every run"`
 	Fields       []string `json:"fields,omitempty" jsonschema:"the search attributes to return besides workflow_id and run_id, such as ExecutionStatus or CustomerId; ExecutionDuration is in nanoseconds; WorkflowType, ExecutionStatus, StartTime and CloseTime if omitted"`
 	PageSize     int      `json:"page_size,omitempty" jsonschema:"the most runs to return"`
 	Continuation string   `json:"continuation,omitempty" jsonschema:"the continuation from the next_call of the previous page"`
@@ -100,8 +104,8 @@ func searchWorkflowsInputSchema() *jsonschema.Schema {
 	return schema
 }
 
-func searchWorkflows(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[searchWorkflowsInput, envelope[workflowSearch]] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in searchWorkflowsInput) (*mcp.CallToolResult, envelope[workflowSearch], error) {
+func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames) mcp.ToolHandlerFor[searchWorkflowsInput, envelope[workflowSearch]] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in searchWorkflowsInput) (*mcp.CallToolResult, envelope[workflowSearch], error) {
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, envelope[workflowSearch]{}, err
@@ -120,6 +124,9 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients) mcp.ToolHand
 			if pageToken, err = decodeContinuation(in.Continuation, t.Name, in.Query); err != nil {
 				return nil, envelope[workflowSearch]{}, err
 			}
+		}
+		if err := checkFields(ctx, req, cfg, clients, names, t, fields); err != nil {
+			return nil, envelope[workflowSearch]{}, err
 		}
 		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 			return clients.Client(t.Name).WorkflowService().ListWorkflowExecutions(ctx, &workflowservice.ListWorkflowExecutionsRequest{
@@ -154,6 +161,48 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients) mcp.ToolHand
 		}
 		return nil, out, nil
 	}
+}
+
+// checkFields returns an invalid_argument error if a name in fields is not a search attribute on t. Core attributes,
+// names already listed for t and, on Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer
+// than this server's sadefs) pass without a call; otherwise t's search attributes are fetched once, and if that fails,
+// fields pass unchecked.
+func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
+	cloud := clients.CloudOps(t.Name) != nil
+	unchecked := slices.DeleteFunc(slices.Clone(fields), func(f string) bool {
+		_, core := coreSearchAttributes[f]
+		return core || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
+	})
+	if len(unchecked) == 0 {
+		return nil
+	}
+	custom, system, err := fetchSearchAttributes(ctx, clients, names, t)
+	if err != nil {
+		return nil
+	}
+	known := slices.Concat(slices.Collect(maps.Keys(custom)), slices.Collect(maps.Keys(system)))
+	slices.Sort(known)
+	var unknown []string
+	for _, f := range unchecked {
+		if _, found := slices.BinarySearch(known, f); found {
+			continue
+		}
+		u := strconv.Quote(f)
+		if i := slices.IndexFunc(known, func(k string) bool { return strings.EqualFold(k, f) }); i >= 0 {
+			u += fmt.Sprintf(" (did you mean %s?)", known[i])
+		}
+		unknown = append(unknown, u)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("these fields are not search attributes on target %s: %s", t.Name, strings.Join(unknown, ", "))
+	if mayUse(cfg, req, "list_search_attributes", t.Name) {
+		msg += "; call list_search_attributes for the target's search attributes"
+	} else {
+		msg += "; fix or remove them"
+	}
+	return &toolError{Code: "invalid_argument", Message: msg}
 }
 
 func workflowRow(info *workflowpb.WorkflowExecutionInfo, fields []string) (map[string]any, error) {

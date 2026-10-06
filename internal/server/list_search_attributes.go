@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -43,34 +44,42 @@ var cloudSystemSearchAttributes = func() map[string]enumspb.IndexedValueType {
 	return attrs
 }()
 
-func listSearchAttributes(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[listSearchAttributesInput, envelope[searchAttributeList]] {
+// searchAttributeNames keeps the names of each target's search attributes from its last listing.
+type searchAttributeNames struct {
+	mu       sync.Mutex
+	byTarget map[string]map[string]bool
+}
+
+func (n *searchAttributeNames) has(target, name string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.byTarget[target][name]
+}
+
+func (n *searchAttributeNames) store(target string, attrs ...map[string]enumspb.IndexedValueType) {
+	names := map[string]bool{}
+	for _, a := range attrs {
+		for name := range a {
+			names[name] = true
+		}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.byTarget == nil {
+		n.byTarget = map[string]map[string]bool{}
+	}
+	n.byTarget[target] = names
+}
+
+func listSearchAttributes(cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames) mcp.ToolHandlerFor[listSearchAttributesInput, envelope[searchAttributeList]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in listSearchAttributesInput) (*mcp.CallToolResult, envelope[searchAttributeList], error) {
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, envelope[searchAttributeList]{}, err
 		}
-		var custom, system map[string]enumspb.IndexedValueType
-		switch ops := clients.CloudOps(t.Name); {
-		case ops != nil:
-			resp, err := callServer(ctx, t, cloudOpsAPI, func(ctx context.Context, opts ...grpc.CallOption) (*cloudservice.GetNamespaceResponse, error) {
-				return ops.GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: t.Namespace}, opts...)
-			})
-			if err != nil {
-				return nil, envelope[searchAttributeList]{}, err
-			}
-			custom, system = map[string]enumspb.IndexedValueType{}, cloudSystemSearchAttributes
-			for name, typ := range resp.GetNamespace().GetSpec().GetSearchAttributes() {
-				// The Cloud Ops API's type names are the IndexedValueType names with another prefix.
-				custom[name] = enumspb.IndexedValueType(enumspb.IndexedValueType_value["INDEXED_VALUE_TYPE_"+strings.TrimPrefix(typ.String(), "SEARCH_ATTRIBUTE_TYPE_")])
-			}
-		default:
-			resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*operatorservice.ListSearchAttributesResponse, error) {
-				return clients.Client(t.Name).OperatorService().ListSearchAttributes(ctx, &operatorservice.ListSearchAttributesRequest{Namespace: t.Namespace}, opts...)
-			})
-			if err != nil {
-				return nil, envelope[searchAttributeList]{}, err
-			}
-			custom, system = resp.GetCustomAttributes(), resp.GetSystemAttributes()
+		custom, system, err := fetchSearchAttributes(ctx, clients, names, t)
+		if err != nil {
+			return nil, envelope[searchAttributeList]{}, err
 		}
 		list := searchAttributeList{SearchAttributes: []searchAttributeInfo{}}
 		for category, attrs := range map[string]map[string]enumspb.IndexedValueType{"custom": custom, "system": system} {
@@ -83,4 +92,32 @@ func listSearchAttributes(cfg *config.Config, clients *temporal.Clients) mcp.Too
 		})
 		return nil, envelope[searchAttributeList]{Target: &t.Name, Result: list, Complete: true}, nil
 	}
+}
+
+// fetchSearchAttributes returns t's custom and system search attributes, and stores their names in names.
+func fetchSearchAttributes(ctx context.Context, clients *temporal.Clients, names *searchAttributeNames, t *config.Target) (custom, system map[string]enumspb.IndexedValueType, err error) {
+	switch ops := clients.CloudOps(t.Name); {
+	case ops != nil:
+		resp, err := callServer(ctx, t, cloudOpsAPI, func(ctx context.Context, opts ...grpc.CallOption) (*cloudservice.GetNamespaceResponse, error) {
+			return ops.GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: t.Namespace}, opts...)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		custom, system = map[string]enumspb.IndexedValueType{}, cloudSystemSearchAttributes
+		for name, typ := range resp.GetNamespace().GetSpec().GetSearchAttributes() {
+			// The Cloud Ops API's type names are the IndexedValueType names with another prefix.
+			custom[name] = enumspb.IndexedValueType(enumspb.IndexedValueType_value["INDEXED_VALUE_TYPE_"+strings.TrimPrefix(typ.String(), "SEARCH_ATTRIBUTE_TYPE_")])
+		}
+	default:
+		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*operatorservice.ListSearchAttributesResponse, error) {
+			return clients.Client(t.Name).OperatorService().ListSearchAttributes(ctx, &operatorservice.ListSearchAttributesRequest{Namespace: t.Namespace}, opts...)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		custom, system = resp.GetCustomAttributes(), resp.GetSystemAttributes()
+	}
+	names.store(t.Name, custom, system)
+	return custom, system, nil
 }

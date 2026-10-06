@@ -163,10 +163,34 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := temporal.WithTool(context.WithValue(t.Context(), targetsKey{}, []string{"cloud"}), "list_search_attributes", []string{cloudservice.CloudService_GetNamespace_FullMethodName}, []string{"cloud"})
-		_, _, err = listSearchAttributes(cfg, unreachable)(ctx, nil, listSearchAttributesInput{Target: "cloud"})
+		_, _, err = listSearchAttributes(cfg, unreachable, &searchAttributeNames{})(ctx, nil, listSearchAttributesInput{Target: "cloud"})
 		var got *toolError
 		if !errors.As(err, &got) || got.Code != "temporal_unavailable" || !got.Retryable || got.Message != "could not connect to the Temporal Cloud Ops API at saas-api.tmprl.cloud" {
 			t.Errorf("error = %v, want a retryable temporal_unavailable error naming the Cloud Ops API", err)
+		}
+	})
+	t.Run("search_workflows fields", func(t *testing.T) {
+		fake.mu.Lock()
+		fake.calls, fake.err = nil, nil
+		fake.mu.Unlock()
+		records.Reset()
+		// The call is rejected before the search, which would otherwise go to the target's Temporal Cloud address.
+		res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "search_workflows", Arguments: map[string]any{"target": "cloud", "fields": []any{"OrderId", "TemporalNewBuiltIn", "orderId"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `these fields are not search attributes on target cloud: "orderId" (did you mean OrderId?); call list_search_attributes for the target's search attributes`
+		if got := errorContent(t, res); got["code"] != "invalid_argument" || got["message"] != want {
+			t.Errorf("error = %#v, want invalid_argument %q", got, want)
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(records.Bytes(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if len(fake.calls) != 1 || !strings.HasPrefix(fake.calls[0], "orders.acct1 Bearer ") || rec["temporal_calls"] != 1.0 {
+			t.Errorf("Cloud Ops API calls = %q, temporal_calls = %v; want one GetNamespace for orders.acct1 and no search", fake.calls, rec["temporal_calls"])
 		}
 	})
 }

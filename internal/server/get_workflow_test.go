@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"os"
@@ -21,6 +23,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
+	"go.temporal.io/api/operatorservice/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/activity"
@@ -369,7 +372,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		"  - {name: misconfigured, description: x, address: %q, namespace: nosuchns}\n", dev.FrontendHostPort(), unreachable, dev.FrontendHostPort())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	session := connect(t, configPath, t.Output())
+	var records bytes.Buffer
+	session := connect(t, configPath, io.MultiWriter(t.Output(), &records))
 	validateOutput := outputValidator(t, session)
 
 	t.Run("check_connection", func(t *testing.T) {
@@ -831,7 +835,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "search_workflows", Arguments: map[string]any{
 				"target": "dev",
 				"query":  "WorkflowId = 'order-typed'",
-				"fields": []any{"SaInt", "SaDouble", "SaBool", "SaKeyword", "SaText", "SaDatetime", "SaKeywordList", "NoSuchAttribute"},
+				"fields": []any{"SaInt", "SaDouble", "SaBool", "SaKeyword", "SaText", "SaDatetime", "SaKeywordList"},
 			}})
 			if err != nil || res.IsError {
 				t.Fatalf("search_workflows: %v %+v", err, res)
@@ -855,14 +859,13 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[string]any{
-				"SaInt":           json.Number(fmt.Sprint(saInt)),
-				"SaDouble":        json.Number("1.5"),
-				"SaBool":          true,
-				"SaKeyword":       "k",
-				"SaText":          "some text",
-				"SaDatetime":      "2026-03-04T05:06:07Z",
-				"SaKeywordList":   []any{"a", "b"},
-				"NoSuchAttribute": nil,
+				"SaInt":         json.Number(fmt.Sprint(saInt)),
+				"SaDouble":      json.Number("1.5"),
+				"SaBool":        true,
+				"SaKeyword":     "k",
+				"SaText":        "some text",
+				"SaDatetime":    "2026-03-04T05:06:07Z",
+				"SaKeywordList": []any{"a", "b"},
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("search attributes = %#v, want %#v", got, want)
@@ -919,6 +922,12 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 		})
 
+		t.Run("next_call when query is omitted", func(t *testing.T) {
+			env := callTool(t, "search_workflows", map[string]any{"target": "local", "page_size": 2})
+			next := env["next_call"].(map[string]any)
+			callTool(t, next["name"].(string), next["arguments"].(map[string]any))
+		})
+
 		first := callTool(t, "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "page_size": 2})
 		continuation := first["next_call"].(map[string]any)["arguments"].(map[string]any)["continuation"]
 		errorTests := []struct {
@@ -933,6 +942,8 @@ func TestToolsOnDevServer(t *testing.T) {
 			{"garbage continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": "not-a-continuation"}, "continuation_invalid", "continuation is not one"},
 			{"oversized continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": strings.Repeat("A", 4097)}, "continuation_invalid", "continuation is not one"},
 			{"get_workflow field name", "search_workflows", map[string]any{"target": "dev", "query": "", "fields": []any{"status"}}, "invalid_argument", `"status" is not a search attribute; use ExecutionStatus`},
+			{"field the target lacks", "search_workflows", map[string]any{"target": "dev", "fields": []any{"NoSuchAttribute", "TemporalNoSuchAttribute", "saInt"}}, "invalid_argument",
+				`these fields are not search attributes on target dev: "NoSuchAttribute", "TemporalNoSuchAttribute", "saInt" (did you mean SaInt?); call list_search_attributes for the target's search attributes`},
 			{"unknown attribute in the query", "search_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
 			{"unknown attribute in a count", "count_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
 		}
@@ -961,6 +972,15 @@ func TestToolsOnDevServer(t *testing.T) {
 		if result["count"] != 5.0 || !reflect.DeepEqual(groups, want) {
 			t.Errorf("result = %#v, want count 5 and groups %v", result, want)
 		}
+		all := callTool(t, "count_workflows", map[string]any{"target": "local"})["result"].(map[string]any)
+		byStatus := callTool(t, "count_workflows", map[string]any{"target": "local", "group_by": "ExecutionStatus"})["result"].(map[string]any)
+		sum := 0.0
+		for _, g := range byStatus["groups"].([]any) {
+			sum += g.(map[string]any)["count"].(float64)
+		}
+		if all["count"].(float64) < float64(len(pages)) || byStatus["count"] != all["count"] || sum != all["count"] {
+			t.Errorf("without a query: count = %v, grouped count = %v with groups summing to %v; want every run, in both", all["count"], byStatus["count"], sum)
+		}
 	})
 
 	t.Run("list_search_attributes", func(t *testing.T) {
@@ -982,6 +1002,68 @@ func TestToolsOnDevServer(t *testing.T) {
 		wantCustom := map[string]any{"OrderId": "Keyword", "SaInt": "Int", "SaDouble": "Double", "SaBool": "Bool", "SaKeyword": "Keyword", "SaText": "Text", "SaDatetime": "Datetime", "SaKeywordList": "KeywordList"}
 		if !reflect.DeepEqual(custom, wantCustom) {
 			t.Errorf("custom attributes = %v, want %v", custom, wantCustom)
+		}
+	})
+
+	t.Run("fields checked against the target's search attributes", func(t *testing.T) {
+		search := func(t *testing.T, target string, fields ...any) (*mcp.CallToolResult, float64) {
+			t.Helper()
+			records.Reset()
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "search_workflows", Arguments: map[string]any{"target": target, "fields": fields, "page_size": 1}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(records.Bytes(), &rec); err != nil {
+				t.Fatal(err)
+			}
+			return res, rec["temporal_calls"].(float64)
+		}
+		// misconfigured's search attributes cannot be listed, so a core attribute passes without trying, and any other
+		// name runs the search unchecked after the failed listing.
+		if _, calls := search(t, "misconfigured", "ExecutionStatus"); calls != 1 {
+			t.Errorf("core attribute: temporal_calls = %v, want 1, the search alone", calls)
+		}
+		if _, calls := search(t, "misconfigured", "SaInt"); calls != 2 {
+			t.Errorf("attribute on a target that cannot be listed: temporal_calls = %v, want 2, the failed list and the search", calls)
+		}
+		addSearchAttribute := func(t *testing.T, name string) {
+			t.Helper()
+			if _, err := c.OperatorService().AddSearchAttributes(ctx, &operatorservice.AddSearchAttributesRequest{
+				Namespace:        "default",
+				SearchAttributes: map[string]enumspb.IndexedValueType{name: enumspb.INDEXED_VALUE_TYPE_KEYWORD},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				listed, err := c.OperatorService().ListSearchAttributes(ctx, &operatorservice.ListSearchAttributesRequest{Namespace: "default"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := listed.GetCustomAttributes()[name]; ok {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatalf("timed out waiting for %s to be listed", name)
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+		}
+		if res, _ := search(t, "dev", "SaAdded"); !res.IsError || errorContent(t, res)["code"] != "invalid_argument" {
+			t.Errorf("attribute not added yet: isError = %v, want invalid_argument", res.IsError)
+		}
+		addSearchAttribute(t, "SaAdded")
+		if res, calls := search(t, "dev", "SaAdded"); res.IsError || calls != 2 {
+			t.Errorf("attribute added since the list: isError = %v, temporal_calls = %v; want the list and the search", res.IsError, calls)
+		}
+		if res, calls := search(t, "dev", "SaAdded"); res.IsError || calls != 1 {
+			t.Errorf("attribute added since the list, again: isError = %v, temporal_calls = %v; want a search alone", res.IsError, calls)
+		}
+		addSearchAttribute(t, "SaListed")
+		callTool(t, "list_search_attributes", map[string]any{"target": "dev"})
+		if res, calls := search(t, "dev", "SaListed"); res.IsError || calls != 1 {
+			t.Errorf("attribute added and then listed: isError = %v, temporal_calls = %v; want a search alone", res.IsError, calls)
 		}
 	})
 }

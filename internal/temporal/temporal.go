@@ -1,5 +1,7 @@
-// Package temporal provides one Temporal client per target and limits the calls each tool
-// can make through it. Each call's API key comes from a credential that sees the caller.
+// Package temporal provides one Temporal client per target, plus a Cloud Ops API
+// client for each Temporal Cloud target with an API key, and limits the calls each
+// tool can make through them. Each call's API key comes from a credential that sees
+// the caller.
 package temporal
 
 import (
@@ -7,11 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
 
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	"go.temporal.io/cloud-sdk/cloudclient"
 	"go.temporal.io/sdk/client"
 	tlog "go.temporal.io/sdk/log"
 	"google.golang.org/grpc"
@@ -26,15 +31,24 @@ import (
 // Clients holds a Temporal client for each target.
 type Clients struct {
 	byName map[string]client.Client
+	cloud  map[string]cloudservice.CloudServiceClient
+}
+
+// An Option changes how NewClients connects to the Cloud Ops API.
+type Option func(*cloudclient.Options)
+
+// WithPlaintextCloudOpsAPI makes the clients call the Temporal Cloud Ops API at address, in plaintext, rather than at its public endpoint. It is for tests.
+func WithPlaintextCloudOpsAPI(address string) Option {
+	return func(o *cloudclient.Options) { o.HostPort, o.AllowInsecure = address, true }
 }
 
 // NewClients returns the clients for targets. Calls identify this server by
 // name and version in the gRPC user agent and the client-name and
 // client-version headers. The clients log to logger. It fails if an API key's
-// environment variable is unset or empty, or if a target's address cannot be
-// parsed.
-func NewClients(targets []config.Target, name, version string, logger *slog.Logger) (*Clients, error) {
-	c := &Clients{byName: map[string]client.Client{}}
+// environment variable is unset or empty, if a target's address cannot be
+// parsed, or if a Cloud Ops API client cannot be created.
+func NewClients(targets []config.Target, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
+	c := &Clients{byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
 	var errs []error
 	for i, t := range targets {
 		cred, err := apiKeyCredential(t.APIKey)
@@ -48,6 +62,14 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 			continue
 		}
 		c.byName[t.Name] = cl
+		if cred != nil && isCloud(t.Address) {
+			ops, err := cloudOpsClient(t, name, version, cred, opts)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("targets[%d]: %w", i, err))
+				continue
+			}
+			c.cloud[t.Name] = ops
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -97,6 +119,51 @@ func lazyClient(t config.Target, name, version string, cred credential, logger *
 // Client returns the client for the target with the given name.
 func (c *Clients) Client(name string) client.Client {
 	return c.byName[name]
+}
+
+// CloudOps returns the Temporal Cloud Ops API client for the target with the given name, or nil if the target is not on Temporal Cloud or has no API key.
+func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
+	return c.cloud[name]
+}
+
+// isCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
+func isCloud(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.HasSuffix(host, ".tmprl.cloud") || strings.HasSuffix(host, ".api.temporal.io")
+}
+
+// cloudOpsClient returns a client for the Cloud Ops API that calls it with t's API key and the same limits and identity as t's Temporal client.
+func cloudOpsClient(t config.Target, name, version string, cred credential, opts []Option) (cloudservice.CloudServiceClient, error) {
+	o := cloudclient.Options{
+		APIKeyReader: apiKeyReader(func(ctx context.Context) (string, error) {
+			return cred(ctx, identity.CallerFrom(ctx), &t)
+		}),
+		UserAgent: name + "/" + version,
+		// One Cloud Ops call per tool call, as for Temporal calls, so a rate limit or an unreachable API is reported as such.
+		DisableRetry: true,
+		GRPCDialOptions: []grpc.DialOption{
+			grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
+			grpc.WithChainUnaryInterceptor(identify(name, version)),
+		},
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	c, err := cloudclient.New(o)
+	if err != nil {
+		return nil, fmt.Errorf("creating the Cloud Ops API client: %w", err)
+	}
+	return c.CloudService(), nil
+}
+
+type apiKeyReader func(context.Context) (string, error)
+
+func (r apiKeyReader) GetAPIKey(ctx context.Context) (string, error) {
+	return r(ctx)
 }
 
 func readAPIKey(path string) (string, error) {

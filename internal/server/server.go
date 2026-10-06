@@ -16,7 +16,9 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/identity"
@@ -95,7 +97,27 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
-	}, getWorkflow(cfg, clients))}
+	}, getWorkflow(cfg, clients)), addTool(s, &mcp.Tool{
+		Name:        "search_workflows",
+		Description: "Search a target's workflow runs with a Visibility query and return a page of them. Each run has workflow_id, run_id and the search attributes asked for in fields, which uses the same names as query (see list_search_attributes); one the run lacks, or a name the target lacks, is null (HistoryLength, HistorySizeBytes, StateTransitionCount and ExecutionDuration are null until the run closes). For the next page, call next_call's tool with its arguments unchanged.",
+		Annotations: readOnlyAnnotations,
+		InputSchema: searchWorkflowsInputSchema(),
+	}, []string{
+		workflowservice.WorkflowService_ListWorkflowExecutions_FullMethodName,
+	}, searchWorkflows(cfg, clients)), addTool(s, &mcp.Tool{
+		Name:        "count_workflows",
+		Description: "Count a target's workflow runs that match a Visibility query, and with group_by, how many have each value of that search attribute; the Temporal server decides which attributes it can group by. Counts are approximate.",
+		Annotations: readOnlyAnnotations,
+	}, []string{
+		workflowservice.WorkflowService_CountWorkflowExecutions_FullMethodName,
+	}, countWorkflows(cfg, clients)), addTool(s, &mcp.Tool{
+		Name:        "list_search_attributes",
+		Description: "List the search attributes that a target's Visibility queries can use, with their types.",
+		Annotations: readOnlyAnnotations,
+	}, []string{
+		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,
+		cloudservice.CloudService_GetNamespace_FullMethodName,
+	}, listSearchAttributes(cfg, clients))}
 }
 
 // NewMux returns an HTTP handler that serves the MCP streamable HTTP transport

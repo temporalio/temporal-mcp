@@ -6,17 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -26,6 +29,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
+	"go.temporal.io/server/common/searchattribute/sadefs"
 
 	"github.com/temporalio/operator-mcp/internal/fixture"
 )
@@ -319,6 +323,36 @@ func TestToolsOnDevServer(t *testing.T) {
 	rejected := start("order-rejected", nil, rejectWithDetails)
 	if err := rejected.Get(ctx, nil); err == nil {
 		t.Fatal("order-rejected completed, want it to fail")
+	}
+
+	pages := []string{"page-1", "page-2", "page-3", "page-4", "page-5"}
+	for _, id := range pages {
+		run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+			ID:                    id,
+			TaskQueue:             fixture.TaskQueue,
+			TypedSearchAttributes: temporal.NewSearchAttributes(temporal.NewSearchAttributeKeyKeyword("OrderId").ValueSet(id)),
+		}, fixture.OrderWorkflow, fixture.OrderInput{OrderID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := run.Get(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const pagesQuery = "OrderId IN ('page-1', 'page-2', 'page-3', 'page-4', 'page-5') AND ExecutionStatus = 'Completed'"
+	for {
+		n, err := c.CountWorkflow(ctx, &workflowservice.CountWorkflowExecutionsRequest{Query: pagesQuery})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.GetCount() == int64(len(pages)) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for Visibility to show the page workflows")
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -734,6 +768,220 @@ func TestToolsOnDevServer(t *testing.T) {
 					t.Errorf("error = %#v, want code %s, retryable %v and a message starting %q", got, tt.code, tt.retryable, tt.messagePrefix)
 				}
 			})
+		}
+	})
+
+	callTool := func(t *testing.T, name string, args map[string]any) map[string]any {
+		t.Helper()
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.IsError {
+			t.Fatalf("%s returned an error: %s", name, res.Content[0].(*mcp.TextContent).Text)
+		}
+		validateOutput(t, name, res)
+		return res.StructuredContent.(map[string]any)
+	}
+	callToolError := func(t *testing.T, name string, args map[string]any) map[string]any {
+		t.Helper()
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return errorContent(t, res)
+	}
+
+	t.Run("search_workflows", func(t *testing.T) {
+		t.Run("pages through next_call", func(t *testing.T) {
+			name, args := "search_workflows", map[string]any{"target": "local", "query": pagesQuery, "fields": []any{"ExecutionStatus", "OrderId"}, "page_size": 2}
+			seen := map[string]bool{}
+			for calls := 1; ; calls++ {
+				env := callTool(t, name, args)
+				for _, w := range env["result"].(map[string]any)["workflows"].([]any) {
+					row := w.(map[string]any)
+					id := row["workflow_id"].(string)
+					want := map[string]any{"workflow_id": id, "run_id": row["run_id"], "ExecutionStatus": "Completed", "OrderId": id}
+					if seen[id] || row["run_id"] == "" || !reflect.DeepEqual(row, want) {
+						t.Errorf("row %#v: want %#v, once", row, want)
+					}
+					seen[id] = true
+				}
+				if env["complete"] == true {
+					if env["next_call"] != nil {
+						t.Errorf("next_call = %#v on the last page, want null", env["next_call"])
+					}
+					break
+				}
+				if calls == len(pages) {
+					t.Fatalf("still not complete after %d pages of 2", calls)
+				}
+				next := env["next_call"].(map[string]any)
+				name, args = next["name"].(string), next["arguments"].(map[string]any)
+				if args["target"] != "dev" {
+					t.Errorf("next_call target = %v, want the target's name, dev", args["target"])
+				}
+			}
+			if len(seen) != len(pages) {
+				t.Errorf("workflows = %v, want %v", seen, pages)
+			}
+		})
+
+		t.Run("typed search attributes", func(t *testing.T) {
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "search_workflows", Arguments: map[string]any{
+				"target": "dev",
+				"query":  "WorkflowId = 'order-typed'",
+				"fields": []any{"SaInt", "SaDouble", "SaBool", "SaKeyword", "SaText", "SaDatetime", "SaKeywordList", "NoSuchAttribute"},
+			}})
+			if err != nil || res.IsError {
+				t.Fatalf("search_workflows: %v %+v", err, res)
+			}
+			dec := json.NewDecoder(strings.NewReader(res.Content[0].(*mcp.TextContent).Text))
+			dec.UseNumber()
+			var env map[string]any
+			if err := dec.Decode(&env); err != nil {
+				t.Fatal(err)
+			}
+			got := env["result"].(map[string]any)["workflows"].([]any)[0].(map[string]any)
+			delete(got, "workflow_id")
+			delete(got, "run_id")
+			// SQLite Visibility rounds SaInt's 9007199254740993 to 2^53, so expect what Visibility returns; get_workflow's test covers full precision.
+			listed, err := c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{Query: "WorkflowId = 'order-typed'"})
+			if err != nil || len(listed.GetExecutions()) != 1 {
+				t.Fatalf("ListWorkflow: %v, %d executions", err, len(listed.GetExecutions()))
+			}
+			var saInt int64
+			if err := converter.GetDefaultDataConverter().FromPayload(listed.GetExecutions()[0].GetSearchAttributes().GetIndexedFields()["SaInt"], &saInt); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{
+				"SaInt":           json.Number(fmt.Sprint(saInt)),
+				"SaDouble":        json.Number("1.5"),
+				"SaBool":          true,
+				"SaKeyword":       "k",
+				"SaText":          "some text",
+				"SaDatetime":      "2026-03-04T05:06:07Z",
+				"SaKeywordList":   []any{"a", "b"},
+				"NoSuchAttribute": nil,
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("search attributes = %#v, want %#v", got, want)
+			}
+		})
+
+		t.Run("every core search attribute", func(t *testing.T) {
+			// Temporal keeps these out of a run's search attribute map, so search_workflows must read each from the run or it comes back null.
+			core := sadefs.System()
+			env := callTool(t, "search_workflows", map[string]any{"target": "dev", "query": "WorkflowId IN ('order-completed', 'order-child')", "fields": slices.Collect(maps.Keys(core))})
+			rows := map[string]map[string]any{}
+			for _, w := range env["result"].(map[string]any)["workflows"].([]any) {
+				rows[w.(map[string]any)["workflow_id"].(string)] = w.(map[string]any)
+			}
+			for name, typ := range core {
+				set := false
+				for id, row := range rows {
+					if row[name] == nil {
+						continue
+					}
+					set = true
+					var ok bool
+					switch typ {
+					case enumspb.INDEXED_VALUE_TYPE_KEYWORD:
+						_, ok = row[name].(string)
+					case enumspb.INDEXED_VALUE_TYPE_INT:
+						_, ok = row[name].(float64)
+					case enumspb.INDEXED_VALUE_TYPE_DATETIME:
+						s, _ := row[name].(string)
+						_, err := time.Parse(time.RFC3339Nano, s)
+						ok = err == nil
+					}
+					if !ok {
+						t.Errorf("%s of %s = %#v, want a %s", name, id, row[name], typ)
+					}
+				}
+				if !set {
+					t.Errorf("%s is null on every run, want it read from the run", name)
+				}
+			}
+			want := map[string]map[string]any{
+				"order-completed": {"WorkflowId": "order-completed", "RunId": completed.GetRunID(), "WorkflowType": "OrderWorkflow", "ExecutionStatus": "Completed", "TaskQueue": fixture.TaskQueue,
+					"ParentWorkflowId": nil, "ParentRunId": nil, "RootWorkflowId": "order-completed", "RootRunId": completed.GetRunID()},
+				"order-child": {"WorkflowId": "order-child", "RunId": child.GetRunId(), "WorkflowType": "waitForSignal", "ExecutionStatus": "Running", "TaskQueue": fixture.TaskQueue,
+					"ParentWorkflowId": "order-parent", "ParentRunId": parent.GetRunID(), "RootWorkflowId": "order-parent", "RootRunId": parent.GetRunID(),
+					"CloseTime": nil, "ExecutionDuration": nil, "HistoryLength": nil, "HistorySizeBytes": nil, "StateTransitionCount": nil},
+			}
+			for id, attrs := range want {
+				for name, v := range attrs {
+					if got := rows[id][name]; got != v {
+						t.Errorf("%s of %s = %#v, want %#v", name, id, got, v)
+					}
+				}
+			}
+		})
+
+		first := callTool(t, "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "page_size": 2})
+		continuation := first["next_call"].(map[string]any)["arguments"].(map[string]any)["continuation"]
+		errorTests := []struct {
+			name          string
+			tool          string
+			args          map[string]any
+			code          string
+			messagePrefix string
+		}{
+			{"continuation for another query", "search_workflows", map[string]any{"target": "dev", "query": "WorkflowType = 'OrderWorkflow'", "continuation": continuation}, "continuation_invalid", "continuation is not one"},
+			{"continuation for another target", "search_workflows", map[string]any{"target": "misconfigured", "query": pagesQuery, "continuation": continuation}, "continuation_invalid", "continuation is not one"},
+			{"garbage continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": "not-a-continuation"}, "continuation_invalid", "continuation is not one"},
+			{"oversized continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": strings.Repeat("A", 4097)}, "continuation_invalid", "continuation is not one"},
+			{"get_workflow field name", "search_workflows", map[string]any{"target": "dev", "query": "", "fields": []any{"status"}}, "invalid_argument", `"status" is not a search attribute; use ExecutionStatus`},
+			{"unknown attribute in the query", "search_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
+			{"unknown attribute in a count", "count_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
+		}
+		for _, tt := range errorTests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := callToolError(t, tt.tool, tt.args)
+				if msg, _ := got["message"].(string); got["code"] != tt.code || got["retryable"] != false || !strings.HasPrefix(msg, tt.messagePrefix) || msg == "" {
+					t.Errorf("error = %#v, want code %s and a message starting %q", got, tt.code, tt.messagePrefix)
+				}
+			})
+		}
+	})
+
+	t.Run("count_workflows", func(t *testing.T) {
+		env := callTool(t, "count_workflows", map[string]any{"target": "dev", "query": pagesQuery})
+		if want := map[string]any{"count": float64(len(pages)), "groups": []any{}}; !reflect.DeepEqual(env["result"], want) || env["complete"] != true {
+			t.Errorf("envelope = %#v, want result %#v and complete true", env, want)
+		}
+		env = callTool(t, "count_workflows", map[string]any{"target": "dev", "query": "WorkflowId IN ('order-88231', 'order-completed', 'order-running', 'order-terminated', 'order-canceled')", "group_by": "ExecutionStatus"})
+		result := env["result"].(map[string]any)
+		groups := map[any]any{}
+		for _, g := range result["groups"].([]any) {
+			groups[g.(map[string]any)["value"]] = g.(map[string]any)["count"]
+		}
+		want := map[any]any{"Failed": 1.0, "Completed": 1.0, "Running": 1.0, "Terminated": 1.0, "Canceled": 1.0}
+		if result["count"] != 5.0 || !reflect.DeepEqual(groups, want) {
+			t.Errorf("result = %#v, want count 5 and groups %v", result, want)
+		}
+	})
+
+	t.Run("list_search_attributes", func(t *testing.T) {
+		env := callTool(t, "list_search_attributes", map[string]any{"target": "dev"})
+		if env["target"] != "dev" || env["complete"] != true {
+			t.Errorf("envelope = %#v, want target dev and complete true", env)
+		}
+		custom := map[string]any{}
+		for _, a := range env["result"].(map[string]any)["search_attributes"].([]any) {
+			attr := a.(map[string]any)
+			switch attr["category"] {
+			case "custom":
+				custom[attr["name"].(string)] = attr["type"]
+			case "system":
+			default:
+				t.Errorf("attribute %#v has an unknown category", attr)
+			}
+		}
+		wantCustom := map[string]any{"OrderId": "Keyword", "SaInt": "Int", "SaDouble": "Double", "SaBool": "Bool", "SaKeyword": "Keyword", "SaText": "Text", "SaDatetime": "Datetime", "SaKeywordList": "KeywordList"}
+		if !reflect.DeepEqual(custom, wantCustom) {
+			t.Errorf("custom attributes = %v, want %v", custom, wantCustom)
 		}
 	})
 }

@@ -170,7 +170,7 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &peer.Peer{Addr: &net.TCPAddr{IP: net.IPv4(10, 1, 2, 3), Port: 7233}}
-			got := rpcErrorMessage(status.Error(codes.Unavailable, tt.message), &config.Target{Address: tt.address}, p)
+			got := rpcErrorMessage(status.Error(codes.Unavailable, tt.message), &config.Target{Address: tt.address}, p, temporalServer)
 			if got != tt.want {
 				t.Errorf("message = %q, want %q", got, tt.want)
 			}

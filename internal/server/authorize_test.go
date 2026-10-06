@@ -77,7 +77,7 @@ auth:
 authorization:
   profiles:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
-    dev: {tools: [list_available_targets, get_workflow], targets: [payments-staging]}
+    dev: {tools: [list_available_targets, get_workflow, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
     orders: {tools: [get_workflow], targets: [orders-prod]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
@@ -159,19 +159,19 @@ authorization:
 		{
 			name:    "two profiles",
 			token:   signA(map[string]any{"cognito:groups": []any{"other", "temporal-oncall"}, "https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"check_connection", "get_workflow", "list_available_targets"},
+			tools:   []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-prod", "payments-staging"},
 		},
 		{
 			name:    "one profile",
 			token:   signB(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"get_workflow", "list_available_targets"},
+			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "target granted only through another tool",
 			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev", "Temporal.Orders"}}),
-			tools:   []string{"get_workflow", "list_available_targets"},
+			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging", "orders-prod"},
 		},
 		{
@@ -268,6 +268,9 @@ authorization:
 		notFound(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		notFound(t, session, "get_workflow", map[string]any{"target": "payments-prod", "workflow_id": "wf"})
 		notFound(t, session, "get_workflow", map[string]any{"target": "orders-prod", "workflow_id": "wf"})
+		notFound(t, session, "search_workflows", map[string]any{"target": "payments-prod", "query": ""})
+		notFound(t, session, "count_workflows", map[string]any{"target": "payments-prod", "query": ""})
+		notFound(t, session, "list_search_attributes", map[string]any{"target": "payments-prod"})
 	})
 
 	t.Run("tool the caller lacks", func(t *testing.T) {
@@ -296,7 +299,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "get_workflow", "list_available_targets"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }

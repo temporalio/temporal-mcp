@@ -20,13 +20,14 @@ func TestTemporalError(t *testing.T) {
 		{codes.NotFound, "not_found", false},
 		{codes.InvalidArgument, "invalid_argument", false},
 		{codes.DeadlineExceeded, "timeout", true},
+		{codes.ResourceExhausted, "rate_limited", true},
 		{codes.Unavailable, "temporal_unavailable", true},
 		{codes.PermissionDenied, "temporal_unavailable", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.code.String(), func(t *testing.T) {
 			var got *toolError
-			if !errors.As(temporalError(status.Error(tt.code, "x"), &config.Target{Address: "a:7233"}, &peer.Peer{}), &got) {
+			if !errors.As(temporalError(status.Error(tt.code, "x"), &config.Target{Address: "a:7233"}, &peer.Peer{}, temporalServer), &got) {
 				t.Fatal("not a tool error")
 			}
 			if got.Code != tt.want || got.Retryable != tt.retryable {

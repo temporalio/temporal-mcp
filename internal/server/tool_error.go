@@ -17,6 +17,12 @@ import (
 	"github.com/temporalio/operator-mcp/internal/config"
 )
 
+// The names of the servers a tool calls, as error messages give them.
+const (
+	temporalServer = "the Temporal server"
+	cloudOpsAPI    = "the Temporal Cloud Ops API at saas-api.tmprl.cloud"
+)
+
 type toolError struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -41,8 +47,8 @@ func lookupTarget(ctx context.Context, cfg *config.Config, name string) (*config
 	return t, nil
 }
 
-func temporalError(err error, t *config.Target, p *peer.Peer) error {
-	e := &toolError{Code: "temporal_unavailable", Message: rpcErrorMessage(err, t, p)}
+func temporalError(err error, t *config.Target, p *peer.Peer, server string) error {
+	e := &toolError{Code: "temporal_unavailable", Message: rpcErrorMessage(err, t, p, server)}
 	switch serviceerror.ToStatus(err).Code() {
 	case codes.NotFound:
 		if !errors.As(err, new(*serviceerror.NamespaceNotFound)) {
@@ -52,6 +58,8 @@ func temporalError(err error, t *config.Target, p *peer.Peer) error {
 		e.Code = "invalid_argument"
 	case codes.DeadlineExceeded:
 		e.Code, e.Retryable = "timeout", true
+	case codes.ResourceExhausted:
+		e.Code, e.Retryable = "rate_limited", true
 	case codes.Unavailable:
 		e.Retryable = true
 	}

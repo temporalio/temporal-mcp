@@ -79,7 +79,6 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	tests := []struct {
 		name                  string
 		target                config.Target
-		timeout               time.Duration
 		wantServer            string
 		wantNamespacePrefix   string
 		wantNamespaceContains string
@@ -87,20 +86,17 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		{
 			name:       "TLS handshake fails",
 			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}},
-			timeout:    time.Minute,
 			wantServer: "Unavailable: the TLS handshake or certificate check with the Temporal server failed",
 		},
 		{
 			name:                  "server reports unavailable",
 			target:                config.Target{Address: unavailable.Addr().String()},
-			timeout:               time.Minute,
 			wantNamespacePrefix:   "Unavailable: the Temporal server reported: namespace ns1 is unavailable on ",
 			wantNamespaceContains: "<address>",
 		},
 		{
 			name:       "no response",
 			target:     config.Target{Address: silent.Addr().String()},
-			timeout:    time.Minute,
 			wantServer: "DeadlineExceeded: timed out waiting for the Temporal server",
 		},
 	}
@@ -112,7 +108,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			ctx = temporal.WithTool(context.WithValue(ctx, targetsKey{}, []string{"a"}), "check_connection", []string{
 				workflowservice.WorkflowService_GetSystemInfo_FullMethodName,

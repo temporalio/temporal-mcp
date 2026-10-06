@@ -98,15 +98,13 @@ func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[stri
 				rec.Outcome, cause = "internal", err
 			case r.IsError && errors.As(r.GetError(), &te) && te.Code == "internal":
 				rec.Outcome, cause = te.Code, te.cause
-			case r.IsError && ctx.Err() != nil:
-				// The client cancelled or disconnected, so the error came from the cancellation.
-				rec.Outcome = "cancelled"
 			case r.IsError && errors.As(r.GetError(), &te):
 				rec.Outcome = te.Code
 			default:
 				rec.Outcome = "ok"
 			}
-			if ctx.Err() != nil && (errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)) {
+			// The client cancelled or disconnected, so the error came from the cancellation.
+			if ctx.Err() != nil && (te != nil && te.Code != "internal" || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded)) {
 				rec.Outcome, cause = "cancelled", nil
 			}
 			if cause != nil {

@@ -114,11 +114,6 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 		if fields == nil {
 			fields = defaultFields
 		}
-		for _, f := range fields {
-			if name, ok := getWorkflowNames[f]; ok {
-				return nil, envelope[workflowSearch]{}, &toolError{Code: "invalid_argument", Message: fmt.Sprintf("%q is not a search attribute; use %s", f, name)}
-			}
-		}
 		var pageToken []byte
 		if in.Continuation != "" {
 			if pageToken, err = decodeContinuation(in.Continuation, t.Name, in.Query); err != nil {
@@ -163,40 +158,43 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 	}
 }
 
-// checkFields returns an invalid_argument error if a name in fields is not a search attribute on t. Core attributes,
-// names already listed for t and, on Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer
-// than this server's sadefs) pass without a call; otherwise t's search attributes are fetched once, and if that fails,
-// fields pass unchecked.
+// checkFields returns an invalid_argument error naming, in the order given, each name in fields that is one of
+// get_workflow's names or not a search attribute on t. Core attributes, get_workflow's names, names already listed for
+// t and, on Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer than this server's
+// sadefs) need no call; otherwise t's search attributes are fetched once, and if that fails, the remaining names pass
+// unchecked.
 func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
 	cloud := clients.CloudOps(t.Name) != nil
 	unchecked := slices.DeleteFunc(slices.Clone(fields), func(f string) bool {
 		_, core := coreSearchAttributes[f]
-		return core || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
+		_, getWorkflowName := getWorkflowNames[f]
+		return core || getWorkflowName || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
 	})
-	if len(unchecked) == 0 {
-		return nil
-	}
-	custom, system, err := fetchSearchAttributes(ctx, clients, names, t)
-	if err != nil {
-		return nil
-	}
-	known := slices.Concat(slices.Collect(maps.Keys(custom)), slices.Collect(maps.Keys(system)))
-	slices.Sort(known)
-	var unknown []string
-	for _, f := range unchecked {
-		if _, found := slices.BinarySearch(known, f); found {
-			continue
+	var known []string
+	if len(unchecked) > 0 {
+		if custom, system, err := fetchSearchAttributes(ctx, clients, names, t); err != nil {
+			unchecked = nil
+		} else {
+			known = slices.Concat(slices.Collect(maps.Keys(custom)), slices.Collect(maps.Keys(system)))
+			slices.Sort(known)
 		}
+	}
+	var bad []string
+	for _, f := range fields {
 		u := strconv.Quote(f)
-		if i := slices.IndexFunc(known, func(k string) bool { return strings.EqualFold(k, f) }); i >= 0 {
+		if name, ok := getWorkflowNames[f]; ok {
+			u += fmt.Sprintf(" (use %s)", name)
+		} else if _, found := slices.BinarySearch(known, f); found || !slices.Contains(unchecked, f) {
+			continue
+		} else if i := slices.IndexFunc(known, func(k string) bool { return strings.EqualFold(k, f) }); i >= 0 {
 			u += fmt.Sprintf(" (did you mean %s?)", known[i])
 		}
-		unknown = append(unknown, u)
+		bad = append(bad, u)
 	}
-	if len(unknown) == 0 {
+	if len(bad) == 0 {
 		return nil
 	}
-	msg := fmt.Sprintf("these fields are not search attributes on target %s: %s", t.Name, strings.Join(unknown, ", "))
+	msg := fmt.Sprintf("these fields are not search attributes on target %s: %s", t.Name, strings.Join(bad, ", "))
 	if mayUse(cfg, req, "list_search_attributes", t.Name) {
 		msg += "; call list_search_attributes for the target's search attributes"
 	} else {

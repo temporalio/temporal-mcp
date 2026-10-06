@@ -43,9 +43,12 @@ type workflowSearch struct {
 
 var defaultFields = []string{"WorkflowType", "ExecutionStatus", "StartTime", "CloseTime"}
 
-// coreSearchAttributes reads the search attributes that Temporal keeps as fields of a run rather than in its
-// search attribute map, in the form Visibility queries use. Visibility reports the Int ones only for a closed run.
+// coreSearchAttributes reads workflow_id and run_id, which every row has, and the search attributes that Temporal
+// keeps as fields of a run rather than in its search attribute map, in the form Visibility queries use. Visibility
+// reports the Int ones only for a closed run.
 var coreSearchAttributes = map[string]func(*workflowpb.WorkflowExecutionInfo) any{
+	"workflow_id":     func(i *workflowpb.WorkflowExecutionInfo) any { return i.GetExecution().GetWorkflowId() },
+	"run_id":          func(i *workflowpb.WorkflowExecutionInfo) any { return i.GetExecution().GetRunId() },
 	"WorkflowId":      func(i *workflowpb.WorkflowExecutionInfo) any { return i.GetExecution().GetWorkflowId() },
 	"RunId":           func(i *workflowpb.WorkflowExecutionInfo) any { return i.GetExecution().GetRunId() },
 	"WorkflowType":    func(i *workflowpb.WorkflowExecutionInfo) any { return i.GetType().GetName() },
@@ -68,8 +71,6 @@ var coreSearchAttributes = map[string]func(*workflowpb.WorkflowExecutionInfo) an
 
 // getWorkflowNames gives the search attribute for each of get_workflow's names that has one.
 var getWorkflowNames = map[string]string{
-	"workflow_id":    "WorkflowId",
-	"run_id":         "RunId",
 	"type":           "WorkflowType",
 	"status":         "ExecutionStatus",
 	"task_queue":     "TaskQueue",
@@ -159,10 +160,10 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 }
 
 // checkFields returns an invalid_argument error naming, in the order given, each name in fields that is one of
-// get_workflow's names or not a search attribute on t. Core attributes, get_workflow's names, names already listed for
-// t and, on Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer than this server's
-// sadefs) need no call; otherwise t's search attributes are fetched once, and if that fails, the remaining names pass
-// unchecked.
+// get_workflow's names or is not workflow_id, run_id or a search attribute on t. Names in coreSearchAttributes,
+// get_workflow's names, names already listed for t and, on Temporal Cloud, names with Temporal's reserved prefix
+// (which may be built-ins newer than this server's sadefs) need no call; otherwise t's search attributes are fetched
+// once, and if that fails, the remaining names pass unchecked.
 func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
 	cloud := clients.CloudOps(t.Name) != nil
 	unchecked := slices.DeleteFunc(slices.Clone(fields), func(f string) bool {
@@ -204,8 +205,8 @@ func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Conf
 }
 
 func workflowRow(info *workflowpb.WorkflowExecutionInfo, fields []string) (map[string]any, error) {
-	row := map[string]any{"workflow_id": info.GetExecution().GetWorkflowId(), "run_id": info.GetExecution().GetRunId()}
-	for _, name := range fields {
+	row := map[string]any{}
+	for _, name := range slices.Concat([]string{"workflow_id", "run_id"}, fields) {
 		if value, ok := coreSearchAttributes[name]; ok {
 			row[name] = value(info)
 			continue

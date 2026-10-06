@@ -109,7 +109,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 		cloudservice.CloudService_GetNamespace_FullMethodName,
 	}, searchWorkflows(cfg, clients, names)), addTool(s, &mcp.Tool{
 		Name:        "count_workflows",
-		Description: "Count a target's workflow runs that match a Visibility query (every run without one), and with group_by, how many have each value of that search attribute; the Temporal server decides which attributes it can group by. Counts are approximate.",
+		Description: "Count a target's workflow runs that match a Visibility query (every run without one), and with group_by, how many have each value of that search attribute. Counts are approximate.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_CountWorkflowExecutions_FullMethodName,

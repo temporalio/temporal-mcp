@@ -19,7 +19,7 @@ import (
 type countWorkflowsInput struct {
 	Target  string `json:"target" jsonschema:"the name or an alias of a target"`
 	Query   string `json:"query,omitempty" jsonschema:"a Visibility query, such as WorkflowType = 'OrderWorkflow'; omit it for every run"`
-	GroupBy string `json:"group_by,omitempty" jsonschema:"a search attribute whose values to group the count by, such as ExecutionStatus"`
+	GroupBy string `json:"group_by,omitempty" jsonschema:"a search attribute whose values to group the count by; Temporal currently groups only by ExecutionStatus"`
 }
 
 type workflowCount struct {

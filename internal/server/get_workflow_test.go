@@ -798,7 +798,7 @@ func TestToolsOnDevServer(t *testing.T) {
 
 	t.Run("search_workflows", func(t *testing.T) {
 		t.Run("pages through next_call", func(t *testing.T) {
-			name, args := "search_workflows", map[string]any{"target": "local", "query": pagesQuery, "fields": []any{"ExecutionStatus", "OrderId"}, "page_size": 2}
+			name, args := "search_workflows", map[string]any{"target": "local", "query": pagesQuery, "fields": []any{"workflow_id", "ExecutionStatus", "run_id", "OrderId"}, "page_size": 2}
 			seen := map[string]bool{}
 			for calls := 1; ; calls++ {
 				env := callTool(t, name, args)

@@ -179,12 +179,17 @@ func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerF
 }
 
 func callTemporal[Resp any](ctx context.Context, t *config.Target, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {
+	return callServer(ctx, t, temporalServer, rpc)
+}
+
+// callServer makes one call to server for target t, with the timeout of a Temporal call, and returns its failure as a tool error that names server.
+func callServer[Resp any](ctx context.Context, t *config.Target, server string, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	var p peer.Peer
 	resp, err := rpc(ctx, grpc.Peer(&p))
 	if err != nil {
-		return resp, temporalError(err, t, &p)
+		return resp, temporalError(err, t, &p, server)
 	}
 	return resp, nil
 }

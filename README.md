@@ -2,6 +2,8 @@
 
 `operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`.
 
+Temporal Cloud targets with an API key also connect to the Cloud Ops API at `saas-api.tmprl.cloud:443` for `list_search_attributes` and `search_workflows`.
+
 ## Prerequisites
 
 - Go 1.27 or later (see `go.mod`).

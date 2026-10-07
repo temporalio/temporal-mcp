@@ -25,8 +25,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/api/common/v1"
+	"go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -64,12 +67,18 @@ func TestAuthorization(t *testing.T) {
 	}
 	closed := ln.Addr().String()
 	ln.Close()
+	staging := listen(t)
+	gs := grpc.NewServer()
+	workflowservice.RegisterWorkflowServiceServer(gs, fakeWorkflowService{})
+	operatorservice.RegisterOperatorServiceServer(gs, fakeOperatorService{})
+	go gs.Serve(staging)
+	t.Cleanup(gs.Stop)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
-  - {name: payments-staging, description: x, address: %[1]q, namespace: b}
+  - {name: payments-staging, description: x, address: %[4]q, namespace: b}
   - {name: orders-prod, description: x, address: %[1]q, namespace: c}
 auth:
   resource: https://mcp.example.com/mcp
@@ -77,16 +86,18 @@ auth:
 authorization:
   profiles:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
-    dev: {tools: [list_available_targets, get_workflow], targets: [payments-staging]}
+    dev: {tools: [list_available_targets, get_workflow, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
     orders: {tools: [get_workflow], targets: [orders-prod]}
+    search: {tools: [search_workflows], targets: [payments-staging]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Dev, profile: dev}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Orders, profile: orders}
+    - {claim_name: "https://acme.example/roles", claim_value: Temporal.Search, profile: search}
     - {claim_name: email, claim_value: alice@acme.example, issuer: %[2]q, profile: oncall}
     - {claim_name: scope, claim_value: temporal.orders, profile: orders}
     - {claim_name: scp, claim_value: temporal.orders, profile: orders}
-`, closed, idpA, idpB)
+`, closed, idpA, idpB, staging.Addr().String())
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -159,19 +170,19 @@ authorization:
 		{
 			name:    "two profiles",
 			token:   signA(map[string]any{"cognito:groups": []any{"other", "temporal-oncall"}, "https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"check_connection", "get_workflow", "list_available_targets"},
+			tools:   []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-prod", "payments-staging"},
 		},
 		{
 			name:    "one profile",
 			token:   signB(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"get_workflow", "list_available_targets"},
+			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "target granted only through another tool",
 			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev", "Temporal.Orders"}}),
-			tools:   []string{"get_workflow", "list_available_targets"},
+			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging", "orders-prod"},
 		},
 		{
@@ -268,6 +279,20 @@ authorization:
 		notFound(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		notFound(t, session, "get_workflow", map[string]any{"target": "payments-prod", "workflow_id": "wf"})
 		notFound(t, session, "get_workflow", map[string]any{"target": "orders-prod", "workflow_id": "wf"})
+		notFound(t, session, "search_workflows", map[string]any{"target": "payments-prod", "query": ""})
+		notFound(t, session, "count_workflows", map[string]any{"target": "payments-prod", "query": ""})
+		notFound(t, session, "list_search_attributes", map[string]any{"target": "payments-prod"})
+	})
+
+	t.Run("unknown field", func(t *testing.T) {
+		for role, mayList := range map[string]bool{"Temporal.Dev": true, "Temporal.Search": false} {
+			session := connectAs(t, signB(map[string]any{"https://acme.example/roles": []any{role}}))
+			res, _ := call(t, session, "search_workflows", map[string]any{"target": "payments-staging", "fields": []any{"status", "customerId"}})
+			got := errorContent(t, res)
+			if msg, _ := got["message"].(string); got["code"] != "invalid_argument" || !strings.Contains(msg, `"status", "customerId"`) || strings.Contains(msg, "list_search_attributes") != mayList {
+				t.Errorf("%s: error = %#v, want invalid_argument naming status and customerId, pointing to list_search_attributes: %v", role, got, mayList)
+			}
+		}
 	})
 
 	t.Run("tool the caller lacks", func(t *testing.T) {
@@ -286,6 +311,14 @@ authorization:
 	})
 }
 
+type fakeOperatorService struct {
+	operatorservice.UnimplementedOperatorServiceServer
+}
+
+func (fakeOperatorService) ListSearchAttributes(context.Context, *operatorservice.ListSearchAttributesRequest) (*operatorservice.ListSearchAttributesResponse, error) {
+	return &operatorservice.ListSearchAttributesResponse{CustomAttributes: map[string]enums.IndexedValueType{"CustomerId": enums.INDEXED_VALUE_TYPE_KEYWORD}}, nil
+}
+
 func TestNoAuthAllowsEveryTool(t *testing.T) {
 	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output())
 	list, err := session.ListTools(t.Context(), nil)
@@ -296,7 +329,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "get_workflow", "list_available_targets"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }

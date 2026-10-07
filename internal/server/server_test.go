@@ -25,7 +25,8 @@ import (
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
-func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
+// connect writes the server's logs and audit records to out.
+func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -35,7 +36,7 @@ func connect(t *testing.T, configPath string, logs io.Writer, extra ...func(*too
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer("temporal-operator", "0", cfg, clients, t.Output(), slog.New(slog.NewJSONHandler(logs, nil)))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, out, slog.New(slog.NewJSONHandler(out, nil)))
 	for _, add := range extra {
 		add(s)
 	}

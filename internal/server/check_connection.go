@@ -82,28 +82,28 @@ func runStage(ctx context.Context, name string, t *config.Target, call func(cont
 	}
 	s := stage{Name: name, Status: "ok", LatencyMS: new(time.Since(start).Milliseconds())}
 	if err != nil {
-		s.Status, s.Reason = "failed", new(fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p)))
+		s.Status, s.Reason = "failed", new(fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p, temporalServer)))
 	}
 	return s, nil
 }
 
-func rpcErrorMessage(err error, t *config.Target, p *peer.Peer) string {
+func rpcErrorMessage(err error, t *config.Target, p *peer.Peer, server string) string {
 	st := serviceerror.ToStatus(err)
 	code := st.Code()
 	if code == codes.DeadlineExceeded {
-		return "timed out waiting for the Temporal server"
+		return "timed out waiting for " + server
 	}
 	reached := p.Addr != nil
-	// Errors raised before a call reaches the Temporal server name its address, which results must not reveal.
+	// Errors raised before a call reaches the server name its address, which results must not reveal.
 	switch {
 	case code == codes.Unavailable && !reached && strings.Contains(st.Message(), "authentication handshake failed"):
-		return "the TLS handshake or certificate check with the Temporal server failed"
+		return "the TLS handshake or certificate check with " + server + " failed"
 	case code == codes.Unavailable && !reached:
-		return "could not connect to the Temporal server"
+		return "could not connect to " + server
 	}
 	msg := scrub(st.Message(), t, p)
 	if code == codes.Unavailable {
-		return "the Temporal server reported: " + msg
+		return server + " reported: " + msg
 	}
 	return msg
 }

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,18 +66,6 @@ var coreSearchAttributes = map[string]func(*workflowpb.WorkflowExecutionInfo) an
 	"ParentRunId":          func(i *workflowpb.WorkflowExecutionInfo) any { return ifSet(i.GetParentExecution().GetRunId()) },
 	"RootWorkflowId":       func(i *workflowpb.WorkflowExecutionInfo) any { return ifSet(i.GetRootExecution().GetWorkflowId()) },
 	"RootRunId":            func(i *workflowpb.WorkflowExecutionInfo) any { return ifSet(i.GetRootExecution().GetRunId()) },
-}
-
-// getWorkflowNames gives the search attribute for each of get_workflow's names that has one.
-var getWorkflowNames = map[string]string{
-	"type":           "WorkflowType",
-	"status":         "ExecutionStatus",
-	"task_queue":     "TaskQueue",
-	"start_time":     "StartTime",
-	"execution_time": "ExecutionTime",
-	"close_time":     "CloseTime",
-	"history_length": "HistoryLength",
-	"parent":         "ParentWorkflowId and ParentRunId",
 }
 
 func ifClosed(i *workflowpb.WorkflowExecutionInfo, v int64) any {
@@ -159,38 +146,29 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 	}
 }
 
-// checkFields returns an invalid_argument error naming, in the order given, each name in fields that is one of
-// get_workflow's names or is not workflow_id, run_id or a search attribute on t. Names in coreSearchAttributes,
-// get_workflow's names, names already listed for t and, on Temporal Cloud, names with Temporal's reserved prefix
-// (which may be built-ins newer than this server's sadefs) need no call; otherwise t's search attributes are fetched
-// once, and if that fails, the remaining names pass unchecked.
+// checkFields returns an invalid_argument error naming, in the order given, each name in fields that is not
+// workflow_id, run_id or a search attribute on t. Names in coreSearchAttributes, names already listed for t and, on
+// Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer than this server's sadefs) need
+// no call; otherwise t's search attributes are listed once, and if that fails, every name passes unchecked.
 func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
 	cloud := clients.CloudOps(t.Name) != nil
-	unchecked := slices.DeleteFunc(slices.Clone(fields), func(f string) bool {
+	passes := func(f string) bool {
 		_, core := coreSearchAttributes[f]
-		_, getWorkflowName := getWorkflowNames[f]
-		return core || getWorkflowName || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
-	})
-	var known []string
-	if len(unchecked) > 0 {
-		if custom, system, err := fetchSearchAttributes(ctx, clients, names, t); err != nil {
-			unchecked = nil
-		} else {
-			known = slices.Concat(slices.Collect(maps.Keys(custom)), slices.Collect(maps.Keys(system)))
-			slices.Sort(known)
-		}
+		return core || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
+	}
+	if !slices.ContainsFunc(fields, func(f string) bool { return !passes(f) }) {
+		return nil
+	}
+	// fetchSearchAttributes stores t's names, so passes now checks fields against this listing.
+	if _, _, err := fetchSearchAttributes(ctx, clients, names, t); err != nil {
+		return nil
 	}
 	var bad []string
 	for _, f := range fields {
-		u := strconv.Quote(f)
-		if name, ok := getWorkflowNames[f]; ok {
-			u += fmt.Sprintf(" (use %s)", name)
-		} else if _, found := slices.BinarySearch(known, f); found || !slices.Contains(unchecked, f) {
+		if passes(f) {
 			continue
-		} else if i := slices.IndexFunc(known, func(k string) bool { return strings.EqualFold(k, f) }); i >= 0 {
-			u += fmt.Sprintf(" (did you mean %s?)", known[i])
 		}
-		bad = append(bad, u)
+		bad = append(bad, strconv.Quote(f))
 	}
 	if len(bad) == 0 {
 		return nil

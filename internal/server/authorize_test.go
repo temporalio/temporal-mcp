@@ -285,12 +285,12 @@ authorization:
 	})
 
 	t.Run("unknown field", func(t *testing.T) {
-		for role, hint := range map[string]bool{"Temporal.Dev": true, "Temporal.Search": false} {
+		for role, mayList := range map[string]bool{"Temporal.Dev": true, "Temporal.Search": false} {
 			session := connectAs(t, signB(map[string]any{"https://acme.example/roles": []any{role}}))
 			res, _ := call(t, session, "search_workflows", map[string]any{"target": "payments-staging", "fields": []any{"status", "customerId"}})
 			got := errorContent(t, res)
-			if msg, _ := got["message"].(string); got["code"] != "invalid_argument" || !strings.Contains(msg, `"status" (use ExecutionStatus), "customerId" (did you mean CustomerId?)`) || strings.Contains(msg, "list_search_attributes") != hint {
-				t.Errorf("%s: error = %#v, want invalid_argument redirecting status and suggesting CustomerId, pointing to list_search_attributes: %v", role, got, hint)
+			if msg, _ := got["message"].(string); got["code"] != "invalid_argument" || !strings.Contains(msg, `"status", "customerId"`) || strings.Contains(msg, "list_search_attributes") != mayList {
+				t.Errorf("%s: error = %#v, want invalid_argument naming status and customerId, pointing to list_search_attributes: %v", role, got, mayList)
 			}
 		}
 	})

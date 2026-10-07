@@ -179,7 +179,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := `these fields are not search attributes on target cloud: "orderId" (did you mean OrderId?); call list_search_attributes for the target's search attributes`
+		want := `these fields are not search attributes on target cloud: "orderId"; call list_search_attributes for the target's search attributes`
 		if got := errorContent(t, res); got["code"] != "invalid_argument" || got["message"] != want {
 			t.Errorf("error = %#v, want invalid_argument %q", got, want)
 		}

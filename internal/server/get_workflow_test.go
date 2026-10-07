@@ -941,10 +941,8 @@ func TestToolsOnDevServer(t *testing.T) {
 			{"continuation for another target", "search_workflows", map[string]any{"target": "misconfigured", "query": pagesQuery, "continuation": continuation}, "continuation_invalid", "continuation is not one"},
 			{"garbage continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": "not-a-continuation"}, "continuation_invalid", "continuation is not one"},
 			{"oversized continuation", "search_workflows", map[string]any{"target": "dev", "query": pagesQuery, "continuation": strings.Repeat("A", 4097)}, "continuation_invalid", "continuation is not one"},
-			{"get_workflow field names", "search_workflows", map[string]any{"target": "dev", "query": "", "fields": []any{"status", "type", "NoSuchAttribute", "start_time"}}, "invalid_argument",
-				`these fields are not search attributes on target dev: "status" (use ExecutionStatus), "type" (use WorkflowType), "NoSuchAttribute", "start_time" (use StartTime); call list_search_attributes for the target's search attributes`},
-			{"field the target lacks", "search_workflows", map[string]any{"target": "dev", "fields": []any{"NoSuchAttribute", "TemporalNoSuchAttribute", "saInt"}}, "invalid_argument",
-				`these fields are not search attributes on target dev: "NoSuchAttribute", "TemporalNoSuchAttribute", "saInt" (did you mean SaInt?); call list_search_attributes for the target's search attributes`},
+			{"fields the target lacks", "search_workflows", map[string]any{"target": "dev", "fields": []any{"NoSuchAttribute", "ExecutionStatus", "status", "SaInt", "TemporalNoSuchAttribute", "saInt"}}, "invalid_argument",
+				`these fields are not search attributes on target dev: "NoSuchAttribute", "status", "TemporalNoSuchAttribute", "saInt"; call list_search_attributes for the target's search attributes`},
 			{"unknown attribute in the query", "search_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
 			{"unknown attribute in a count", "count_workflows", map[string]any{"target": "dev", "query": "NoSuchAttribute = 'x'"}, "invalid_query", "invalid query"},
 		}
@@ -1028,12 +1026,6 @@ func TestToolsOnDevServer(t *testing.T) {
 		if _, calls := search(t, "misconfigured", "SaInt"); calls != 2 {
 			t.Errorf("attribute on a target that cannot be listed: temporal_calls = %v, want 2, the failed list and the search", calls)
 		}
-		if res, calls := search(t, "misconfigured", "status", "type"); !res.IsError || calls != 0 {
-			t.Errorf("get_workflow names: isError = %v, temporal_calls = %v; want an error without a list or a search", res.IsError, calls)
-		}
-		if res, calls := search(t, "misconfigured", "status", "SaInt"); calls != 1 || errorContent(t, res)["message"] != `these fields are not search attributes on target misconfigured: "status" (use ExecutionStatus); call list_search_attributes for the target's search attributes` {
-			t.Errorf("get_workflow name on a target that cannot be listed: temporal_calls = %v, error = %#v; want 1, the failed list without a search, and an error naming status alone", calls, errorContent(t, res))
-		}
 		addSearchAttribute := func(t *testing.T, name string) {
 			t.Helper()
 			if _, err := c.OperatorService().AddSearchAttributes(ctx, &operatorservice.AddSearchAttributesRequest{
@@ -1057,19 +1049,19 @@ func TestToolsOnDevServer(t *testing.T) {
 				}
 			}
 		}
-		if res, _ := search(t, "dev", "SaAdded"); !res.IsError || errorContent(t, res)["code"] != "invalid_argument" {
+		if res, _ := search(t, "dev", "status"); !res.IsError || errorContent(t, res)["code"] != "invalid_argument" {
 			t.Errorf("attribute not added yet: isError = %v, want invalid_argument", res.IsError)
 		}
-		addSearchAttribute(t, "SaAdded")
-		if res, calls := search(t, "dev", "SaAdded"); res.IsError || calls != 2 {
+		addSearchAttribute(t, "status")
+		if res, calls := search(t, "dev", "status"); res.IsError || calls != 2 {
 			t.Errorf("attribute added since the list: isError = %v, temporal_calls = %v; want the list and the search", res.IsError, calls)
 		}
-		if res, calls := search(t, "dev", "SaAdded"); res.IsError || calls != 1 {
+		if res, calls := search(t, "dev", "status"); res.IsError || calls != 1 {
 			t.Errorf("attribute added since the list, again: isError = %v, temporal_calls = %v; want a search alone", res.IsError, calls)
 		}
-		addSearchAttribute(t, "SaListed")
+		addSearchAttribute(t, "type")
 		callTool(t, "list_search_attributes", map[string]any{"target": "dev"})
-		if res, calls := search(t, "dev", "SaListed"); res.IsError || calls != 1 {
+		if res, calls := search(t, "dev", "type"); res.IsError || calls != 1 {
 			t.Errorf("attribute added and then listed: isError = %v, temporal_calls = %v; want a search alone", res.IsError, calls)
 		}
 	})

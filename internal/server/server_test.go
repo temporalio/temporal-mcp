@@ -184,6 +184,46 @@ func TestToolCalls(t *testing.T) {
 	}
 }
 
+func TestToolErrorHasResultType(t *testing.T) {
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, t.Output(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "tools/call")
+	req.Header.Set("Mcp-Name", "check_connection")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, data, _ := strings.Cut(strings.TrimSpace(string(body)), "data: ")
+	var msg struct {
+		Result struct {
+			IsError    bool   `json:"isError"`
+			ResultType string `json:"resultType"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(data), &msg); err != nil {
+		t.Fatalf("response %q: %v", body, err)
+	}
+	if !msg.Result.IsError || msg.Result.ResultType != "complete" {
+		t.Errorf("response = %s; want a tool error with resultType \"complete\"", data)
+	}
+}
+
 func TestNewMux(t *testing.T) {
 	issuerURL, sign := newTestIssuer(t)
 	token := sign(map[string]any{})

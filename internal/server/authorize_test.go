@@ -109,7 +109,8 @@ authorization:
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := NewMux("temporal-operator", "0", cfg, clients, t.Output(), slog.New(slog.NewTextHandler(t.Output(), nil)))
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+	h, err := NewMux("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +337,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 
 func TestNewMuxRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
-	if _, err := NewMux("temporal-operator", "0", cfg, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := NewMux("temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("NewMux with auth and no authorization succeeded, want an error")
 	}
 }
@@ -374,7 +375,7 @@ func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
 				},
 			}
 			var logs strings.Builder
-			if _, err := NewMux("temporal-operator", "0", cfg, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
+			if _, err := NewMux("temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
 				t.Fatal(err)
 			}
 			if got := logs.String(); got != tc.want {
@@ -408,7 +409,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, _ := newServer("temporal-operator", "0", cfg, clients, t.Output(), logger)
+	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	calls := map[string]struct {
 		rpc  string
 		call func(context.Context) error

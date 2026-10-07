@@ -22,6 +22,7 @@ import (
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/identity"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -77,7 +78,7 @@ func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.Too
 }
 
 // addTools registers the server's tools on s and returns their names.
-func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []string {
+func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) []string {
 	names := &searchAttributeNames{}
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
@@ -85,12 +86,12 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 		Annotations: readOnlyAnnotations,
 	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
-		Description: "Check that this server can reach a target's Temporal server and namespace.",
+		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it decodes payloads with one.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-	}, checkConnection(cfg, clients)), addTool(s, &mcp.Tool{
+	}, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:         "get_workflow",
 		Description:  "Get the current state of a workflow run. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut.",
 		Annotations:  readOnlyAnnotations,
@@ -98,7 +99,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
-	}, getWorkflow(cfg, clients)), addTool(s, &mcp.Tool{
+	}, getWorkflow(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:        "search_workflows",
 		Description: "Search a target's workflow runs with a Visibility query (every run without one) and return a page of them. Each run has workflow_id, run_id and the search attributes asked for in fields, which uses the same names as query (see list_search_attributes); one the run lacks is null (HistoryLength, HistorySizeBytes, StateTransitionCount and ExecutionDuration are null until the run closes). For the next page, call next_call's tool with its arguments unchanged.",
 		Annotations: readOnlyAnnotations,
@@ -124,7 +125,8 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 }
 
 // NewMux returns an HTTP handler that serves the MCP streamable HTTP transport
-// at /mcp for the given configuration, making Temporal calls through clients.
+// at /mcp for the given configuration, making Temporal calls through clients
+// and rendering the payloads in tool responses with payloads.
 // With auth configured, /mcp requires a valid access token, each caller may use
 // only what cfg's authorization gives it, and the protected resource metadata
 // is served at the path the token challenge points to.
@@ -135,11 +137,11 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients) []st
 // an issuer.
 // It fails if cfg has an auth section but no authorization, or if an
 // authorization profile names a tool the server does not have.
-func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, records io.Writer, logger *slog.Logger) (http.Handler, error) {
+func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (http.Handler, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")
 	}
-	s, tools := newServer(name, version, cfg, clients, records, logger)
+	s, tools := newServer(name, version, cfg, clients, payloads, records, logger)
 	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
 		return nil, err
 	}
@@ -180,10 +182,10 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 }
 
 // newServer returns the MCP server and the names of its tools.
-func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
+func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
 	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
 	s.AddReceivingMiddleware(recoverPanics(logger), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
-	return s, addTools(s, cfg, clients)
+	return s, addTools(s, cfg, clients, payloads)
 }
 
 type targetList struct {

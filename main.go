@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/server"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
@@ -60,7 +61,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	handler, err := server.NewMux(serverName, version, cfg, clients, stdout, logger)
+	payloads, err := payload.NewRenderer(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: %w", *configPath, err)
+	}
+
+	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, stdout, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}

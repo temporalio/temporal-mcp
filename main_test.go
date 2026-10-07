@@ -118,6 +118,8 @@ func TestExitsWithoutServing(t *testing.T) {
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflow, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: OPERATOR_MCP_TEST_UNSET_KEY}}\n")
+	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
+		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: OPERATOR_MCP_TEST_UNSET_KEY}}\n")
 	tests := []struct {
 		name     string
 		args     []string
@@ -128,6 +130,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unexpected arguments", []string{"--config", filepath.Join("testdata", "config.yaml"), "extra"}, 1, `unexpected arguments ["extra"]`},
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
+		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable OPERATOR_MCP_TEST_UNSET_KEY is unset or empty`},
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflow`},
 	}
 	for _, tt := range tests {

@@ -104,7 +104,7 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 		}
 		var pageToken []byte
 		if in.Continuation != "" {
-			if pageToken, err = decodeContinuation(in.Continuation, t.Name, in.Query); err != nil {
+			if pageToken, err = decodeContinuation(in.Continuation, "search_workflows", t.Name, in.Query); err != nil {
 				return nil, envelope[workflowSearch]{}, err
 			}
 		}
@@ -120,6 +120,9 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 			}, opts...)
 		})
 		if err != nil {
+			if in.Continuation != "" {
+				return nil, envelope[workflowSearch]{}, continuationError(err, "search_workflows")
+			}
 			return nil, envelope[workflowSearch]{}, queryError(err)
 		}
 		out := envelope[workflowSearch]{Target: &t.Name, Result: workflowSearch{Workflows: []map[string]any{}}, Complete: len(resp.GetNextPageToken()) == 0}
@@ -131,7 +134,7 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 			out.Result.Workflows = append(out.Result.Workflows, row)
 		}
 		if !out.Complete {
-			continuation, ok := encodeContinuation(resp.GetNextPageToken(), t.Name, in.Query)
+			continuation, ok := encodeContinuation(resp.GetNextPageToken(), "search_workflows", t.Name, in.Query)
 			if !ok {
 				// Temporal's page token is too long to hand out, so the page is returned without a next_call and stays incomplete.
 				return nil, out, nil
@@ -209,29 +212,44 @@ func queryError(err error) error {
 	return err
 }
 
-// A continuation is the base64url of a version byte, queryDigest(target, query) and Temporal's page token. It is unsigned: a changed page token only pages through the same query on the same namespace.
+// A continuation is the base64url of a version byte, the digest of the tool and the arguments it is bound to, and
+// the position to resume from, such as Temporal's page token. It is unsigned: a changed position only resumes the
+// same tool with the same arguments on the same namespace.
 const continuationVersion = 1
 
-func queryDigest(target, query string) []byte {
-	sum := sha256.Sum256([]byte(target + "\x00" + query))
+func continuationDigest(tool string, binding []string) []byte {
+	sum := sha256.Sum256([]byte(strings.Join(slices.Concat([]string{tool}, binding), "\x00")))
 	return sum[:]
 }
 
-// encodeContinuation returns the continuation for pageToken, and false if it is longer than decodeContinuation accepts.
-func encodeContinuation(pageToken []byte, target, query string) (string, bool) {
-	s := base64.RawURLEncoding.EncodeToString(slices.Concat([]byte{continuationVersion}, queryDigest(target, query), pageToken))
+// encodeContinuation returns tool's continuation for position, and false if it is longer than decodeContinuation accepts.
+func encodeContinuation(position []byte, tool string, binding ...string) (string, bool) {
+	s := base64.RawURLEncoding.EncodeToString(slices.Concat([]byte{continuationVersion}, continuationDigest(tool, binding), position))
 	return s, len(s) <= maxContinuation
 }
 
-func decodeContinuation(s, target, query string) ([]byte, error) {
-	invalid := &toolError{Code: "continuation_invalid", Message: "continuation is not one that search_workflows returned for this target and query; search again without it"}
+// decodeContinuation returns the position in s, a continuation that tool returned for the same binding.
+func decodeContinuation(s, tool string, binding ...string) ([]byte, error) {
 	if len(s) > maxContinuation {
-		return nil, invalid
+		return nil, invalidContinuation(tool)
 	}
 	b, err := base64.RawURLEncoding.DecodeString(s)
-	digest := queryDigest(target, query)
+	digest := continuationDigest(tool, binding)
 	if err != nil || len(b) <= 1+len(digest) || b[0] != continuationVersion || !bytes.Equal(b[1:1+len(digest)], digest) {
-		return nil, invalid
+		return nil, invalidContinuation(tool)
 	}
 	return b[1+len(digest):], nil
+}
+
+func invalidContinuation(tool string) *toolError {
+	return &toolError{Code: "continuation_invalid", Message: fmt.Sprintf("continuation is not one that %s returned for these arguments; call %s again without it", tool, tool)}
+}
+
+// continuationError reports an invalid argument, which the Temporal server gives for a page token it cannot read, as
+// tool's continuation_invalid.
+func continuationError(err error, tool string) error {
+	if te := (*toolError)(nil); errors.As(err, &te) && te.Code == "invalid_argument" {
+		return invalidContinuation(tool)
+	}
+	return err
 }

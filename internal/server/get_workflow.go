@@ -209,8 +209,7 @@ func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (work
 		HistoryLength:     info.GetHistoryLength(),
 		PendingActivities: []pendingActivity{},
 		PendingChildren:   []pendingChild{},
-		Memo:              map[string]payload{},
-		SearchAttributes:  map[string]any{},
+		Memo:              payloadMap(info.GetMemo()),
 		ObservedAt:        observedAt,
 	}
 	if p := info.GetParentExecution(); p != nil {
@@ -247,17 +246,24 @@ func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (work
 			Attempt:               wt.GetAttempt(),
 		}
 	}
-	for k, p := range info.GetMemo().GetFields() {
-		run.Memo[k] = toPayload(p)
+	sa, err := searchAttributes(info.GetSearchAttributes())
+	if err != nil {
+		return workflowRun{}, err
 	}
-	for k, p := range info.GetSearchAttributes().GetIndexedFields() {
+	run.SearchAttributes = sa
+	return run, nil
+}
+
+func searchAttributes(sa *commonpb.SearchAttributes) (map[string]any, error) {
+	out := map[string]any{}
+	for k, p := range sa.GetIndexedFields() {
 		v, err := searchAttribute(p)
 		if err != nil {
-			return workflowRun{}, &toolError{Code: "temporal_unavailable", Message: fmt.Sprintf("the Temporal server returned search attribute %s in an unreadable form: %v", k, err)}
+			return nil, &toolError{Code: "temporal_unavailable", Message: fmt.Sprintf("the Temporal server returned search attribute %s in an unreadable form: %v", k, err)}
 		}
-		run.SearchAttributes[k] = v
+		out[k] = v
 	}
-	return run, nil
+	return out, nil
 }
 
 func searchAttribute(p *commonpb.Payload) (any, error) {
@@ -279,12 +285,27 @@ func searchAttribute(p *commonpb.Payload) (any, error) {
 	return decode[any](p)
 }
 
+// decode returns p as a T, or nil if p is null. Like the Temporal server, it also accepts a list of T: nil if it is empty, its one value, or the list.
 func decode[T any](p *commonpb.Payload) (any, error) {
-	var v T
-	if err := converter.GetDefaultDataConverter().FromPayload(p, &v); err != nil {
+	dc := converter.GetDefaultDataConverter()
+	var v *T
+	if err := dc.FromPayload(p, &v); err == nil {
+		if v == nil {
+			return nil, nil
+		}
+		return *v, nil
+	}
+	var list []T
+	if err := dc.FromPayload(p, &list); err != nil {
 		return nil, err
 	}
-	return v, nil
+	switch len(list) {
+	case 0:
+		return nil, nil
+	case 1:
+		return list[0], nil
+	}
+	return list, nil
 }
 
 func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent) {
@@ -342,6 +363,19 @@ func payloads(ps *commonpb.Payloads) []payload {
 	out := []payload{}
 	for _, p := range ps.GetPayloads() {
 		out = append(out, toPayload(p))
+	}
+	return out
+}
+
+// payloadFields is a Memo or a Header.
+type payloadFields interface {
+	GetFields() map[string]*commonpb.Payload
+}
+
+func payloadMap(m payloadFields) map[string]payload {
+	out := map[string]payload{}
+	for k, p := range m.GetFields() {
+		out[k] = toPayload(p)
 	}
 	return out
 }

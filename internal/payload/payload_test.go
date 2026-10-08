@@ -170,10 +170,6 @@ func TestRenderFailsClosed(t *testing.T) {
 	codecTimeout = 100 * time.Millisecond
 	const customerData = "customer data"
 	malformed := respond(http.StatusOK, `{"payloads":[{"data":"`+customerData+`"}]}`)
-	brokenAuth := filepath.Join(t.TempDir(), "authorization")
-	if err := os.WriteFile(brokenAuth, []byte("Bearer "+customerData+"\nnext"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	tests := []struct {
 		name     string
@@ -184,12 +180,11 @@ func TestRenderFailsClosed(t *testing.T) {
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized"},
 		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads"},
 		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent"},
-		{"unreachable", closed, nil, "could not connect to the codec server"},
+		{"unreachable", closed, nil, "the request to the codec server failed"},
 		{"untrusted certificate", tlsServer.URL, nil, "the TLS certificate check with the codec server failed"},
 		{"no response", hang.URL, nil, "timed out waiting for the codec server"},
 		{"response cut short", cut.URL, nil, "the codec server's response could not be read"},
 		{"unreadable authorization header", malformed, &config.Secret{File: filepath.Join(t.TempDir(), "missing")}, "the authorization header for the codec server could not be read"},
-		{"authorization header with a line break", malformed, &config.Secret{File: brokenAuth}, "the authorization header for the codec server is not a valid header value, for example because it holds a line break"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

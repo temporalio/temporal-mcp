@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	commonpb "go.temporal.io/api/common/v1"
@@ -70,9 +69,6 @@ func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb
 		if err != nil {
 			return nil, &codecError{"the authorization header for the codec server could not be read", err}
 		}
-		if strings.ContainsFunc(v, func(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }) {
-			return nil, &codecError{"the authorization header for the codec server is not a valid header value, for example because it holds a line break", nil}
-		}
 		req.Header.Set("Authorization", v)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -109,5 +105,5 @@ func requestFailure(err error) string {
 	case errors.As(err, new(*tls.CertificateVerificationError)):
 		return "the TLS certificate check with the codec server failed"
 	}
-	return "could not connect to the codec server"
+	return "the request to the codec server failed"
 }

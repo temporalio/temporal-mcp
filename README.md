@@ -89,6 +89,8 @@ shutdown_timeout: 25s # 8s if unset
 
 It then cancels the calls still running, which get audit records with outcome `cancelled`, and exits within another second. Set `shutdown_timeout` at least a second shorter than the time your platform allows between SIGTERM and SIGKILL.
 
+Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
+
 A second signal stops `operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
 
 ## Lint

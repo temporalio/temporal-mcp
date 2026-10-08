@@ -199,7 +199,7 @@ func TestAuthIssuerDownAtStartup(t *testing.T) {
 	}
 }
 
-// A blockingWorkflowService holds each DescribeNamespace call, after sending on
+// A blockingWorkflowService holds each DescribeNamespace or CountWorkflowExecutions call, after sending on
 // started, until release is closed or the call is cancelled.
 type blockingWorkflowService struct {
 	workflowservice.UnimplementedWorkflowServiceServer
@@ -224,30 +224,39 @@ func (s *blockingWorkflowService) DescribeNamespace(ctx context.Context, _ *work
 	}
 }
 
-// callCheckConnection calls check_connection on target a over MCP protocol
-// version protocol and returns the error, if the call fails. With version
+func (s *blockingWorkflowService) CountWorkflowExecutions(ctx context.Context, _ *workflowservice.CountWorkflowExecutionsRequest) (*workflowservice.CountWorkflowExecutionsResponse, error) {
+	_, err := s.DescribeNamespace(ctx, nil)
+	return &workflowservice.CountWorkflowExecutionsResponse{Count: 1}, err
+}
+
+// callShutdownTool calls tool on target a over MCP protocol
+// version protocol and returns its result or a transport error. With version
 // 2026-07-28 it calls through the SDK's client. With an older version, which the
 // SDK's client cannot speak, it posts the call itself, with protocol in the
 // Mcp-Protocol-Version header, or with no header if protocol is "".
-func callCheckConnection(ctx context.Context, url, protocol string) error {
+func callShutdownTool(ctx context.Context, url, protocol, tool string) (*mcp.CallToolResult, error) {
 	if protocol == "2026-07-28" {
 		session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer session.Close()
 		if v := session.InitializeResult().ProtocolVersion; v != protocol {
-			return fmt.Errorf("the SDK's client negotiated protocol version %s, want %s", v, protocol)
+			return nil, fmt.Errorf("the SDK's client negotiated protocol version %s, want %s", v, protocol)
 		}
-		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
-		if err == nil && res.IsError {
-			err = fmt.Errorf("tool error %v", res.GetError())
-		}
-		return err
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"target": "a"}})
+		return res, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"a"}}}`))
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": map[string]any{"target": "a"}},
+	})
 	if err != nil {
-		return err
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(request))
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -256,12 +265,12 @@ func callCheckConnection(ctx context.Context, url, protocol string) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// An event stream carries the JSON-RPC response in its last data line.
 	msg := body
@@ -271,14 +280,12 @@ func callCheckConnection(ctx context.Context, url, protocol string) error {
 		}
 	}
 	var rpc struct {
-		Result *struct {
-			IsError bool `json:"isError"`
-		} `json:"result"`
+		Result *mcp.CallToolResult `json:"result"`
 	}
-	if err := json.Unmarshal(msg, &rpc); err != nil || rpc.Result == nil || rpc.Result.IsError {
-		return fmt.Errorf("%s with response %q", resp.Status, body)
+	if err := json.Unmarshal(msg, &rpc); err != nil || rpc.Result == nil {
+		return nil, fmt.Errorf("%s with response %q", resp.Status, body)
 	}
-	return nil
+	return rpc.Result, nil
 }
 
 func TestShutdownDuringToolCall(t *testing.T) {
@@ -288,21 +295,26 @@ func TestShutdownDuringToolCall(t *testing.T) {
 	bin := buildBinary(t)
 	tests := []struct {
 		name string
-		// protocol is the MCP protocol version of the call; see callCheckConnection.
+		// protocol is the MCP protocol version of the call; see callShutdownTool.
 		protocol        string
 		signal          os.Signal
 		shutdownTimeout string
 		// release says whether Temporal answers the call once the server is shutting down.
 		release bool
 		outcome string
+		// tool defaults to check_connection, whose cancellation returns a raw context error.
+		tool string
 	}{
-		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok"},
-		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok"},
-		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled"},
-		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok"},
-		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled"},
-		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok"},
-		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled"},
+		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", ""},
+		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", ""},
+		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok", ""},
+		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok", ""},
+		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
+		{"2025-11-25 count call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
+		{"count call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -346,12 +358,23 @@ func TestShutdownDuringToolCall(t *testing.T) {
 					}
 				}
 			}
-			called := make(chan error, 1)
-			go func() { called <- callCheckConnection(ctx, url, tt.protocol) }()
+			tool := tt.tool
+			if tool == "" {
+				tool = "check_connection"
+			}
+			type callResponse struct {
+				result *mcp.CallToolResult
+				err    error
+			}
+			called := make(chan callResponse, 1)
+			go func() {
+				res, err := callShutdownTool(ctx, url, tt.protocol, tool)
+				called <- callResponse{res, err}
+			}()
 			select {
 			case <-temporal.started:
-			case err := <-called:
-				t.Fatalf("check_connection returned before it reached Temporal: %v", err)
+			case response := <-called:
+				t.Fatalf("%s returned before it reached Temporal: %v", tool, response.err)
 			case <-ctx.Done():
 				t.Fatal("check_connection did not reach Temporal")
 			}
@@ -366,9 +389,34 @@ func TestShutdownDuringToolCall(t *testing.T) {
 				close(temporal.release)
 			}
 			select {
-			case err := <-called:
-				if tt.release && err != nil {
-					t.Errorf("check_connection: %v", err)
+			case response := <-called:
+				if response.err != nil {
+					t.Fatalf("%s: %v", tool, response.err)
+				}
+				res := response.result
+				if tt.release {
+					if res.IsError {
+						t.Errorf("%s returned a tool error: %+v", tool, res.Content)
+					}
+				} else {
+					if !res.IsError || len(res.Content) != 1 {
+						t.Fatalf("%s result = %+v, want a shutdown tool error", tool, res)
+					}
+					text, ok := res.Content[0].(*mcp.TextContent)
+					if !ok {
+						t.Fatalf("error content = %T, want text", res.Content[0])
+					}
+					var got struct {
+						Code      string `json:"code"`
+						Message   string `json:"message"`
+						Retryable bool   `json:"retryable"`
+					}
+					if err := json.Unmarshal([]byte(text.Text), &got); err != nil {
+						t.Fatal(err)
+					}
+					if got.Code != "server_shutting_down" || got.Message != "the server is shutting down" || !got.Retryable {
+						t.Errorf("%s error = %s, want a retryable server_shutting_down error", tool, text.Text)
+					}
 				}
 			case <-ctx.Done():
 				t.Fatal("check_connection did not return")
@@ -386,7 +434,7 @@ func TestShutdownDuringToolCall(t *testing.T) {
 				}
 				got = append(got, rec.Tool+" "+rec.Outcome)
 			}
-			if want := []string{"check_connection " + tt.outcome}; !slices.Equal(got, want) {
+			if want := []string{tool + " " + tt.outcome}; !slices.Equal(got, want) {
 				t.Errorf("audit records (tool outcome) = %q, want %q", got, want)
 			}
 		})

@@ -87,7 +87,7 @@ On SIGINT or SIGTERM, `operator-mcp` stops accepting connections and waits up to
 shutdown_timeout: 25s # 8s if unset
 ```
 
-It then cancels the calls still running, which get audit records with outcome `cancelled`, and exits within another second. Set `shutdown_timeout` at least a second shorter than the time your platform allows between SIGTERM and SIGKILL: 10 seconds on Cloud Run, and `terminationGracePeriodSeconds`, 30 by default, on Kubernetes.
+It then cancels the calls still running, which get audit records with outcome `cancelled`, and exits within another second. Set `shutdown_timeout` at least a second shorter than the time your platform allows between SIGTERM and SIGKILL.
 
 A second signal stops `operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
 

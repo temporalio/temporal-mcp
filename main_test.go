@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -223,20 +224,85 @@ func (s *blockingWorkflowService) DescribeNamespace(ctx context.Context, _ *work
 	}
 }
 
+// callCheckConnection calls check_connection on target a over MCP protocol
+// version protocol and returns the error, if the call fails. With version
+// 2026-07-28 it calls through the SDK's client. With an older version, which the
+// SDK's client cannot speak, it posts the call itself, with protocol in the
+// Mcp-Protocol-Version header, or with no header if protocol is "".
+func callCheckConnection(ctx context.Context, url, protocol string) error {
+	if protocol == "2026-07-28" {
+		session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		if v := session.InitializeResult().ProtocolVersion; v != protocol {
+			return fmt.Errorf("the SDK's client negotiated protocol version %s, want %s", v, protocol)
+		}
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
+		if err == nil && res.IsError {
+			err = fmt.Errorf("tool error %v", res.GetError())
+		}
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"a"}}}`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if protocol != "" {
+		req.Header.Set("Mcp-Protocol-Version", protocol)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	// An event stream carries the JSON-RPC response in its last data line.
+	msg := body
+	for line := range strings.Lines(string(body)) {
+		if data, found := strings.CutPrefix(line, "data:"); found {
+			msg = []byte(data)
+		}
+	}
+	var rpc struct {
+		Result *struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(msg, &rpc); err != nil || rpc.Result == nil || rpc.Result.IsError {
+		return fmt.Errorf("%s with response %q", resp.Status, body)
+	}
+	return nil
+}
+
 func TestShutdownDuringToolCall(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("SIGTERM cannot be sent on Windows")
+		t.Skip("signals cannot be sent on Windows")
 	}
 	bin := buildBinary(t)
 	tests := []struct {
-		name            string
+		name string
+		// protocol is the MCP protocol version of the call; see callCheckConnection.
+		protocol        string
+		signal          os.Signal
 		shutdownTimeout string
 		// release says whether Temporal answers the call once the server is shutting down.
 		release bool
 		outcome string
 	}{
-		{"call finishes", "", true, "ok"},
-		{"call outlasts the shutdown timeout", "500ms", false, "cancelled"},
+		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok"},
+		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok"},
+		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled"},
+		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok"},
+		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled"},
+		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok"},
+		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,42 +346,29 @@ func TestShutdownDuringToolCall(t *testing.T) {
 					}
 				}
 			}
-			session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer session.Close()
-			type result struct {
-				res *mcp.CallToolResult
-				err error
-			}
-			called := make(chan result, 1)
-			go func() {
-				res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
-				called <- result{res, err}
-			}()
+			called := make(chan error, 1)
+			go func() { called <- callCheckConnection(ctx, url, tt.protocol) }()
 			select {
 			case <-temporal.started:
+			case err := <-called:
+				t.Fatalf("check_connection returned before it reached Temporal: %v", err)
 			case <-ctx.Done():
 				t.Fatal("check_connection did not reach Temporal")
 			}
 
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			if err := cmd.Process.Signal(tt.signal); err != nil {
 				t.Fatal(err)
 			}
 			if !logUntil(name + ": shutting down") {
-				t.Error("the server exited on SIGTERM without shutting down")
+				t.Errorf("the server exited on %v without shutting down", tt.signal)
 			}
 			if tt.release {
 				close(temporal.release)
 			}
 			select {
-			case r := <-called:
-				switch {
-				case tt.release && r.err != nil:
-					t.Errorf("check_connection: %v", r.err)
-				case tt.release && r.res.IsError:
-					t.Errorf("check_connection: tool error %v", r.res.GetError())
+			case err := <-called:
+				if tt.release && err != nil {
+					t.Errorf("check_connection: %v", err)
 				}
 			case <-ctx.Done():
 				t.Fatal("check_connection did not return")

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -71,11 +72,31 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	scheme := "http"
+	if cfg.ListenTLS != nil {
+		if _, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile); err != nil {
+			return fmt.Errorf("invalid config %s: %w", *configPath, err)
+		}
+		srv.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			cert, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile)
+			if err != nil {
+				logger.Error("cannot load TLS certificate", "error", err.Error())
+				return nil, err
+			}
+			return &cert, nil
+		}}
+		scheme = "https"
+	}
+
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
+	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, scheme, ln.Addr())
 
-	return (&http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}).Serve(ln)
+	if srv.TLSConfig != nil {
+		return srv.ServeTLS(ln, "", "")
+	}
+	return srv.Serve(ln)
 }

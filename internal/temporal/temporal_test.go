@@ -7,8 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -68,7 +66,7 @@ func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 }
 
 func TestNewClientsAPIKeyFromEnv(t *testing.T) {
-	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}}}
+	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.Secret{Env: "OPERATOR_MCP_TEST_API_KEY"}}}
 
 	for _, value := range []string{"", "  \n"} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
@@ -84,48 +82,6 @@ func TestNewClientsAPIKeyFromEnv(t *testing.T) {
 	if _, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler)); err != nil {
 		t.Error(err)
 	}
-
-	t.Run("trimmed", func(t *testing.T) {
-		t.Setenv("OPERATOR_MCP_TEST_API_KEY", "key\n")
-		targets[0].Address = closedAddress(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{"a"})
-		_, err := newClient(t, targets[0]).WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
-		if got := serviceerror.ToStatus(err).Code(); got != codes.Unavailable {
-			t.Errorf("code = %v, want %v (err %v)", got, codes.Unavailable, err)
-		}
-	})
-}
-
-func TestAPIKeyCredential(t *testing.T) {
-	t.Setenv("OPERATOR_MCP_TEST_API_KEY", " env-key\n")
-	path := filepath.Join(t.TempDir(), "key")
-	cred := func(k *config.APIKey) credential {
-		c, err := apiKeyCredential(k)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return c
-	}
-	env, file := cred(&config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}), cred(&config.APIKey{File: path})
-	for _, tt := range []struct {
-		cred        credential
-		write, want string
-	}{
-		{env, "", "env-key"},
-		{file, "file-key-1\n", "file-key-1"},
-		{file, "file-key-2\n", "file-key-2"},
-	} {
-		if tt.write != "" {
-			if err := os.WriteFile(path, []byte(tt.write), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if got, err := tt.cred(t.Context(), nil, nil); err != nil || got != tt.want {
-			t.Errorf("credential = %q, %v; want %q", got, err, tt.want)
-		}
-	}
 }
 
 func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
@@ -139,10 +95,10 @@ func TestAPIKeyTargetsUseTLS(t *testing.T) {
 	t.Setenv("OPERATOR_MCP_TEST_API_KEY", "key")
 	tests := []struct {
 		name   string
-		apiKey *config.APIKey
+		apiKey *config.Secret
 		want   byte
 	}{
-		{"api key", &config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}, 0x16},
+		{"api key", &config.Secret{Env: "OPERATOR_MCP_TEST_API_KEY"}, 0x16},
 		{"no api key", nil, 'P'},
 	}
 	for _, tt := range tests {

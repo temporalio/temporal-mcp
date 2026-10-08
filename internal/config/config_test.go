@@ -19,7 +19,14 @@ targets:
 
 func TestLoadValid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\n"+validTargets), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\n"+validTargets+`
+  - {name: staging, description: Staging., address: "staging:7233", namespace: staging, payload_handling: decode, codec: payments}
+  - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
+codecs:
+  payments:
+    endpoint: http://codec.internal/{namespace}
+    authorization_header: {env: CODEC_AUTHORIZATION}
+`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -34,6 +41,23 @@ func TestLoadValid(t *testing.T) {
 			Description: "Production.",
 			Address:     "prod.example.tmprl.cloud:7233",
 			Namespace:   "prod.abc12",
+		}, {
+			Name:            "staging",
+			Description:     "Staging.",
+			Address:         "staging:7233",
+			Namespace:       "staging",
+			PayloadHandling: PayloadDecode,
+			Codec:           "payments",
+		}, {
+			Name:        "dev",
+			Description: "Dev.",
+			Address:     "dev:7233",
+			Namespace:   "dev",
+			Codec:       "payments",
+		}},
+		Codecs: map[string]Codec{"payments": {
+			Endpoint:            "http://codec.internal/{namespace}",
+			AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
 		}},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -83,8 +107,45 @@ func TestParseAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := []*APIKey{cfg.Targets[0].APIKey, cfg.Targets[1].APIKey}, []*APIKey{{Env: "A_KEY"}, {File: "/keys/b"}}; !reflect.DeepEqual(got, want) {
+	if got, want := []*Secret{cfg.Targets[0].APIKey, cfg.Targets[1].APIKey}, []*Secret{{Env: "A_KEY"}, {File: "/keys/b"}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("api keys = %+v, want %+v", got, want)
+	}
+}
+
+func TestSecretReader(t *testing.T) {
+	t.Setenv("OPERATOR_MCP_TEST_SECRET", " env-secret\n")
+	path := filepath.Join(t.TempDir(), "secret")
+	reader := func(s *Secret) func() (string, error) {
+		read, err := s.Reader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return read
+	}
+	env, file := reader(&Secret{Env: "OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
+	t.Setenv("OPERATOR_MCP_TEST_SECRET", "changed")
+	for _, tt := range []struct {
+		read        func() (string, error)
+		write, want string
+	}{
+		{env, "", "env-secret"},
+		{file, "file-secret-1\n", "file-secret-1"},
+		{file, "file-secret-2\n", "file-secret-2"},
+	} {
+		if tt.write != "" {
+			if err := os.WriteFile(path, []byte(tt.write), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got, err := tt.read(); err != nil || got != tt.want {
+			t.Errorf("secret = %q, %v; want %q", got, err, tt.want)
+		}
+	}
+	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file(); err == nil {
+		t.Error("an empty file: want an error")
 	}
 }
 
@@ -266,7 +327,33 @@ func TestParseInvalid(t *testing.T) {
 			name: "inline api key",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: secret}\n",
-			want: []string{"cannot unmarshal !!str `secret` into config.APIKey"},
+			want: []string{"cannot unmarshal !!str `secret` into config.Secret"},
+		},
+		{
+			name: "bad payload handling",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, payload_handling: Decode}\n" +
+				"  - {name: b, description: x, address: b:7233, namespace: b, payload_handling: decode}\n" +
+				"  - {name: c, description: x, address: c:7233, namespace: c, payload_handling: decode, codec: missing}\n" +
+				"codecs:\n  c: {endpoint: https://codec.example.com}\n",
+			want: []string{
+				`targets[0]: payload_handling: "Decode" is not one of omit, passthrough or decode`,
+				"targets[1]: codec is required with payload_handling decode",
+				`targets[2]: codec "missing" is not one of codecs`,
+			},
+		},
+		{
+			name: "bad codecs",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `codecs:
+  none: {}
+  grpc: {endpoint: "grpc://{namespace}.codec.example.com"}
+  neither: {endpoint: https://codec.example.com, authorization_header: {}}
+`,
+			want: []string{
+				`codecs: "none": endpoint is required`,
+				`codecs: "grpc": endpoint: "grpc://{namespace}.codec.example.com" must be an http or https URL with a host and no user info, query or fragment`,
+				`codecs: "neither": authorization_header: exactly one of env or file is required`,
+			},
 		},
 		{
 			name: "auth with no value",

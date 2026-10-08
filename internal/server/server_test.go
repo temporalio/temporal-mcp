@@ -22,6 +22,7 @@ import (
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/identity"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -36,7 +37,8 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer("temporal-operator", "0", cfg, clients, out, slog.New(slog.NewJSONHandler(out, nil)))
+	logger := slog.New(slog.NewJSONHandler(out, nil))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
 	for _, add := range extra {
 		add(s)
 	}
@@ -48,6 +50,15 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	}
 	t.Cleanup(func() { session.Close() })
 	return session
+}
+
+func newRenderer(t *testing.T, cfg *config.Config, logger *slog.Logger) *payload.Renderer {
+	t.Helper()
+	r, err := payload.NewRenderer(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func outputValidator(t *testing.T, session *mcp.ClientSession) func(*testing.T, string, *mcp.CallToolResult) {
@@ -240,7 +251,7 @@ func TestNewMux(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	s, _ := newServer("temporal-operator", "0", authCfg, nil, t.Output(), logger)
+	s, _ := newServer("temporal-operator", "0", authCfg, nil, nil, t.Output(), logger)
 	callers := make(chan *identity.Caller, 1)
 	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		callers <- identity.CallerFrom(ctx)
@@ -252,7 +263,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
 	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, t.Output(), logger)
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}

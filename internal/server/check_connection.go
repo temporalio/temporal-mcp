@@ -1,5 +1,6 @@
-// The check_connection tool, which checks that a target's Temporal server and namespace
-// are reachable, and the wording of failed Temporal calls, which hides server addresses.
+// The check_connection tool, which checks that a target's Temporal server and namespace,
+// and its codec server if it has one, are reachable, and the wording of failed Temporal
+// calls, which hides server addresses.
 
 package server
 
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/peer"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -39,52 +41,70 @@ type stage struct {
 	Reason    *string `json:"reason"`
 }
 
-func checkConnection(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[checkConnectionInput, envelope[connectionCheck]] {
+func checkConnection(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[checkConnectionInput, envelope[connectionCheck]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in checkConnectionInput) (*mcp.CallToolResult, envelope[connectionCheck], error) {
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, envelope[connectionCheck]{}, err
 		}
 		svc := clients.Client(t.Name).WorkflowService()
-		server, err := runStage(ctx, "server", t, func(ctx context.Context, opts ...grpc.CallOption) error {
+		server, err := runStage(ctx, "server", temporalCheck(t, func(ctx context.Context, opts ...grpc.CallOption) error {
 			_, err := svc.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}, opts...)
 			return err
-		})
+		}))
 		if err != nil {
 			return nil, envelope[connectionCheck]{}, err
 		}
 		namespace := stage{Name: "namespace", Status: "skipped", Reason: new("not run because the server stage failed")}
 		if server.Status == "ok" {
-			namespace, err = runStage(ctx, "namespace", t, func(ctx context.Context, opts ...grpc.CallOption) error {
+			namespace, err = runStage(ctx, "namespace", temporalCheck(t, func(ctx context.Context, opts ...grpc.CallOption) error {
 				_, err := svc.DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Namespace: t.Namespace}, opts...)
 				return err
-			})
+			}))
+			if err != nil {
+				return nil, envelope[connectionCheck]{}, err
+			}
+		}
+		codec := stage{Name: "codec", Status: "skipped", Reason: new("not run because the target does not decode payloads")}
+		if t.PayloadHandling == config.PayloadDecode {
+			codec, err = runStage(ctx, "codec", func(ctx context.Context) string { return payloads.CheckCodec(ctx, t.Name) })
 			if err != nil {
 				return nil, envelope[connectionCheck]{}, err
 			}
 		}
 		return nil, envelope[connectionCheck]{
 			Target:   &t.Name,
-			Result:   connectionCheck{Stages: []stage{server, namespace}},
+			Result:   connectionCheck{Stages: []stage{server, namespace, codec}},
 			Complete: true,
 		}, nil
 	}
 }
 
-func runStage(ctx context.Context, name string, t *config.Target, call func(context.Context, ...grpc.CallOption) error) (stage, error) {
+// runStage runs check, which returns why it failed or "" if it succeeded.
+func runStage(ctx context.Context, name string, check func(context.Context) (reason string)) (stage, error) {
 	stageCtx, cancel := context.WithTimeout(ctx, stageTimeout)
 	defer cancel()
-	var p peer.Peer
 	start := time.Now()
-	err := call(stageCtx, grpc.Peer(&p))
-	if err != nil && ctx.Err() != nil {
+	reason := check(stageCtx)
+	if reason != "" && ctx.Err() != nil {
 		return stage{}, ctx.Err()
 	}
 	s := stage{Name: name, Status: "ok", LatencyMS: new(time.Since(start).Milliseconds())}
-	if err != nil {
-		s.Status, s.Reason = "failed", new(fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p, temporalServer)))
+	if reason != "" {
+		s.Status, s.Reason = "failed", &reason
 	}
 	return s, nil
+}
+
+// temporalCheck makes a Temporal call a stage check, whose reason hides the server's address.
+func temporalCheck(t *config.Target, call func(context.Context, ...grpc.CallOption) error) func(context.Context) string {
+	return func(ctx context.Context) string {
+		var p peer.Peer
+		if err := call(ctx, grpc.Peer(&p)); err != nil {
+			return fmt.Sprintf("%s: %s", serviceerror.ToStatus(err).Code(), rpcErrorMessage(err, t, &p, temporalServer))
+		}
+		return ""
+	}
 }
 
 func rpcErrorMessage(err error, t *config.Target, p *peer.Peer, server string) string {

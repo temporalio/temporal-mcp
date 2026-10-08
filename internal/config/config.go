@@ -22,6 +22,8 @@ type Config struct {
 	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
 	Listen  string   `yaml:"listen"`
 	Targets []Target `yaml:"targets"`
+	// Codecs are the codec servers that targets name in their codec field, by name.
+	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
 	Auth *Auth `yaml:"auth"`
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
@@ -84,15 +86,66 @@ type Target struct {
 	Namespace   string   `yaml:"namespace"`
 	// APIKey says where to read the target's API key. With one the server connects
 	// over TLS; without one it connects in plaintext with no credentials.
-	APIKey *APIKey `yaml:"api_key"`
+	APIKey *Secret `yaml:"api_key"`
+	// PayloadHandling says how tool responses show the target's payloads:
+	// PayloadOmit, PayloadPassthrough or PayloadDecode. Empty means PayloadOmit.
+	PayloadHandling string `yaml:"payload_handling"`
+	// Codec is the name of the codec server in Config.Codecs that decodes the
+	// target's payloads. It is required when PayloadHandling is PayloadDecode.
+	Codec string `yaml:"codec"`
 }
 
-// APIKey says where to read a Temporal API key from. Exactly one field is set.
-type APIKey struct {
-	// Env is the name of an environment variable holding the key, read at startup.
+// The values of Target.PayloadHandling.
+const (
+	// PayloadOmit leaves each payload out of tool responses.
+	PayloadOmit = "omit"
+	// PayloadPassthrough shows each payload as stored, in base64.
+	PayloadPassthrough = "passthrough"
+	// PayloadDecode shows each payload as the target's codec server decodes it.
+	PayloadDecode = "decode"
+)
+
+// Codec is a codec server, which decodes payloads over HTTP for the Temporal UI and CLI.
+type Codec struct {
+	// Endpoint is the codec server's URL, without the /decode path. The
+	// placeholder {namespace} in it stands for the namespace of the target.
+	Endpoint string `yaml:"endpoint"`
+	// AuthorizationHeader says where to read the whole value of the Authorization
+	// header sent to the codec server, such as "Bearer abc". Without one, requests
+	// carry no Authorization header.
+	AuthorizationHeader *Secret `yaml:"authorization_header"`
+}
+
+// Secret says where to read a secret from. Exactly one field is set.
+type Secret struct {
+	// Env is the name of an environment variable holding the secret, read at startup.
 	Env string `yaml:"env"`
-	// File is the path of a file holding the key, read on every Temporal call.
+	// File is the path of a file holding the secret, read on every use.
 	File string `yaml:"file"`
+}
+
+// Reader returns a function that returns the secret, trimmed of surrounding
+// whitespace. It reads an environment variable now, failing if it is unset or
+// empty, and a file on every call, failing if it cannot be read or is empty.
+func (s *Secret) Reader() (func() (string, error), error) {
+	if s.Env != "" {
+		v := strings.TrimSpace(os.Getenv(s.Env))
+		if v == "" {
+			return nil, fmt.Errorf("environment variable %s is unset or empty", s.Env)
+		}
+		return func() (string, error) { return v, nil }, nil
+	}
+	return func() (string, error) {
+		data, err := os.ReadFile(s.File)
+		if err != nil {
+			return "", err
+		}
+		v := strings.TrimSpace(string(data))
+		if v == "" {
+			return "", fmt.Errorf("%s is empty", s.File)
+		}
+		return v, nil
+	}, nil
 }
 
 // Load reads the YAML file at path and returns the validated configuration.
@@ -206,8 +259,28 @@ func (c *Config) validate() error {
 			}
 			aliases = append(aliases, seenAlias{alias, i})
 		}
-		if k := t.APIKey; k != nil && (k.Env == "") == (k.File == "") {
-			errs = append(errs, fmt.Errorf("%s: api_key: exactly one of env or file is required", label))
+		if err := validateSecret(label+": api_key", t.APIKey); err != nil {
+			errs = append(errs, err)
+		}
+		switch t.PayloadHandling {
+		case "", PayloadOmit, PayloadPassthrough, PayloadDecode:
+		default:
+			errs = append(errs, fmt.Errorf("%s: payload_handling: %q is not one of %s, %s or %s", label, t.PayloadHandling, PayloadOmit, PayloadPassthrough, PayloadDecode))
+		}
+		if _, ok := c.Codecs[t.Codec]; t.Codec != "" && !ok {
+			errs = append(errs, fmt.Errorf("%s: codec %q is not one of codecs", label, t.Codec))
+		}
+		if t.PayloadHandling == PayloadDecode && t.Codec == "" {
+			errs = append(errs, fmt.Errorf("%s: codec is required with payload_handling %s", label, PayloadDecode))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
+		codec, label := c.Codecs[name], fmt.Sprintf("codecs: %q", name)
+		if err := validateURL(label+": endpoint", codec.Endpoint, true); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateSecret(label+": authorization_header", codec.AuthorizationHeader); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	switch {
@@ -308,7 +381,7 @@ func validateListen(listen string, authenticated bool) error {
 
 func (a *Auth) validate() []error {
 	var errs []error
-	if err := validateURL("auth: resource", a.Resource); err != nil {
+	if err := validateURL("auth: resource", a.Resource, false); err != nil {
 		errs = append(errs, err)
 	}
 	if len(a.Issuers) == 0 {
@@ -317,7 +390,7 @@ func (a *Auth) validate() []error {
 	seen := map[string]int{}
 	for i, iss := range a.Issuers {
 		label := fmt.Sprintf("auth: issuers[%d]", i)
-		if err := validateURL(label+": issuer", iss.Issuer); err != nil {
+		if err := validateURL(label+": issuer", iss.Issuer, false); err != nil {
 			errs = append(errs, err)
 		} else if j, ok := seen[iss.Issuer]; ok {
 			errs = append(errs, fmt.Errorf("%s: issuer %q conflicts with the issuer of issuers[%d]", label, iss.Issuer, j))
@@ -329,7 +402,7 @@ func (a *Auth) validate() []error {
 		}
 	}
 	for i, s := range a.AuthorizationServers {
-		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s); err != nil {
+		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -341,13 +414,31 @@ func (a *Auth) validate() []error {
 	return errs
 }
 
-func validateURL(label, value string) error {
+func validateSecret(label string, s *Secret) error {
+	if s != nil && (s.Env == "") == (s.File == "") {
+		return fmt.Errorf("%s: exactly one of env or file is required", label)
+	}
+	return nil
+}
+
+// validateURL requires value to be an https URL, or an http one for a codec endpoint or
+// a loopback host, with a host and no user info, query or fragment. A codec endpoint's
+// {namespace} placeholder parses as a namespace.
+func validateURL(label, value string, codecEndpoint bool) error {
 	if value == "" {
 		return fmt.Errorf("%s is required", label)
 	}
-	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
-		return fmt.Errorf("%s: %q must be an https URL (http only for a loopback host) with a host and no user info, query or fragment", label, value)
+	parsed := value
+	if codecEndpoint {
+		parsed = strings.ReplaceAll(value, "{namespace}", "namespace")
+	}
+	u, err := url.Parse(parsed)
+	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !codecEndpoint && !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+		scheme := "an https URL (http only for a loopback host)"
+		if codecEndpoint {
+			scheme = "an http or https URL"
+		}
+		return fmt.Errorf("%s: %q must be %s with a host and no user info, query or fragment", label, value, scheme)
 	}
 	return nil
 }

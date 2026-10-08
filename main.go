@@ -3,6 +3,8 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/temporalio/operator-mcp/internal/config"
@@ -25,6 +29,10 @@ const (
 )
 
 var version = "dev"
+
+// cancelGrace is how long the tool calls still running at the shutdown timeout
+// have, once cancelled, to end and write their audit records.
+const cancelGrace = time.Second
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -71,11 +79,51 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
+	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
 
-	return (&http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}).Serve(ln)
+	// Every request's context derives from calls, so cancelling it ends the tool calls in progress.
+	calls, cancelCalls := context.WithCancel(context.Background())
+	defer cancelCalls()
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		BaseContext:       func(net.Listener) context.Context { return calls },
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+	select {
+	case err := <-served:
+		return err
+	case <-signals.Done():
+	}
+	// A second signal stops the process at once.
+	stop()
+	return shutdown(srv, cmp.Or(cfg.ShutdownTimeout, config.DefaultShutdownTimeout), cancelCalls, stderr, logger)
+}
+
+// shutdown stops srv accepting connections and waits up to timeout for the
+// requests in progress to end. It then cancels those still running, which ends
+// their tool calls as cancelled, and waits up to cancelGrace for them to end.
+func shutdown(srv *http.Server, timeout time.Duration, cancelCalls context.CancelFunc, stderr io.Writer, logger *slog.Logger) error {
+	fmt.Fprintf(stderr, "%s: shutting down\n", name)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	logger.Warn("cancelling the requests still in progress at the shutdown timeout", "shutdown_timeout", timeout)
+	cancelCalls()
+	ctx, cancel = context.WithTimeout(context.Background(), cancelGrace)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("requests still in progress %s after they were cancelled", cancelGrace)
+	}
+	return nil
 }

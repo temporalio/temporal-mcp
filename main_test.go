@@ -229,12 +229,14 @@ func TestShutdownDuringToolCall(t *testing.T) {
 	}
 	bin := buildBinary(t)
 	tests := []struct {
-		name string
+		name            string
+		shutdownTimeout string
 		// release says whether Temporal answers the call once the server is shutting down.
 		release bool
 		outcome string
 	}{
-		{"call finishes", true, "ok"},
+		{"call finishes", "", true, "ok"},
+		{"call outlasts the shutdown timeout", "500ms", false, "cancelled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -251,6 +253,9 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			t.Cleanup(gs.Stop)
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			config := fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: %q, namespace: default}\n", ln.Addr())
+			if tt.shutdownTimeout != "" {
+				config += "shutdown_timeout: " + tt.shutdownTimeout + "\n"
+			}
 			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}

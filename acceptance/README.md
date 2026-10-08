@@ -75,6 +75,25 @@ worker, including on failure. Session 4 includes an explicit readiness barrier:
 IAI does not start until all 160 runs have recorded their recovery outcome, so
 the consumer test cannot race the activity workers.
 
+### Use an interactive driver
+
+The tracked scenarios are scripted for reproducible regression testing. To let
+IAI generate natural follow-ups, copy a scenario and replace `prompts` with:
+
+```yaml
+driver:
+  type: agent
+  goal: Follow up until the order failure and safe next step are understood.
+  initialPrompt: In orders prod, why did order 88231 fail?
+  maxTurns: 4
+```
+
+Run the copy with `--scenario /path/to/session-driver.yaml`; keep the rest of
+the command unchanged. For Sessions 3 and 4, use
+`initialPrompt: __DYNAMIC_PROMPT_JSON__` so the runner inserts the seeded
+timestamp. The driver consumes a second IAI/Codex session and writes the same
+audit artifacts under `acceptance/runs`.
+
 ## Session contracts
 
 | Session | Seeded state | Historical prompt focus |

@@ -143,7 +143,7 @@ func cloudOpsClient(t config.Target, name, version string, cred credential, opts
 			return cred(ctx, identity.CallerFrom(ctx), &t)
 		}),
 		UserAgent: name + "/" + version,
-		// One Cloud Ops call per tool call, as for Temporal calls, so a rate limit or an unreachable API is reported as such.
+		// Its retries would hide a rate limit from the agent; the tools retry only an unavailable API themselves.
 		DisableRetry: true,
 		GRPCDialOptions: []grpc.DialOption{
 			grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
@@ -200,7 +200,7 @@ func WithTool(ctx context.Context, name string, rpcs, targets []string) context.
 type callsKey struct{}
 
 // CountCalls returns a context whose Temporal calls are counted in n: those that
-// pass the limits set by WithTool, each counted once however often it is retried.
+// pass the limits set by WithTool, with every attempt of a retried call counted.
 func CountCalls(ctx context.Context, n *atomic.Int64) context.Context {
 	return context.WithValue(ctx, callsKey{}, n)
 }

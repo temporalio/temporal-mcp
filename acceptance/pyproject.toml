@@ -1,0 +1,34 @@
+[project]
+name = "operator-mcp-acceptance"
+version = "0.1.0"
+description = "Temporal fixtures and IAI scenarios for operator-mcp"
+requires-python = ">=3.11"
+dependencies = [
+  "temporalio>=1.31,<1.32",
+]
+
+[project.scripts]
+operator-mcp-acceptance = "ops_mcp.acceptance.runner:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4,<9",
+  "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ops_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

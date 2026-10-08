@@ -1,0 +1,20 @@
+version: 1
+name: operator-mcp-session-1
+session:
+  provider: codex
+  sandbox: read-only
+  approvalPolicy: never
+  ephemeral: true
+  targetMcp: |
+    {
+      "name": "temporal-operator",
+      "transport": "stdio",
+      "command": __OPERATOR_MCP_JSON__,
+      "args": ["--stdio", "--config", __TARGET_CONFIG_JSON__],
+      "cwd": __REPO_ROOT_JSON__,
+      "expectedTools": ["list_available_targets", "search_workflows", "get_workflow", "get_workflow_history", "count_workflows", "get_task_queue"]
+    }
+prompts:
+  - "In orders prod, why did order 88231 fail?"
+  - "This order is a Temporal workflow in orders prod. Please inspect the workflow execution itself."
+  - "Has the catalog recovered enough to retry this order? If the evidence supports it, give me a read-only reset plan for this exact run, but do not execute anything."

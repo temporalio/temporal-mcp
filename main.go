@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/payload"
@@ -37,6 +40,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
+	stdio := flags.Bool("stdio", false, "serve MCP over stdin and stdout instead of HTTP")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -64,6 +68,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 	payloads, err := payload.NewRenderer(cfg, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
+	}
+	if *stdio {
+		if cfg.Auth != nil {
+			return errors.New("--stdio does not support HTTP bearer-token authentication")
+		}
+		s, err := server.NewStdio(serverName, version, cfg, clients, payloads, stderr, logger)
+		if err != nil {
+			return fmt.Errorf("invalid config %s: %w", *configPath, err)
+		}
+		return s.Run(context.Background(), &mcp.StdioTransport{})
 	}
 
 	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, stdout, logger)

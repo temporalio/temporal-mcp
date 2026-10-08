@@ -2,3 +2,9 @@
 /operator-mcp
 .claude/
 .env
+acceptance/.pytest_cache/
+acceptance/.ruff_cache/
+acceptance/.venv/
+acceptance/runs/
+__pycache__/
+*.pyc

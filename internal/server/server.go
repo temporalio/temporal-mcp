@@ -171,6 +171,21 @@ func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients,
 	return newMux(s.Server, cfg, logger), nil
 }
 
+// NewStdio returns an MCP server for a single stdio connection. records must
+// not be stdout, because stdout carries the MCP protocol on this transport.
+// HTTP authentication is intentionally unsupported: a stdio server is
+// launched as a local child process and has no bearer-token request boundary.
+func NewStdio(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
+	if cfg.Auth != nil {
+		return nil, errors.New("stdio transport does not support HTTP authentication")
+	}
+	s, tools := newServer(name, version, cfg, clients, payloads, records, logger)
+	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
+		return nil, err
+	}
+	return s.Server, nil
+}
+
 func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	handler := newHandler(s, cfg)

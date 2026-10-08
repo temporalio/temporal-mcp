@@ -196,7 +196,7 @@ func TestToolCalls(t *testing.T) {
 }
 
 func TestToolErrorHasResultType(t *testing.T) {
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, t.Output(), slog.New(slog.DiscardHandler))
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

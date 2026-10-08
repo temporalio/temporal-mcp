@@ -18,9 +18,11 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -29,6 +31,9 @@ import (
 )
 
 const callTimeout = 10 * time.Second
+
+// The waits before each retry of an unavailable server: 1.4s in all, which spans the first reconnect attempts of the Temporal and Cloud Ops clients and still reports a server that stays down well inside callTimeout.
+var retryDelays = []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
 type getWorkflowInput struct {
 	Target     string `json:"target" jsonschema:"the name or an alias of a target"`
@@ -182,16 +187,25 @@ func callTemporal[Resp any](ctx context.Context, t *config.Target, rpc func(cont
 	return callServer(ctx, t, temporalServer, rpc)
 }
 
-// callServer makes one call to server for target t, with the timeout of a Temporal call, and returns its failure as a tool error that names server.
+// callServer calls server for target t, retrying a few times while server is unavailable, all within the timeout of a Temporal call, and returns its failure as a tool error that names server.
 func callServer[Resp any](ctx context.Context, t *config.Target, server string, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	var p peer.Peer
-	resp, err := rpc(ctx, grpc.Peer(&p))
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		var p peer.Peer
+		resp, err := rpc(ctx, grpc.Peer(&p))
+		if err == nil {
+			return resp, nil
+		}
+		if attempt < len(retryDelays) && serviceerror.ToStatus(err).Code() == codes.Unavailable {
+			select {
+			case <-time.After(retryDelays[attempt]):
+				continue
+			case <-ctx.Done():
+			}
+		}
 		return resp, temporalError(err, t, &p, server)
 	}
-	return resp, nil
 }
 
 func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (workflowRun, error) {

@@ -90,6 +90,26 @@ func TestServerHandshake(t *testing.T) {
 	}
 }
 
+func TestServerHandshakeStdio(t *testing.T) {
+	bin := buildBinary(t, "-ldflags", "-X main.version=9.9.9-test")
+	command := exec.Command(bin, "--config", filepath.Join("testdata", "config.yaml"), "--stdio")
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), &mcp.CommandTransport{Command: command}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if got := session.InitializeResult().ServerInfo; got.Name != "temporal-operator" || got.Version != "9.9.9-test" {
+		t.Errorf("server info = %+v, want name temporal-operator and version 9.9.9-test", got)
+	}
+	tools, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(tools.Tools, func(tool *mcp.Tool) bool { return tool.Name == "get_workflow" }) {
+		t.Errorf("tools = %v, want get_workflow", tools.Tools)
+	}
+}
+
 func TestBinaryDoesNotImportFixture(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
 	if err != nil {

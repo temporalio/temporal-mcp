@@ -108,3 +108,12 @@ With the race detector, which does not cover the `operator-mcp` binary that the 
 ```sh
 go test -race ./...
 ```
+
+## Interactive agent acceptance
+
+The four historical user-test sessions, their full Temporal seed populations,
+and the IAI runner live in [`acceptance/`](acceptance/README.md). The fixtures
+are Python test infrastructure; the server under test is this Go binary. The
+runner starts an isolated Temporal dev server, seeds the chosen session, renders
+its dynamic timestamps into the IAI scenario, and cleans up every server and
+worker after the run.

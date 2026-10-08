@@ -1,0 +1,18 @@
+version: 1
+name: operator-mcp-session-4
+session:
+  provider: codex
+  sandbox: read-only
+  approvalPolicy: never
+  ephemeral: true
+  targetMcp: |
+    {
+      "name": "temporal-operator",
+      "transport": "stdio",
+      "command": __OPERATOR_MCP_JSON__,
+      "args": ["--stdio", "--config", __TARGET_CONFIG_JSON__],
+      "cwd": __REPO_ROOT_JSON__,
+      "expectedTools": ["list_available_targets", "list_search_attributes", "search_workflows", "count_workflows", "get_workflow_history", "get_task_queue"]
+    }
+prompts:
+  - __DYNAMIC_PROMPT_JSON__

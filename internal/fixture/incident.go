@@ -12,12 +12,10 @@ import (
 )
 
 const (
-	// incidentTaskQueue is the task queue of ledgerEntryWorkflow.
 	incidentTaskQueue = "ledger-incident"
 	// PaymentsTaskQueue is the task queue of the ProcessLedgerEntry activities for the payments domain.
 	PaymentsTaskQueue = "ledger-payments"
-	// coreTaskQueue is the task queue of the ProcessLedgerEntry activities for every other domain.
-	coreTaskQueue = "ledger-core"
+	coreTaskQueue     = "ledger-core"
 	// RecoveryWorkerIdentity is the identity of the worker that NewRecoveryWorker returns.
 	RecoveryWorkerIdentity = "recovery-worker"
 )
@@ -30,8 +28,6 @@ type LedgerEntry struct {
 	Terminal bool   `json:"terminal"`
 }
 
-// ledgerEntryWorkflow processes entry with a ProcessLedgerEntry activity on its domain's task queue, retried every
-// second.
 func ledgerEntryWorkflow(ctx workflow.Context, entry LedgerEntry) error {
 	queue := coreTaskQueue
 	if entry.Domain == "payments" {

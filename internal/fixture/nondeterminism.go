@@ -9,7 +9,6 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// fulfillmentTaskQueue is the task queue of FulfillmentWorkflow.
 const fulfillmentTaskQueue = "fulfillment"
 
 func fulfillmentV1(ctx workflow.Context, shippingBranch bool) error {

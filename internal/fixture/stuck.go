@@ -20,7 +20,6 @@ const (
 	StuckLedgerActivities = 7
 )
 
-// reconcileLedgerWorkflow starts batches FetchLedgerBatch activities and waits for them.
 func reconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 12 * time.Hour})
 	var fetches []workflow.Future

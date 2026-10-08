@@ -228,7 +228,6 @@ func encodeContinuation(position []byte, tool string, binding ...string) (string
 	return s, len(s) <= maxContinuation
 }
 
-// decodeContinuation returns the position in s, a continuation that tool returned for the same binding.
 func decodeContinuation(s, tool string, binding ...string) ([]byte, error) {
 	if len(s) > maxContinuation {
 		return nil, invalidContinuation(tool)

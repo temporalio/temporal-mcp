@@ -20,8 +20,8 @@ const (
 	StuckLedgerActivities = 7
 )
 
-// ReconcileLedgerWorkflow starts batches FetchLedgerBatch activities and waits for them.
-func ReconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
+// reconcileLedgerWorkflow starts batches FetchLedgerBatch activities and waits for them.
+func reconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 12 * time.Hour})
 	var fetches []workflow.Future
 	for range batches {
@@ -39,15 +39,15 @@ func ReconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
 // FetchLedgerBatch activity ever starts.
 func NewStuckWorker(c client.Client) worker.Worker {
 	w := worker.New(c, LedgerTaskQueue, worker.Options{Identity: StuckWorkerIdentity, LocalActivityWorkerOnly: true})
-	w.RegisterWorkflow(ReconcileLedgerWorkflow)
+	w.RegisterWorkflow(reconcileLedgerWorkflow)
 	return w
 }
 
-// StartStuckLedger starts ReconcileLedgerWorkflow as StuckLedgerWorkflowID with three batches and as two more
+// StartStuckLedger starts reconcileLedgerWorkflow as StuckLedgerWorkflowID with three batches and as two more
 // workflows with two batches each.
 func StartStuckLedger(ctx context.Context, c client.Client) error {
 	for id, batches := range map[string]int{StuckLedgerWorkflowID: 3, "ledger-reconciliation-2": 2, "ledger-reconciliation-3": 2} {
-		if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, ReconcileLedgerWorkflow, batches); err != nil {
+		if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, reconcileLedgerWorkflow, batches); err != nil {
 			return err
 		}
 	}

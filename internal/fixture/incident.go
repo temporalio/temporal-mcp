@@ -12,28 +12,28 @@ import (
 )
 
 const (
-	// IncidentTaskQueue is the task queue of LedgerEntryWorkflow.
-	IncidentTaskQueue = "ledger-incident"
+	// incidentTaskQueue is the task queue of ledgerEntryWorkflow.
+	incidentTaskQueue = "ledger-incident"
 	// PaymentsTaskQueue is the task queue of the ProcessLedgerEntry activities for the payments domain.
 	PaymentsTaskQueue = "ledger-payments"
-	// CoreTaskQueue is the task queue of the ProcessLedgerEntry activities for every other domain.
-	CoreTaskQueue = "ledger-core"
+	// coreTaskQueue is the task queue of the ProcessLedgerEntry activities for every other domain.
+	coreTaskQueue = "ledger-core"
 	// RecoveryWorkerIdentity is the identity of the worker that NewRecoveryWorker returns.
 	RecoveryWorkerIdentity = "recovery-worker"
 )
 
 var domain = temporal.NewSearchAttributeKeyKeyword("Domain")
 
-// LedgerEntry is the input of LedgerEntryWorkflow.
+// LedgerEntry is the input of ledgerEntryWorkflow.
 type LedgerEntry struct {
 	Domain   string `json:"domain"`
 	Terminal bool   `json:"terminal"`
 }
 
-// LedgerEntryWorkflow processes entry with a ProcessLedgerEntry activity on its domain's task queue, retried every
+// ledgerEntryWorkflow processes entry with a ProcessLedgerEntry activity on its domain's task queue, retried every
 // second.
-func LedgerEntryWorkflow(ctx workflow.Context, entry LedgerEntry) error {
-	queue := CoreTaskQueue
+func ledgerEntryWorkflow(ctx workflow.Context, entry LedgerEntry) error {
+	queue := coreTaskQueue
 	if entry.Domain == "payments" {
 		queue = PaymentsTaskQueue
 	}
@@ -54,11 +54,11 @@ func processLedgerEntry(ctx context.Context, entry LedgerEntry) error {
 	return nil
 }
 
-// NewIncidentWorker returns an unstarted worker that runs LedgerEntryWorkflow on IncidentTaskQueue, and no
+// NewIncidentWorker returns an unstarted worker that runs ledgerEntryWorkflow on incidentTaskQueue, and no
 // activities: while no recovery worker runs, the incident goes on and no ProcessLedgerEntry activity starts.
 func NewIncidentWorker(c client.Client) worker.Worker {
-	w := worker.New(c, IncidentTaskQueue, worker.Options{LocalActivityWorkerOnly: true})
-	w.RegisterWorkflow(LedgerEntryWorkflow)
+	w := worker.New(c, incidentTaskQueue, worker.Options{LocalActivityWorkerOnly: true})
+	w.RegisterWorkflow(ledgerEntryWorkflow)
 	return w
 }
 
@@ -72,12 +72,12 @@ func NewRecoveryWorker(c client.Client) worker.Worker {
 	return w
 }
 
-// StartLedgerEntry starts LedgerEntryWorkflow for entry as workflow id, with search attribute Domain set to its
+// StartLedgerEntry starts ledgerEntryWorkflow for entry as workflow id, with search attribute Domain set to its
 // domain.
 func StartLedgerEntry(ctx context.Context, c client.Client, id string, entry LedgerEntry) (client.WorkflowRun, error) {
 	return c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                    id,
-		TaskQueue:             IncidentTaskQueue,
+		TaskQueue:             incidentTaskQueue,
 		TypedSearchAttributes: temporal.NewSearchAttributes(domain.ValueSet(entry.Domain)),
-	}, LedgerEntryWorkflow, entry)
+	}, ledgerEntryWorkflow, entry)
 }

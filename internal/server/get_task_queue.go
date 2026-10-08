@@ -25,7 +25,7 @@ const maxPollers = 100
 type getTaskQueueInput struct {
 	Target    string   `json:"target" jsonschema:"the name or an alias of a target"`
 	TaskQueue string   `json:"task_queue" jsonschema:"the task queue's name"`
-	Types     []string `json:"types,omitempty" jsonschema:"the task queue types to describe; workflow, activity and nexus if omitted"`
+	Types     []string `json:"types,omitempty" jsonschema:"the task queue types to return a section for; every type if omitted"`
 }
 
 type taskQueue struct {
@@ -48,7 +48,6 @@ type taskQueueSection struct {
 type poller struct {
 	Identity       string     `json:"identity"`
 	LastAccessTime *time.Time `json:"last_access_time"`
-	BuildID        *string    `json:"build_id"`
 }
 
 func getTaskQueueInputSchema() *jsonschema.Schema {
@@ -98,11 +97,7 @@ func getTaskQueue(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandler
 				return b.GetLastAccessTime().AsTime().Compare(a.GetLastAccessTime().AsTime())
 			})
 			for _, p := range pollers[:min(len(pollers), maxPollers)] {
-				pl := poller{Identity: p.GetIdentity(), LastAccessTime: timeOf(p.GetLastAccessTime())}
-				if id := p.GetDeploymentOptions().GetBuildId(); id != "" {
-					pl.BuildID = &id
-				}
-				section.Pollers = append(section.Pollers, pl)
+				section.Pollers = append(section.Pollers, poller{Identity: p.GetIdentity(), LastAccessTime: timeOf(p.GetLastAccessTime())})
 			}
 			if stats := resp.GetStats(); stats != nil {
 				section.BacklogCount = new(stats.GetApproximateBacklogCount())

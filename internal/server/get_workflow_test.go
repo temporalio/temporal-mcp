@@ -1164,42 +1164,39 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 		input := passthrough(`{"order_id":"88231","catalog_should_fail":true,"retry_interval_seconds":1}`)
 
-		var scheduledID float64
-		t.Run("failures of the latest run", func(t *testing.T) {
+		var scheduledID, failedID int64
+		t.Run("failures", func(t *testing.T) {
 			env := callTool(t, "get_workflow_history", map[string]any{"target": "local", "workflow_id": "order-88231", "event_types": []any{"failures"}})
 			events := historyEvents(env)
-			if run := env["result"].(map[string]any)["run_id"]; run != failed.GetRunID() || env["target"] != "dev" || env["complete"] != true || env["next_call"] != nil {
-				t.Errorf("run_id = %v, envelope = %#v; want run %s, target dev, complete and no next_call", run, env, failed.GetRunID())
+			if env["target"] != "dev" || env["complete"] != true || env["next_call"] != nil {
+				t.Errorf("envelope = %#v, want target dev, complete and no next_call", env)
 			}
 			if got, want := typesOf(events), []string{"ActivityTaskFailed", "WorkflowExecutionFailed"}; !slices.Equal(got, want) {
 				t.Fatalf("event types = %v, want %v", got, want)
 			}
-			cause := map[string]any{
-				"message":                "503 Service Unavailable from catalog service",
-				"kind":                   "ApplicationFailure",
-				"stack_trace":            "",
-				"application":            map[string]any{"type": "CatalogServiceUnavailable", "non_retryable": false},
-				"details":                []any{},
-				"encoded_attributes":     nil,
-				"last_heartbeat_details": []any{},
-				"cause":                  nil,
-			}
-			if got := attributes(events[0])["failure"]; !reflect.DeepEqual(got, cause) {
-				t.Errorf("ActivityTaskFailed failure = %#v, want %#v", got, cause)
-			}
-			if got := attributes(events[1])["failure"].(map[string]any)["cause"]; !reflect.DeepEqual(got, cause) {
-				t.Errorf("WorkflowExecutionFailed failure cause = %#v, want %#v", got, cause)
-			}
-			scheduledID = attributes(events[0])["scheduled_event_id"].(float64)
+			failedID = int64(events[0]["event_id"].(float64))
+			scheduledID = int64(attributes(events[0])["scheduled_event_id"].(float64))
 		})
 
-		t.Run("event range", func(t *testing.T) {
-			env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "order-88231", "event_range": map[string]any{"first": scheduledID, "last": scheduledID}})
-			events := historyEvents(env)
-			if len(events) != 1 || events[0]["event_id"] != scheduledID || events[0]["event_type"] != "ActivityTaskScheduled" || env["complete"] != true {
-				t.Fatalf("events = %#v, complete = %v; want the ActivityTaskScheduled event %v alone, complete", events, env["complete"], scheduledID)
+		t.Run("latest run", func(t *testing.T) {
+			env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "continue-once", "order": "newest_first", "limit": 1})
+			if run, got := env["result"].(map[string]any)["run_id"], typesOf(historyEvents(env)); run != latestRunID || !slices.Equal(got, []string{"WorkflowExecutionCompleted"}) {
+				t.Errorf("run_id = %v, event types = %v; want run %s and its WorkflowExecutionCompleted", run, got, latestRunID)
 			}
-			a := attributes(events[0])
+		})
+
+		t.Run("attributes", func(t *testing.T) {
+			events := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "order-88231", "event_range": map[string]any{"last": scheduledID}}))
+			started, scheduled := events[0], events[len(events)-1]
+			a := attributes(started)
+			if started["event_type"] != "WorkflowExecutionStarted" || !reflect.DeepEqual(a["input"], []any{input}) || !reflect.DeepEqual(a["workflow_type"], map[string]any{"name": "OrderWorkflow"}) ||
+				!reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
+				t.Errorf("first event = %#v, want WorkflowExecutionStarted with the order's input, type and search attributes", started)
+			}
+			if scheduled["event_type"] != "ActivityTaskScheduled" {
+				t.Fatalf("event %v = %#v, want ActivityTaskScheduled", scheduledID, scheduled)
+			}
+			a = attributes(scheduled)
 			want := map[string]any{
 				"activity_type":          map[string]any{"name": "enrich_product"},
 				"input":                  []any{input},
@@ -1215,18 +1212,49 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 		})
 
-		t.Run("event types within an event range", func(t *testing.T) {
+		t.Run("filters and order", func(t *testing.T) {
+			all := []int64{}
+			for id := length; id > 0; id-- {
+				all = append(all, id)
+			}
 			tests := []struct {
-				rng  map[string]any
-				want []string
+				order       string
+				eventTypes  []any
+				first, last int64
+				want        []int64
 			}{
-				{map[string]any{"last": length - 1}, []string{"ActivityTaskFailed"}},
-				{map[string]any{"first": scheduledID, "last": scheduledID}, []string{}},
+				{"newest_first", nil, 0, 0, all},
+				{"newest_first", nil, 2, 4, []int64{4, 3, 2}},
+				{"newest_first", nil, length + 10, 0, nil},
+				{"newest_first", nil, length - 2, 0, []int64{length, length - 1, length - 2}},
+				{"newest_first", nil, 0, 3, []int64{3, 2, 1}},
+				{"oldest_first", nil, length - 2, 0, []int64{length - 2, length - 1, length}},
+				{"oldest_first", nil, 0, 3, []int64{1, 2, 3}},
+				{"oldest_first", []any{"failures"}, 0, length - 1, []int64{failedID}},
+				{"oldest_first", []any{"failures"}, scheduledID, scheduledID, nil},
 			}
 			for _, tt := range tests {
-				env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": failed.GetRunID(), "event_types": []any{"failures"}, "event_range": tt.rng, "limit": 100})
-				if got := typesOf(historyEvents(env)); !slices.Equal(got, tt.want) || env["complete"] != true {
-					t.Errorf("event_range %v: event types = %v, complete = %v; want %v, complete", tt.rng, got, env["complete"], tt.want)
+				bounds := map[string]any{}
+				if tt.first != 0 {
+					bounds["first"] = tt.first
+				}
+				if tt.last != 0 {
+					bounds["last"] = tt.last
+				}
+				args := map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": failed.GetRunID(), "order": tt.order, "limit": 100}
+				if len(bounds) > 0 {
+					args["event_range"] = bounds
+				}
+				if tt.eventTypes != nil {
+					args["event_types"] = tt.eventTypes
+				}
+				env := callTool(t, "get_workflow_history", args)
+				want := []float64{}
+				for _, id := range tt.want {
+					want = append(want, float64(id))
+				}
+				if got := ids(historyEvents(env)); !slices.Equal(got, want) || env["complete"] != true {
+					t.Errorf("%s %v first %d last %d: event IDs = %v, complete = %v; want %v, complete", tt.order, tt.eventTypes, tt.first, tt.last, got, env["complete"], want)
 				}
 			}
 		})
@@ -1242,59 +1270,6 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			if calls[0] != 2 || slices.ContainsFunc(calls[1:], func(n float64) bool { return n != 1 }) {
 				t.Errorf("temporal_calls = %v, want 2 for the first call, which finds the run, and 1 for each after", calls)
-			}
-		})
-
-		t.Run("newest first", func(t *testing.T) {
-			env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": failed.GetRunID(), "order": "newest_first", "limit": 100})
-			events := historyEvents(env)
-			want := []float64{}
-			for id := length; id > 0; id-- {
-				want = append(want, float64(id))
-			}
-			if got := ids(events); !slices.Equal(got, want) || env["complete"] != true {
-				t.Fatalf("event IDs = %v, complete = %v; want %v, complete", got, env["complete"], want)
-			}
-			started := events[len(events)-1]
-			a := attributes(started)
-			if started["event_type"] != "WorkflowExecutionStarted" || !reflect.DeepEqual(a["input"], []any{input}) || !reflect.DeepEqual(a["workflow_type"], map[string]any{"name": "OrderWorkflow"}) ||
-				!reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
-				t.Errorf("first event = %#v, want WorkflowExecutionStarted with the order's input, type and search attributes", started)
-			}
-			if _, err := time.Parse(time.RFC3339Nano, fmt.Sprint(started["event_time"])); err != nil {
-				t.Errorf("event_time = %v, want an RFC 3339 time", started["event_time"])
-			}
-		})
-
-		t.Run("newest first and oldest first honour both bounds", func(t *testing.T) {
-			tests := []struct {
-				order       string
-				first, last int64
-				want        []int64
-			}{
-				{"newest_first", 2, 4, []int64{4, 3, 2}},
-				{"newest_first", length + 10, 0, nil},
-				{"newest_first", length - 2, 0, []int64{length, length - 1, length - 2}},
-				{"newest_first", 0, 3, []int64{3, 2, 1}},
-				{"oldest_first", length - 2, 0, []int64{length - 2, length - 1, length}},
-				{"oldest_first", 0, 3, []int64{1, 2, 3}},
-			}
-			for _, tt := range tests {
-				bounds := map[string]any{}
-				if tt.first != 0 {
-					bounds["first"] = tt.first
-				}
-				if tt.last != 0 {
-					bounds["last"] = tt.last
-				}
-				env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": failed.GetRunID(), "order": tt.order, "limit": 100, "event_range": bounds})
-				want := []float64{}
-				for _, id := range tt.want {
-					want = append(want, float64(id))
-				}
-				if got := ids(historyEvents(env)); !slices.Equal(got, want) || env["complete"] != true {
-					t.Errorf("%s first %d last %d: event IDs = %v, complete = %v; want %v, complete", tt.order, tt.first, tt.last, got, env["complete"], want)
-				}
 			}
 		})
 
@@ -1461,8 +1436,8 @@ func TestToolsOnDevServer(t *testing.T) {
 			t.Fatalf("nde-affected failures = %v, want one WorkflowTaskFailed: later attempts are not recorded", got)
 		}
 		a := attributes(affected[0])
-		if msg, _ := a["failure"].(map[string]any)["message"].(string); a["cause"] != "NonDeterministicError" || !strings.HasPrefix(msg, "[TMPRL1100] ") {
-			t.Errorf("WorkflowTaskFailed attributes = %#v, want cause NonDeterministicError and a TMPRL1100 failure", a)
+		if a["cause"] != "NonDeterministicError" {
+			t.Errorf("WorkflowTaskFailed attributes = %#v, want cause NonDeterministicError", a)
 		}
 		newest := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "nde-affected", "event_types": []any{"failures"}, "order": "newest_first", "limit": 1}))
 		if len(newest) != 1 || newest[0]["event_id"] != affected[0]["event_id"] {

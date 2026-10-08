@@ -9,8 +9,8 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// FulfillmentTaskQueue is the task queue of FulfillmentWorkflow.
-const FulfillmentTaskQueue = "fulfillment"
+// fulfillmentTaskQueue is the task queue of FulfillmentWorkflow.
+const fulfillmentTaskQueue = "fulfillment"
 
 func fulfillmentV1(ctx workflow.Context, shippingBranch bool) error {
 	if shippingBranch {
@@ -24,11 +24,11 @@ func fulfillmentV2(ctx workflow.Context, _ bool) error {
 }
 
 // NewFulfillmentWorker returns an unstarted worker that runs version 1 or 2 of FulfillmentWorkflow on
-// FulfillmentTaskQueue, and no activities. Version 1 starts a PrepareShippingLabel activity on the shipping branch
+// fulfillmentTaskQueue, and no activities. Version 1 starts a PrepareShippingLabel activity on the shipping branch
 // and then waits forever. Version 2 only waits, so once it runs, the next workflow task of a run that took the
 // shipping branch, such as one for a deployment_probe signal, fails as nondeterministic.
 func NewFulfillmentWorker(c client.Client, version int) worker.Worker {
-	w := worker.New(c, FulfillmentTaskQueue, worker.Options{LocalActivityWorkerOnly: true})
+	w := worker.New(c, fulfillmentTaskQueue, worker.Options{LocalActivityWorkerOnly: true})
 	run := fulfillmentV1
 	if version == 2 {
 		run = fulfillmentV2
@@ -39,5 +39,5 @@ func NewFulfillmentWorker(c client.Client, version int) worker.Worker {
 
 // StartFulfillment starts FulfillmentWorkflow as workflow id.
 func StartFulfillment(ctx context.Context, c client.Client, id string, shippingBranch bool) (client.WorkflowRun, error) {
-	return c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: FulfillmentTaskQueue}, "FulfillmentWorkflow", shippingBranch)
+	return c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: fulfillmentTaskQueue}, "FulfillmentWorkflow", shippingBranch)
 }

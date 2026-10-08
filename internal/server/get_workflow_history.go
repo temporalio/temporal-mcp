@@ -31,12 +31,11 @@ import (
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
-// maxHistoryPages is the most pages of history one call reads while looking for events that match its filters.
 const maxHistoryPages = 10
 
 type getWorkflowHistoryInput struct {
 	getWorkflowInput
-	EventTypes   []string    `json:"event_types,omitempty" jsonschema:"the event types to return, as event_type gives them, such as ActivityTaskFailed, or the category failures, every event type that ends in Failed or TimedOut; every type if omitted"`
+	EventTypes   []string    `json:"event_types,omitempty" jsonschema:"the event types to return, named as in event_type (such as ActivityTaskFailed), or the category failures (every event type ending in Failed or TimedOut); every event type if omitted"`
 	EventRange   *eventRange `json:"event_range,omitempty" jsonschema:"the event IDs to return, inclusive"`
 	Order        string      `json:"order,omitempty" jsonschema:"oldest_first or newest_first"`
 	Limit        int         `json:"limit,omitempty" jsonschema:"the most events to return"`
@@ -44,8 +43,8 @@ type getWorkflowHistoryInput struct {
 }
 
 type eventRange struct {
-	First int64 `json:"first,omitempty" jsonschema:"the first event ID; the run's first event if omitted"`
-	Last  int64 `json:"last,omitempty" jsonschema:"the last event ID; the run's last event if omitted"`
+	First int64 `json:"first,omitempty" jsonschema:"the lowest event ID to return, in either order; the run's first event if omitted"`
+	Last  int64 `json:"last,omitempty" jsonschema:"the highest event ID to return, in either order; the run's last event if omitted"`
 }
 
 type workflowHistory struct {
@@ -152,16 +151,11 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolH
 	pages:
 		for pages := 1; ; pages++ {
 			events, next, err := read(token)
-			if err != nil && pages == 1 {
-				if in.Continuation != "" {
+			if err != nil {
+				if pages == 1 && in.Continuation != "" {
 					err = continuationError(err, "get_workflow_history")
 				}
 				return nil, none, err
-			}
-			// A failed read after the first returns the events read so far, with a next_call that retries it.
-			if err != nil {
-				more = true
-				break
 			}
 			for _, e := range events {
 				id := e.GetEventId()
@@ -213,7 +207,6 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolH
 	}
 }
 
-// eventTypes returns the event types that names give, or an invalid_argument error listing every name that is neither an event type nor a category.
 func eventTypes(names []string) (map[enumspb.EventType]bool, error) {
 	types := map[enumspb.EventType]bool{}
 	var bad []string
@@ -314,7 +307,7 @@ func protoValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) (any, err
 	return v.Interface(), nil
 }
 
-// durationString returns d in proto JSON's form, such as 1.5s.
+// durationString returns d in seconds with the fewest digits that give it, such as 1.5s.
 func durationString(d *durationpb.Duration) string {
 	return strconv.FormatFloat(d.AsDuration().Seconds(), 'f', -1, 64) + "s"
 }

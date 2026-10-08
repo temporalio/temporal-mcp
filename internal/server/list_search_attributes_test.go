@@ -79,7 +79,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 	}
 	var records bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), &records, logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), &records, logger)
 	srv := httptest.NewServer(newHandler(s.Server, cfg))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)

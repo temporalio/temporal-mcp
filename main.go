@@ -74,7 +74,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, stdout, logger)
+	// Cancelling calls cancels the tool calls in progress.
+	calls, cancelCalls := context.WithCancel(context.Background())
+	defer cancelCalls()
+	handler, err := server.NewMux(calls, serverName, version, cfg, clients, payloads, stdout, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -87,15 +90,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
 
-	// Every request's context derives from calls, so cancelling it ends the tool calls in progress.
-	calls, cancelCalls := context.WithCancel(context.Background())
-	defer cancelCalls()
-	srv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		BaseContext:       func(net.Listener) context.Context { return calls },
-	}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {

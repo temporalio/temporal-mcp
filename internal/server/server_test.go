@@ -38,7 +38,7 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewJSONHandler(out, nil))
-	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
 	for _, add := range extra {
 		add(s)
 	}
@@ -196,7 +196,7 @@ func TestToolCalls(t *testing.T) {
 }
 
 func TestToolErrorHasResultType(t *testing.T) {
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
+	h, err := NewMux(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestNewMux(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	s, _ := newServer("temporal-operator", "0", authCfg, nil, nil, t.Output(), logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", authCfg, nil, nil, t.Output(), logger)
 	callers := make(chan *identity.Caller, 1)
 	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		callers <- identity.CallerFrom(ctx)
@@ -263,7 +263,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
 	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	h, err := NewMux(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}

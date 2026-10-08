@@ -1,6 +1,6 @@
-// Middleware for MCP requests: one turns a panic in any request into an internal error, and
-// one drops null tool arguments and turns every tool error, including a handler panic, into a
-// toolError.
+// Middleware for MCP requests: one turns a panic in any request into an internal error, one
+// cancels every request once the server shuts down, and one drops null tool arguments and turns
+// every tool error, including a handler panic, into a toolError.
 
 package server
 
@@ -28,6 +28,19 @@ func recoverPanics(logger *slog.Logger) mcp.Middleware {
 					res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
 				}
 			}()
+			return next(ctx, method, req)
+		}
+	}
+}
+
+// cancelWith cancels each request once stop is done. The SDK cancels a request only when its
+// HTTP request ends, and only for MCP 2026-07-28 and later.
+func cancelWith(stop context.Context) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			defer context.AfterFunc(stop, cancel)()
 			return next(ctx, method, req)
 		}
 	}

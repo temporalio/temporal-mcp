@@ -330,7 +330,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_task_queue", "get_workflow", "get_workflow_history", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }

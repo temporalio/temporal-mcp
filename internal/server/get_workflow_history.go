@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -75,7 +76,7 @@ func getWorkflowHistoryInputSchema() *jsonschema.Schema {
 	return schema
 }
 
-func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[getWorkflowHistoryInput, envelope[workflowHistory]] {
+func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[getWorkflowHistoryInput, envelope[workflowHistory]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in getWorkflowHistoryInput) (*mcp.CallToolResult, envelope[workflowHistory], error) {
 		var none envelope[workflowHistory]
 		t, err := lookupTarget(ctx, cfg, in.Target)
@@ -146,6 +147,7 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolH
 			return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
 		}
 		earlier := func(a, b int64) bool { return forward && a < b || !forward && a > b }
+		batch := payloads.Batch(t.Name)
 		out := envelope[workflowHistory]{Target: &t.Name, Result: workflowHistory{WorkflowID: in.WorkflowID, RunID: runID, Events: []historyEvent{}}}
 		var more bool
 	pages:
@@ -167,7 +169,7 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolH
 						more = true
 						break pages
 					}
-					event, err := toHistoryEvent(e)
+					event, err := toHistoryEvent(e, batch)
 					if err != nil {
 						return nil, none, err
 					}
@@ -186,6 +188,9 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients) mcp.ToolH
 				more = true
 				break
 			}
+		}
+		if err := batch.Render(ctx); err != nil {
+			return nil, none, err
 		}
 		out.Complete = !more
 		if out.Complete {
@@ -232,12 +237,12 @@ func eventTypes(names []string) (map[enumspb.EventType]bool, error) {
 	return types, nil
 }
 
-func toHistoryEvent(e *historypb.HistoryEvent) (historyEvent, error) {
+func toHistoryEvent(e *historypb.HistoryEvent, batch *payload.Batch) (historyEvent, error) {
 	event := historyEvent{EventID: e.GetEventId(), EventTime: timeOf(e.GetEventTime()), EventType: e.GetEventType().String(), Attributes: map[string]any{}}
 	m := e.ProtoReflect()
 	if fd := m.WhichOneof(m.Descriptor().Oneofs().ByName("attributes")); fd != nil {
 		var err error
-		if event.Attributes, err = protoFields(m.Get(fd).Message()); err != nil {
+		if event.Attributes, err = protoFields(m.Get(fd).Message(), batch); err != nil {
 			return historyEvent{}, err
 		}
 	}
@@ -245,23 +250,23 @@ func toHistoryEvent(e *historypb.HistoryEvent) (historyEvent, error) {
 }
 
 // protoFields returns the fields set in m by their proto names, with payloads, failures and search attributes as get_workflow gives them.
-func protoFields(m protoreflect.Message) (map[string]any, error) {
+func protoFields(m protoreflect.Message, batch *payload.Batch) (map[string]any, error) {
 	out := map[string]any{}
 	var err error
 	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
-		out[string(fd.Name())], err = protoField(fd, v)
+		out[string(fd.Name())], err = protoField(fd, v, batch)
 		return err == nil
 	})
 	return out, err
 }
 
-func protoField(fd protoreflect.FieldDescriptor, v protoreflect.Value) (any, error) {
+func protoField(fd protoreflect.FieldDescriptor, v protoreflect.Value, batch *payload.Batch) (any, error) {
 	var err error
 	switch {
 	case fd.IsList():
 		out := make([]any, v.List().Len())
 		for i := range out {
-			if out[i], err = protoValue(fd, v.List().Get(i)); err != nil {
+			if out[i], err = protoValue(fd, v.List().Get(i), batch); err != nil {
 				return nil, err
 			}
 		}
@@ -269,15 +274,15 @@ func protoField(fd protoreflect.FieldDescriptor, v protoreflect.Value) (any, err
 	case fd.IsMap():
 		out := map[string]any{}
 		v.Map().Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
-			out[k.String()], err = protoValue(fd.MapValue(), v)
+			out[k.String()], err = protoValue(fd.MapValue(), v, batch)
 			return err == nil
 		})
 		return out, err
 	}
-	return protoValue(fd, v)
+	return protoValue(fd, v, batch)
 }
 
-func protoValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) (any, error) {
+func protoValue(fd protoreflect.FieldDescriptor, v protoreflect.Value, batch *payload.Batch) (any, error) {
 	switch fd.Kind() {
 	case protoreflect.EnumKind:
 		// The registered Go enum type gives the short name that get_workflow uses, such as Failed.
@@ -288,21 +293,21 @@ func protoValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) (any, err
 	case protoreflect.MessageKind:
 		switch m := v.Message().Interface().(type) {
 		case *commonpb.Payload:
-			return toPayload(m), nil
+			return batch.Add(m), nil
 		case *commonpb.Payloads:
-			return payloads(m), nil
+			return batch.AddAll(m), nil
 		case *failurepb.Failure:
-			return toFailure(m), nil
+			return toFailure(m, batch), nil
 		case *commonpb.SearchAttributes:
 			return searchAttributes(m)
 		case payloadFields:
-			return payloadMap(m), nil
+			return payloadMap(m, batch), nil
 		case *timestamppb.Timestamp:
 			return m.AsTime(), nil
 		case *durationpb.Duration:
 			return durationString(m), nil
 		}
-		return protoFields(v.Message())
+		return protoFields(v.Message(), batch)
 	}
 	return v.Interface(), nil
 }

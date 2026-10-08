@@ -6,7 +6,6 @@ package server
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"reflect"
 	"strings"
@@ -18,17 +17,23 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
 const callTimeout = 10 * time.Second
+
+// The waits before each retry of an unavailable server: 1.4s in all, which spans the first reconnect attempts of the Temporal and Cloud Ops clients and still reports a server that stays down well inside callTimeout.
+var retryDelays = []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
 type getWorkflowInput struct {
 	Target     string `json:"target" jsonschema:"the name or an alias of a target"`
@@ -37,25 +42,25 @@ type getWorkflowInput struct {
 }
 
 type workflowRun struct {
-	WorkflowID          string               `json:"workflow_id"`
-	RunID               string               `json:"run_id"`
-	Type                string               `json:"type"`
-	Status              string               `json:"status"`
-	TaskQueue           string               `json:"task_queue"`
-	StartTime           *time.Time           `json:"start_time"`
-	ExecutionTime       *time.Time           `json:"execution_time"`
-	CloseTime           *time.Time           `json:"close_time"`
-	HistoryLength       int64                `json:"history_length"`
-	Parent              *execution           `json:"parent"`
-	PendingActivities   []pendingActivity    `json:"pending_activities"`
-	PendingChildren     []pendingChild       `json:"pending_children"`
-	PendingWorkflowTask *pendingWorkflowTask `json:"pending_workflow_task"`
-	Memo                map[string]payload   `json:"memo"`
-	SearchAttributes    map[string]any       `json:"search_attributes"`
-	Result              []payload            `json:"result"`
-	Failure             *failure             `json:"failure"`
-	NewExecutionRunID   *string              `json:"new_execution_run_id"`
-	ObservedAt          time.Time            `json:"observed_at"`
+	WorkflowID          string                    `json:"workflow_id"`
+	RunID               string                    `json:"run_id"`
+	Type                string                    `json:"type"`
+	Status              string                    `json:"status"`
+	TaskQueue           string                    `json:"task_queue"`
+	StartTime           *time.Time                `json:"start_time"`
+	ExecutionTime       *time.Time                `json:"execution_time"`
+	CloseTime           *time.Time                `json:"close_time"`
+	HistoryLength       int64                     `json:"history_length"`
+	Parent              *execution                `json:"parent"`
+	PendingActivities   []pendingActivity         `json:"pending_activities"`
+	PendingChildren     []pendingChild            `json:"pending_children"`
+	PendingWorkflowTask *pendingWorkflowTask      `json:"pending_workflow_task"`
+	Memo                map[string]*payload.Field `json:"memo"`
+	SearchAttributes    map[string]any            `json:"search_attributes"`
+	Result              []*payload.Field          `json:"result"`
+	Failure             *failure                  `json:"failure"`
+	NewExecutionRunID   *string                   `json:"new_execution_run_id"`
+	ObservedAt          time.Time                 `json:"observed_at"`
 }
 
 type execution struct {
@@ -64,15 +69,15 @@ type execution struct {
 }
 
 type pendingActivity struct {
-	ActivityID        string     `json:"activity_id"`
-	Type              string     `json:"type"`
-	State             string     `json:"state"`
-	Attempt           int32      `json:"attempt"`
-	ScheduledTime     *time.Time `json:"scheduled_time"`
-	LastStartedTime   *time.Time `json:"last_started_time"`
-	LastHeartbeatTime *time.Time `json:"last_heartbeat_time"`
-	LastFailure       *failure   `json:"last_failure"`
-	HeartbeatDetails  []payload  `json:"heartbeat_details"`
+	ActivityID        string           `json:"activity_id"`
+	Type              string           `json:"type"`
+	State             string           `json:"state"`
+	Attempt           int32            `json:"attempt"`
+	ScheduledTime     *time.Time       `json:"scheduled_time"`
+	LastStartedTime   *time.Time       `json:"last_started_time"`
+	LastHeartbeatTime *time.Time       `json:"last_heartbeat_time"`
+	LastFailure       *failure         `json:"last_failure"`
+	HeartbeatDetails  []*payload.Field `json:"heartbeat_details"`
 }
 
 type pendingChild struct {
@@ -91,20 +96,14 @@ type pendingWorkflowTask struct {
 	Attempt               int32      `json:"attempt"`
 }
 
-type payload struct {
-	Handling string `json:"handling"`
-	Encoding string `json:"encoding"`
-	Data     string `json:"data"`
-}
-
 type failure struct {
 	Message              string              `json:"message"`
 	Kind                 string              `json:"kind"`
 	StackTrace           string              `json:"stack_trace"`
 	Application          *applicationFailure `json:"application"`
-	Details              []payload           `json:"details"`
-	EncodedAttributes    *payload            `json:"encoded_attributes"`
-	LastHeartbeatDetails []payload           `json:"last_heartbeat_details"`
+	Details              []*payload.Field    `json:"details"`
+	EncodedAttributes    *payload.Field      `json:"encoded_attributes"`
+	LastHeartbeatDetails []*payload.Field    `json:"last_heartbeat_details"`
 	Cause                *failure            `json:"cause"`
 }
 
@@ -133,7 +132,7 @@ type applicationFailure struct {
 	NonRetryable bool   `json:"non_retryable"`
 }
 
-func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerFor[getWorkflowInput, envelope[workflowRun]] {
+func getWorkflow(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[getWorkflowInput, envelope[workflowRun]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in getWorkflowInput) (*mcp.CallToolResult, envelope[workflowRun], error) {
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
@@ -152,7 +151,8 @@ func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerF
 		if err != nil {
 			return nil, envelope[workflowRun]{}, err
 		}
-		run, err := describedRun(desc)
+		batch := payloads.Batch(t.Name)
+		run, err := describedRun(desc, batch)
 		if err != nil {
 			return nil, envelope[workflowRun]{}, err
 		}
@@ -172,7 +172,10 @@ func getWorkflow(cfg *config.Config, clients *temporal.Clients) mcp.ToolHandlerF
 			if len(events) == 0 {
 				return nil, envelope[workflowRun]{}, &toolError{Code: "temporal_unavailable", Message: "the Temporal server returned no close event for the closed run"}
 			}
-			addCloseEvent(&run, events[0])
+			addCloseEvent(&run, events[0], batch)
+		}
+		if err := batch.Render(ctx); err != nil {
+			return nil, envelope[workflowRun]{}, err
 		}
 		return nil, envelope[workflowRun]{Target: &t.Name, Result: run, Complete: true}, nil
 	}
@@ -182,19 +185,28 @@ func callTemporal[Resp any](ctx context.Context, t *config.Target, rpc func(cont
 	return callServer(ctx, t, temporalServer, rpc)
 }
 
-// callServer makes one call to server for target t, with the timeout of a Temporal call, and returns its failure as a tool error that names server.
+// callServer calls server for target t, retrying a few times while server is unavailable, all within the timeout of a Temporal call, and returns its failure as a tool error that names server.
 func callServer[Resp any](ctx context.Context, t *config.Target, server string, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	var p peer.Peer
-	resp, err := rpc(ctx, grpc.Peer(&p))
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		var p peer.Peer
+		resp, err := rpc(ctx, grpc.Peer(&p))
+		if err == nil {
+			return resp, nil
+		}
+		if attempt < len(retryDelays) && serviceerror.ToStatus(err).Code() == codes.Unavailable {
+			select {
+			case <-time.After(retryDelays[attempt]):
+				continue
+			case <-ctx.Done():
+			}
+		}
 		return resp, temporalError(err, t, &p, server)
 	}
-	return resp, nil
 }
 
-func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (workflowRun, error) {
+func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse, batch *payload.Batch) (workflowRun, error) {
 	observedAt := time.Now().UTC()
 	info := desc.GetWorkflowExecutionInfo()
 	run := workflowRun{
@@ -209,7 +221,7 @@ func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (work
 		HistoryLength:     info.GetHistoryLength(),
 		PendingActivities: []pendingActivity{},
 		PendingChildren:   []pendingChild{},
-		Memo:              payloadMap(info.GetMemo()),
+		Memo:              payloadMap(info.GetMemo(), batch),
 		ObservedAt:        observedAt,
 	}
 	if p := info.GetParentExecution(); p != nil {
@@ -224,8 +236,8 @@ func describedRun(desc *workflowservice.DescribeWorkflowExecutionResponse) (work
 			ScheduledTime:     timeOf(a.GetScheduledTime()),
 			LastStartedTime:   timeOf(a.GetLastStartedTime()),
 			LastHeartbeatTime: timeOf(a.GetLastHeartbeatTime()),
-			LastFailure:       toFailure(a.GetLastFailure()),
-			HeartbeatDetails:  payloads(a.GetHeartbeatDetails()),
+			LastFailure:       toFailure(a.GetLastFailure(), batch),
+			HeartbeatDetails:  batch.AddAll(a.GetHeartbeatDetails()),
 		})
 	}
 	for _, c := range desc.GetPendingChildren() {
@@ -308,22 +320,22 @@ func decode[T any](p *commonpb.Payload) (any, error) {
 	return list, nil
 }
 
-func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent) {
+func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent, batch *payload.Batch) {
 	var next string
 	switch e.GetEventType() {
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED:
 		a := e.GetWorkflowExecutionCompletedEventAttributes()
-		run.Result, next = payloads(a.GetResult()), a.GetNewExecutionRunId()
+		run.Result, next = batch.AddAll(a.GetResult()), a.GetNewExecutionRunId()
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED:
 		a := e.GetWorkflowExecutionFailedEventAttributes()
-		run.Failure, next = toFailure(a.GetFailure()), a.GetNewExecutionRunId()
+		run.Failure, next = toFailure(a.GetFailure(), batch), a.GetNewExecutionRunId()
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT:
 		next = e.GetWorkflowExecutionTimedOutEventAttributes().GetNewExecutionRunId()
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED:
-		run.Failure = &failure{Details: payloads(e.GetWorkflowExecutionCanceledEventAttributes().GetDetails()), LastHeartbeatDetails: []payload{}}
+		run.Failure = &failure{Details: batch.AddAll(e.GetWorkflowExecutionCanceledEventAttributes().GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED:
 		a := e.GetWorkflowExecutionTerminatedEventAttributes()
-		run.Failure = &failure{Message: a.GetReason(), Details: payloads(a.GetDetails()), LastHeartbeatDetails: []payload{}}
+		run.Failure = &failure{Message: a.GetReason(), Details: batch.AddAll(a.GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
 		next = e.GetWorkflowExecutionContinuedAsNewEventAttributes().GetNewExecutionRunId()
 	}
@@ -332,20 +344,20 @@ func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent) {
 	}
 }
 
-func toFailure(f *failurepb.Failure) *failure {
+func toFailure(f *failurepb.Failure, batch *payload.Batch) *failure {
 	if f == nil {
 		return nil
 	}
 	out := &failure{
 		Message:    f.GetMessage(),
 		StackTrace: f.GetStackTrace(),
-		Details:    payloads(f.GetApplicationFailureInfo().GetDetails()),
-		Cause:      toFailure(f.GetCause()),
+		Details:    batch.AddAll(f.GetApplicationFailureInfo().GetDetails()),
+		Cause:      toFailure(f.GetCause(), batch),
 	}
 	if ea := f.GetEncodedAttributes(); ea != nil {
-		out.EncodedAttributes = new(toPayload(ea))
+		out.EncodedAttributes = batch.Add(ea)
 	}
-	out.LastHeartbeatDetails = payloads(cmp.Or(f.GetTimeoutFailureInfo().GetLastHeartbeatDetails(), f.GetResetWorkflowFailureInfo().GetLastHeartbeatDetails()))
+	out.LastHeartbeatDetails = batch.AddAll(cmp.Or(f.GetTimeoutFailureInfo().GetLastHeartbeatDetails(), f.GetResetWorkflowFailureInfo().GetLastHeartbeatDetails()))
 	m := f.ProtoReflect()
 	if info := m.WhichOneof(m.Descriptor().Oneofs().ByName("failure_info")); info != nil {
 		out.Kind = strings.TrimSuffix(string(info.Message().Name()), "Info")
@@ -354,15 +366,7 @@ func toFailure(f *failurepb.Failure) *failure {
 		out.Application = &applicationFailure{Type: a.GetType(), NonRetryable: a.GetNonRetryable()}
 	}
 	if c := f.GetCanceledFailureInfo(); c != nil {
-		out.Details = payloads(c.GetDetails())
-	}
-	return out
-}
-
-func payloads(ps *commonpb.Payloads) []payload {
-	out := []payload{}
-	for _, p := range ps.GetPayloads() {
-		out = append(out, toPayload(p))
+		out.Details = batch.AddAll(c.GetDetails())
 	}
 	return out
 }
@@ -372,16 +376,12 @@ type payloadFields interface {
 	GetFields() map[string]*commonpb.Payload
 }
 
-func payloadMap(m payloadFields) map[string]payload {
-	out := map[string]payload{}
+func payloadMap(m payloadFields, batch *payload.Batch) map[string]*payload.Field {
+	out := map[string]*payload.Field{}
 	for k, p := range m.GetFields() {
-		out[k] = toPayload(p)
+		out[k] = batch.Add(p)
 	}
 	return out
-}
-
-func toPayload(p *commonpb.Payload) payload {
-	return payload{Handling: "passthrough", Encoding: string(p.GetMetadata()["encoding"]), Data: base64.StdEncoding.EncodeToString(p.GetData())}
 }
 
 func timeOf(ts *timestamppb.Timestamp) *time.Time {

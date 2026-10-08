@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +40,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
 
+	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/fixture"
+	"github.com/temporalio/operator-mcp/internal/payload"
 )
 
 func describeWithSearchAttributes(fields map[string]*commonpb.Payload) *workflowservice.DescribeWorkflowExecutionResponse {
@@ -77,7 +82,7 @@ func TestDescribedRunDecodesSearchAttributesByType(t *testing.T) {
 	for i, tt := range tests {
 		fields["attr"+strconv.Itoa(i)] = typedPayload(t, tt.value, tt.typ)
 	}
-	run, err := describedRun(describeWithSearchAttributes(fields))
+	run, err := describedRun(describeWithSearchAttributes(fields), new(payload.Renderer).Batch("t"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,14 +99,14 @@ func TestDescribedRunDecodesSearchAttributesByType(t *testing.T) {
 
 func TestDescribedRunRejectsUndecodableSearchAttribute(t *testing.T) {
 	p := typedPayload(t, "not a number", "Int")
-	_, err := describedRun(describeWithSearchAttributes(map[string]*commonpb.Payload{"Count": p}))
+	_, err := describedRun(describeWithSearchAttributes(map[string]*commonpb.Payload{"Count": p}), new(payload.Renderer).Batch("t"))
 	var got *toolError
 	if !errors.As(err, &got) || got.Code != "temporal_unavailable" {
 		t.Errorf("err = %v, want a temporal_unavailable tool error", err)
 	}
 }
 
-func TestToFailurePassesThroughEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
+func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 	dc := converter.GetDefaultDataConverter()
 	encoded, err := dc.ToPayload("secret")
 	if err != nil {
@@ -111,17 +116,15 @@ func TestToFailurePassesThroughEncodedAttributesAndLastHeartbeatDetails(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := func(data string) payload {
-		return payload{Handling: "passthrough", Encoding: "json/plain", Data: base64.StdEncoding.EncodeToString([]byte(data))}
-	}
-	secret := marker(`"secret"`)
-	beat := []payload{marker(`"beat"`)}
+	cfg := &config.Config{Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}}}
+	payloads := newRenderer(t, cfg, slog.New(slog.DiscardHandler))
+	beat := `[{"handling":"passthrough","encoding":"json/plain","data":"ImJlYXQi"}]`
 
+	// want is [encoded_attributes, last_heartbeat_details].
 	tests := []struct {
-		name          string
-		in            *failurepb.Failure
-		wantEncoded   *payload
-		wantHeartbeat []payload
+		name string
+		in   *failurepb.Failure
+		want string
 	}{
 		{
 			name: "encoded attributes",
@@ -129,32 +132,32 @@ func TestToFailurePassesThroughEncodedAttributesAndLastHeartbeatDetails(t *testi
 				EncodedAttributes: encoded,
 				FailureInfo:       &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: &failurepb.ApplicationFailureInfo{Type: "T"}},
 			},
-			wantEncoded:   &secret,
-			wantHeartbeat: []payload{},
+			want: `[{"handling":"passthrough","encoding":"json/plain","data":"InNlY3JldCI="},[]]`,
 		},
 		{
 			name: "timeout",
 			in: &failurepb.Failure{
 				FailureInfo: &failurepb.Failure_TimeoutFailureInfo{TimeoutFailureInfo: &failurepb.TimeoutFailureInfo{LastHeartbeatDetails: heartbeat}},
 			},
-			wantHeartbeat: beat,
+			want: `[null,` + beat + `]`,
 		},
 		{
 			name: "reset workflow",
 			in: &failurepb.Failure{
 				FailureInfo: &failurepb.Failure_ResetWorkflowFailureInfo{ResetWorkflowFailureInfo: &failurepb.ResetWorkflowFailureInfo{LastHeartbeatDetails: heartbeat}},
 			},
-			wantHeartbeat: beat,
+			want: `[null,` + beat + `]`,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := toFailure(tt.in)
-			if !reflect.DeepEqual(got.EncodedAttributes, tt.wantEncoded) {
-				t.Errorf("EncodedAttributes = %#v, want %#v", got.EncodedAttributes, tt.wantEncoded)
+			batch := payloads.Batch("t")
+			got := toFailure(tt.in, batch)
+			if err := batch.Render(t.Context()); err != nil {
+				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got.LastHeartbeatDetails, tt.wantHeartbeat) {
-				t.Errorf("LastHeartbeatDetails = %#v, want %#v", got.LastHeartbeatDetails, tt.wantHeartbeat)
+			if b, err := json.Marshal([]any{got.EncodedAttributes, got.LastHeartbeatDetails}); err != nil || string(b) != tt.want {
+				t.Errorf("[encoded_attributes, last_heartbeat_details] = %s (%v), want %s", b, err, tt.want)
 			}
 		})
 	}
@@ -214,15 +217,30 @@ func waitForDescribe(ctx context.Context, t *testing.T, c client.Client, workflo
 	return desc
 }
 
-func passthrough(data string) map[string]any {
-	return map[string]any{"handling": "passthrough", "encoding": "json/plain", "data": base64.StdEncoding.EncodeToString([]byte(data))}
+func decoded(value any) map[string]any {
+	return map[string]any{"handling": "decoded", "value": value}
 }
 
 func TestToolsOnDevServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	zlib := converter.NewZlibCodec(converter.ZlibCodecOptions{AlwaysEncode: true})
+	codecHandler := converter.NewPayloadCodecHTTPHandler(zlib)
+	codecServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer codec-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		codecHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(codecServer.Close)
+	codecAuthorization := filepath.Join(t.TempDir(), "codec-authorization")
+	if err := os.WriteFile(codecAuthorization, []byte("Bearer codec-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	exe, _ := exec.LookPath("temporal")
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe, ExtraArgs: []string{
+	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe, ClientOptions: encoded, ExtraArgs: []string{
 		"--search-attribute", "OrderId=Keyword",
 		"--search-attribute", "SaInt=Int",
 		"--search-attribute", "SaDouble=Double",
@@ -382,12 +400,20 @@ func TestToolsOnDevServer(t *testing.T) {
 	ln.Close()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n"+
-		"  - {name: dev, aliases: [local], description: x, address: %q, namespace: default}\n"+
-		"  - {name: down, description: x, address: %q, namespace: default}\n"+
-		"  - {name: misconfigured, description: x, address: %q, namespace: nosuchns}\n", dev.FrontendHostPort(), unreachable, dev.FrontendHostPort())), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\n"+
+		"codecs:\n"+
+		"  test: {endpoint: %[1]q, authorization_header: {file: %[2]q}}\n"+
+		"  unauthorized: {endpoint: %[1]q}\n"+
+		"targets:\n"+
+		"  - {name: dev, aliases: [local], description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: test}\n"+
+		"  - {name: dev-passthrough, description: x, address: %[3]q, namespace: default, payload_handling: passthrough}\n"+
+		"  - {name: dev-omit, description: x, address: %[3]q, namespace: default}\n"+
+		"  - {name: dev-unauthorized, description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: unauthorized}\n"+
+		"  - {name: down, description: x, address: %[4]q, namespace: default}\n"+
+		"  - {name: misconfigured, description: x, address: %[3]q, namespace: nosuchns}\n", codecServer.URL, codecAuthorization, dev.FrontendHostPort(), unreachable)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	addresses := []string{dev.FrontendHostPort(), unreachable, strings.TrimPrefix(codecServer.URL, "http://")}
 	var records bytes.Buffer
 	session := connect(t, configPath, io.MultiWriter(t.Output(), &records))
 	validateOutput := outputValidator(t, session)
@@ -404,6 +430,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"result": map[string]any{"stages": []any{
 						map[string]any{"name": "server", "status": "ok", "reason": nil},
 						map[string]any{"name": "namespace", "status": "ok", "reason": nil},
+						map[string]any{"name": "codec", "status": "ok", "reason": nil},
 					}},
 					"complete":  true,
 					"next_call": nil,
@@ -416,6 +443,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"result": map[string]any{"stages": []any{
 						map[string]any{"name": "server", "status": "failed", "reason": "Unavailable: could not connect to the Temporal server"},
 						map[string]any{"name": "namespace", "status": "skipped", "reason": "not run because the server stage failed"},
+						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target does not decode payloads"},
 					}},
 					"complete":  true,
 					"next_call": nil,
@@ -428,6 +456,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"result": map[string]any{"stages": []any{
 						map[string]any{"name": "server", "status": "ok", "reason": nil},
 						map[string]any{"name": "namespace", "status": "failed", "reason": "NotFound: Namespace nosuchns is not found."},
+						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target does not decode payloads"},
 					}},
 					"complete":  true,
 					"next_call": nil,
@@ -445,7 +474,7 @@ func TestToolsOnDevServer(t *testing.T) {
 				}
 				validateOutput(t, "check_connection", res)
 				text := res.Content[0].(*mcp.TextContent).Text
-				for _, addr := range []string{dev.FrontendHostPort(), unreachable} {
+				for _, addr := range addresses {
 					if strings.Contains(text, addr) {
 						t.Errorf("result %s contains the address %s", text, addr)
 					}
@@ -474,14 +503,14 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := res.Content[0].(*mcp.TextContent).Text
-			for _, addr := range []string{dev.FrontendHostPort(), unreachable} {
+			for _, addr := range addresses {
 				if strings.Contains(text, addr) {
 					t.Errorf("result %s contains the address %s", text, addr)
 				}
 			}
 			return res
 		}
-		getWorkflow := func(t *testing.T, args any) map[string]any {
+		getWorkflow := func(t *testing.T, args map[string]any) map[string]any {
 			t.Helper()
 			res := callGetWorkflow(t, args)
 			if res.IsError {
@@ -493,8 +522,12 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Errorf("text content does not match structuredContent (%v)", err)
 			}
 			env := res.StructuredContent.(map[string]any)
-			if env["target"] != "dev" || env["complete"] != true || env["next_call"] != nil {
-				t.Errorf("envelope = %#v, want target dev, complete true and next_call null", env)
+			wantTarget := args["target"]
+			if wantTarget == "local" {
+				wantTarget = "dev"
+			}
+			if env["target"] != wantTarget || env["complete"] != true || env["next_call"] != nil {
+				t.Errorf("envelope = %#v, want target %v, complete true and next_call null", env, wantTarget)
 			}
 			run := env["result"].(map[string]any)
 			if _, err := time.Parse(time.RFC3339, run["observed_at"].(string)); err != nil || !strings.HasSuffix(run["observed_at"].(string), "Z") {
@@ -600,10 +633,44 @@ func TestToolsOnDevServer(t *testing.T) {
 			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-completed"}), map[string]any{
 				"run_id":  completed.GetRunID(),
 				"status":  "Completed",
-				"result":  []any{passthrough(`{"enrichment":"product-enriched:1","payment":"payment-authorized:1"}`)},
+				"result":  []any{decoded(map[string]any{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"})},
 				"failure": nil,
-				"memo":    map[string]any{"note": passthrough(`"gift"`)},
+				"memo":    map[string]any{"note": decoded("gift")},
 			})
+		})
+
+		t.Run("payload handling", func(t *testing.T) {
+			stored := func(value any) map[string]any {
+				p, err := converter.GetDefaultDataConverter().ToPayload(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ps, err := zlib.Encode([]*commonpb.Payload{p})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return map[string]any{"handling": "passthrough", "encoding": "binary/zlib", "data": base64.StdEncoding.EncodeToString(ps[0].GetData())}
+			}
+			omitted := map[string]any{"handling": "omitted", "reason": "payload_handling"}
+			undecoded := map[string]any{"handling": "omitted", "reason": "decode_failed"}
+			for _, tt := range []struct {
+				target       string
+				result, memo map[string]any
+			}{
+				{"dev-passthrough", stored(map[string]string{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"}), stored("gift")},
+				{"dev-omit", omitted, omitted},
+				{"dev-unauthorized", undecoded, undecoded},
+			} {
+				t.Run(tt.target, func(t *testing.T) {
+					check(t, getWorkflow(t, map[string]any{"target": tt.target, "workflow_id": "order-completed"}), map[string]any{
+						"run_id":  completed.GetRunID(),
+						"status":  "Completed",
+						"result":  []any{tt.result},
+						"failure": nil,
+						"memo":    map[string]any{"note": tt.memo},
+					})
+				})
+			}
 		})
 
 		t.Run("continued as new", func(t *testing.T) {
@@ -616,7 +683,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "continue-once"}), map[string]any{
 				"run_id":               latestRunID,
 				"status":               "Completed",
-				"result":               []any{passthrough("true")},
+				"result":               []any{decoded(true)},
 				"new_execution_run_id": nil,
 			})
 		})
@@ -684,7 +751,7 @@ func TestToolsOnDevServer(t *testing.T) {
 				"state":             "Started",
 				"attempt":           float64(1),
 				"last_failure":      nil,
-				"heartbeat_details": []any{passthrough(`"progress-42"`)},
+				"heartbeat_details": []any{decoded("progress-42")},
 			})
 			if pending["last_heartbeat_time"] == nil || pending["last_started_time"] == nil {
 				t.Errorf("last_heartbeat_time = %v, last_started_time = %v, want both set", pending["last_heartbeat_time"], pending["last_started_time"])
@@ -725,7 +792,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"kind":                   "ApplicationFailure",
 					"stack_trace":            "",
 					"application":            map[string]any{"type": "OrderRejected", "non_retryable": false},
-					"details":                []any{passthrough(`"detail-1"`)},
+					"details":                []any{decoded("detail-1")},
 					"encoded_attributes":     nil,
 					"last_heartbeat_details": empty,
 					"cause":                  nil,
@@ -1162,7 +1229,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			return out
 		}
-		input := passthrough(`{"order_id":"88231","catalog_should_fail":true,"retry_interval_seconds":1}`)
+		input := decoded(map[string]any{"order_id": "88231", "catalog_should_fail": true, "retry_interval_seconds": float64(1)})
 
 		var scheduledID, failedID int64
 		t.Run("failures", func(t *testing.T) {
@@ -1209,6 +1276,13 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			if a["task_queue"].(map[string]any)["name"] != fixture.TaskQueue || a["retry_policy"].(map[string]any)["initial_interval"] != "1s" {
 				t.Errorf("task_queue = %#v, retry_policy = %#v; want task queue %s and an initial interval of 1s", a["task_queue"], a["retry_policy"], fixture.TaskQueue)
+			}
+		})
+
+		t.Run("payload handling", func(t *testing.T) {
+			a := attributes(historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev-omit", "workflow_id": "order-88231", "limit": 1}))[0])
+			if omitted := map[string]any{"handling": "omitted", "reason": "payload_handling"}; !reflect.DeepEqual(a["input"], []any{omitted}) || !reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
+				t.Errorf("first event's input = %#v, search_attributes = %#v; want the input omitted and the search attributes decoded", a["input"], a["search_attributes"])
 			}
 		})
 

@@ -52,6 +52,29 @@ Without an `auth` section, an `authorization` section is not allowed, and every 
 
 With Microsoft Entra ID, match [app roles](https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps) in the `roles` claim rather than groups: the `groups` claim holds group object IDs by default, not names, and is left out of tokens for users in more than 200 groups. Use the app role's Value as `claim_value`, not its Display name.
 
+## Payloads
+
+Payloads are your application's data in Temporal: workflow inputs and results, memos, heartbeat details and failure details. Each target's `payload_handling` says how tool responses show them:
+
+- `omit`, the default, leaves payloads out. It hides only payloads: failure messages, stack traces, termination reasons and search attribute values are still shown.
+- `passthrough` returns them as Temporal stores them, in base64, which the model can read unless your codec encrypts them.
+- `decode` has the target's `codec` server decode them. If decoding fails, every payload in that response is left out, and the cause goes to the log.
+
+```yaml
+codecs:
+  payments:
+    endpoint: https://codec.payments.example.com
+    authorization_header: {env: PAYMENTS_CODEC_AUTHORIZATION}
+targets:
+  - name: payments-prod
+    # ...
+    payload_handling: decode
+    codec: payments
+```
+
+- `endpoint` is the same value as the CLI's `--codec-endpoint`, including its `{namespace}` placeholder.
+- `authorization_header`, which is optional, holds the whole `Authorization` header value, such as `Bearer abc`, like `--codec-auth`. Its `env` is read at startup and its `file` on every request. The codec server must accept this header from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
+
 ## Audit
 
 `operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr.

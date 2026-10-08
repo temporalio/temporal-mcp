@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -80,19 +79,21 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 // A credential returns the API key for each Temporal call to target; caller is nil without auth.
 type credential func(ctx context.Context, caller *identity.Caller, target *config.Target) (string, error)
 
-func apiKeyCredential(k *config.APIKey) (credential, error) {
-	switch {
-	case k == nil:
+func apiKeyCredential(k *config.Secret) (credential, error) {
+	if k == nil {
 		return nil, nil
-	case k.Env != "":
-		key := strings.TrimSpace(os.Getenv(k.Env))
-		if key == "" {
-			return nil, fmt.Errorf("environment variable %s is unset or empty", k.Env)
-		}
-		return func(context.Context, *identity.Caller, *config.Target) (string, error) { return key, nil }, nil
-	default:
-		return func(context.Context, *identity.Caller, *config.Target) (string, error) { return readAPIKey(k.File) }, nil
 	}
+	read, err := k.Reader()
+	if err != nil {
+		return nil, err
+	}
+	return func(context.Context, *identity.Caller, *config.Target) (string, error) {
+		key, err := read()
+		if err != nil {
+			return "", fmt.Errorf("read API key: %w", err)
+		}
+		return key, nil
+	}, nil
 }
 
 func lazyClient(t config.Target, name, version string, cred credential, logger *slog.Logger) (client.Client, error) {
@@ -143,7 +144,7 @@ func cloudOpsClient(t config.Target, name, version string, cred credential, opts
 			return cred(ctx, identity.CallerFrom(ctx), &t)
 		}),
 		UserAgent: name + "/" + version,
-		// One Cloud Ops call per tool call, as for Temporal calls, so a rate limit or an unreachable API is reported as such.
+		// Its retries would hide a rate limit from the agent; the tools retry only an unavailable API themselves.
 		DisableRetry: true,
 		GRPCDialOptions: []grpc.DialOption{
 			grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
@@ -164,18 +165,6 @@ type apiKeyReader func(context.Context) (string, error)
 
 func (r apiKeyReader) GetAPIKey(ctx context.Context) (string, error) {
 	return r(ctx)
-}
-
-func readAPIKey(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read API key: %w", err)
-	}
-	key := strings.TrimSpace(string(data))
-	if key == "" {
-		return "", fmt.Errorf("read API key: %s is empty", path)
-	}
-	return key, nil
 }
 
 type toolKey struct{}
@@ -200,7 +189,7 @@ func WithTool(ctx context.Context, name string, rpcs, targets []string) context.
 type callsKey struct{}
 
 // CountCalls returns a context whose Temporal calls are counted in n: those that
-// pass the limits set by WithTool, each counted once however often it is retried.
+// pass the limits set by WithTool, with every attempt of a retried call counted.
 func CountCalls(ctx context.Context, n *atomic.Int64) context.Context {
 	return context.WithValue(ctx, callsKey{}, n)
 }

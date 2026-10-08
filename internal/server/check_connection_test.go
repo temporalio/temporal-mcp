@@ -85,7 +85,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	}{
 		{
 			name:       "TLS handshake fails",
-			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.APIKey{Env: "OPERATOR_MCP_TEST_API_KEY"}},
+			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.Secret{Env: "OPERATOR_MCP_TEST_API_KEY"}},
 			wantServer: "Unavailable: the TLS handshake or certificate check with the Temporal server failed",
 		},
 		{
@@ -115,7 +115,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 				workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
 			}, []string{"a"})
 
-			_, env, err := checkConnection(cfg, clients)(ctx, nil, checkConnectionInput{Target: "a"})
+			_, env, err := checkConnection(cfg, clients, newRenderer(t, cfg, slog.New(slog.DiscardHandler)))(ctx, nil, checkConnectionInput{Target: "a"})
 			if err != nil {
 				t.Fatal(err)
 			}

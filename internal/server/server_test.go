@@ -22,6 +22,7 @@ import (
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/identity"
+	"github.com/temporalio/operator-mcp/internal/payload"
 	"github.com/temporalio/operator-mcp/internal/temporal"
 )
 
@@ -36,7 +37,8 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := newServer("temporal-operator", "0", cfg, clients, out, slog.New(slog.NewJSONHandler(out, nil)))
+	logger := slog.New(slog.NewJSONHandler(out, nil))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
 	for _, add := range extra {
 		add(s)
 	}
@@ -48,6 +50,15 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	}
 	t.Cleanup(func() { session.Close() })
 	return session
+}
+
+func newRenderer(t *testing.T, cfg *config.Config, logger *slog.Logger) *payload.Renderer {
+	t.Helper()
+	r, err := payload.NewRenderer(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func outputValidator(t *testing.T, session *mcp.ClientSession) func(*testing.T, string, *mcp.CallToolResult) {
@@ -184,6 +195,46 @@ func TestToolCalls(t *testing.T) {
 	}
 }
 
+func TestToolErrorHasResultType(t *testing.T) {
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+	req.Header.Set("Mcp-Method", "tools/call")
+	req.Header.Set("Mcp-Name", "check_connection")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, data, _ := strings.Cut(strings.TrimSpace(string(body)), "data: ")
+	var msg struct {
+		Result struct {
+			IsError    bool   `json:"isError"`
+			ResultType string `json:"resultType"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(data), &msg); err != nil {
+		t.Fatalf("response %q: %v", body, err)
+	}
+	if !msg.Result.IsError || msg.Result.ResultType != "complete" {
+		t.Errorf("response = %s; want a tool error with resultType \"complete\"", data)
+	}
+}
+
 func TestNewMux(t *testing.T) {
 	issuerURL, sign := newTestIssuer(t)
 	token := sign(map[string]any{})
@@ -200,7 +251,7 @@ func TestNewMux(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	s, _ := newServer("temporal-operator", "0", authCfg, nil, t.Output(), logger)
+	s, _ := newServer("temporal-operator", "0", authCfg, nil, nil, t.Output(), logger)
 	callers := make(chan *identity.Caller, 1)
 	addTool(s, &mcp.Tool{Name: "whoami"}, nil, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, struct{}, error) {
 		callers <- identity.CallerFrom(ctx)
@@ -212,7 +263,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
 	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, t.Output(), logger)
+	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}

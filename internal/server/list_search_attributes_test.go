@@ -71,14 +71,15 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{Targets: []config.Target{
-		{Name: "cloud", Description: "x", Address: "us-east-1.aws.api.temporal.io:7233", Namespace: "orders.acct1", APIKey: &config.APIKey{File: keyPath}},
+		{Name: "cloud", Description: "x", Address: "us-east-1.aws.api.temporal.io:7233", Namespace: "orders.acct1", APIKey: &config.Secret{File: keyPath}},
 	}}
 	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var records bytes.Buffer
-	s, _ := newServer("temporal-operator", "0", cfg, clients, &records, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), &records, logger)
 	srv := httptest.NewServer(newHandler(s.Server, cfg))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)

@@ -7,7 +7,6 @@ Temporal Cloud targets with an API key also connect to the Cloud Ops API at `saa
 ## Prerequisites
 
 - Go 1.27 or later (see `go.mod`).
-- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests in `internal/server` use to start a Temporal dev server. Without it, the first test run downloads the CLI.
 
 ## Build
 

@@ -120,11 +120,7 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 The end-to-end tests in `internal/server` use the `temporal` CLI on your `PATH` to start a Temporal dev server. Without it, the first test run downloads the CLI.
 
-```sh
-go test ./...
-```
-
-With the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...

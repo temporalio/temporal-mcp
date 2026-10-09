@@ -149,6 +149,12 @@ func TestHTTPS(t *testing.T) {
 	if err := connect(roots); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(certFile, []byte("invalid PEM\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connect(roots); err == nil {
+		t.Error("connection succeeded with an invalid certificate file")
+	}
 	if err := connect(writeCertificate(t, certFile, keyFile)); err != nil {
 		t.Errorf("connecting after replacing the certificate: %v", err)
 	}

@@ -3,9 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -75,6 +81,35 @@ func startServer(t *testing.T, bin, configPath string) string {
 	return url
 }
 
+func writeCertificate(t *testing.T, certFile, keyFile string) *x509.CertPool {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}, NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for file, block := range map[string]*pem.Block{certFile: {Type: "CERTIFICATE", Bytes: der}, keyFile: {Type: "PRIVATE KEY", Bytes: keyDER}} {
+		if err := os.WriteFile(file, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+	return roots
+}
+
 func TestServerHandshake(t *testing.T) {
 	url := startServer(t, buildBinary(t, "-ldflags", "-X main.version=9.9.9-test"), filepath.Join("testdata", "config.yaml"))
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: url}, nil)
@@ -87,6 +122,41 @@ func TestServerHandshake(t *testing.T) {
 	}
 	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
 		t.Errorf("protocol version = %s, want 2026-07-28: clients fell back to the 2025 session protocol, so check that the HTTP handler is still stateless", got)
+	}
+}
+
+func TestHTTPS(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile, configPath := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), filepath.Join(dir, "config.yaml")
+	roots := writeCertificate(t, certFile, keyFile)
+	config := fmt.Sprintf("listen: 127.0.0.1:0\nlisten_tls: {cert_file: %q, key_file: %q}\n"+
+		"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n", certFile, keyFile)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	url := startServer(t, buildBinary(t), configPath)
+	if !strings.HasPrefix(url, "https://") {
+		t.Fatalf("listening on %s, want an https URL", url)
+	}
+	connect := func(rootCAs *x509.CertPool) error {
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs}}}
+		session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: client}, nil)
+		if err != nil {
+			return err
+		}
+		return session.Close()
+	}
+	if err := connect(roots); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certFile, []byte("invalid PEM\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connect(roots); err == nil {
+		t.Error("connection succeeded with an invalid certificate file")
+	}
+	if err := connect(writeCertificate(t, certFile, keyFile)); err != nil {
+		t.Errorf("connecting after replacing the certificate: %v", err)
 	}
 }
 
@@ -120,6 +190,14 @@ func TestExitsWithoutServing(t *testing.T) {
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: OPERATOR_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
 		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: OPERATOR_MCP_TEST_UNSET_KEY}}\n")
+	dir := t.TempDir()
+	writeCertificate(t, filepath.Join(dir, "a.crt"), filepath.Join(dir, "a.key"))
+	writeCertificate(t, filepath.Join(dir, "b.crt"), filepath.Join(dir, "b.key"))
+	writeTLSConfig := func(certFile, keyFile string) string {
+		return writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\nlisten_tls: {cert_file: %q, key_file: %q}\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n", certFile, keyFile))
+	}
+	missingCertificate := writeTLSConfig(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "a.key"))
+	mismatchedKey := writeTLSConfig(filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key"))
 	tests := []struct {
 		name     string
 		args     []string
@@ -131,6 +209,8 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
 		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable OPERATOR_MCP_TEST_UNSET_KEY is unset or empty`},
+		{"unreadable certificate", []string{"--config", missingCertificate}, 1, "invalid config " + missingCertificate + ": listen_tls: open " + filepath.Join(dir, "missing.crt")},
+		{"key does not match certificate", []string{"--config", mismatchedKey}, 1, "invalid config " + mismatchedKey + ": listen_tls: tls: private key does not match public key"},
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflow`},
 	}
 	for _, tt := range tests {

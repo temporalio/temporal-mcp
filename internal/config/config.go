@@ -20,14 +20,25 @@ import (
 // Config is the server configuration.
 type Config struct {
 	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
-	Listen  string   `yaml:"listen"`
-	Targets []Target `yaml:"targets"`
+	Listen string `yaml:"listen"`
+	// ListenTLS, when set, makes the server serve HTTPS on Listen rather than plain HTTP.
+	ListenTLS *ListenTLS `yaml:"listen_tls"`
+	Targets   []Target   `yaml:"targets"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
 	Auth *Auth `yaml:"auth"`
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
 	Authorization *Authorization `yaml:"authorization"`
+}
+
+// ListenTLS is the certificate and key the server serves HTTPS with. A renewed
+// certificate takes effect for new connections without a restart.
+type ListenTLS struct {
+	// CertFile is the path of a PEM certificate chain, leaf first.
+	CertFile string `yaml:"cert_file"`
+	// KeyFile is the path of the certificate's PEM private key.
+	KeyFile string `yaml:"key_file"`
 }
 
 // Authorization gives each caller the profiles of the rules its access token
@@ -172,6 +183,9 @@ func parse(data []byte) (*Config, error) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
 	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
+	if cfg.ListenTLS == nil && hasKey(data, "listen_tls") {
+		cfg.ListenTLS = &ListenTLS{}
+	}
 	if cfg.Auth == nil && hasKey(data, "auth") {
 		cfg.Auth = &Auth{}
 	}
@@ -213,6 +227,9 @@ func (c *Config) validate() error {
 	var errs []error
 	if err := validateListen(c.Listen, c.Auth != nil); err != nil {
 		errs = append(errs, err)
+	}
+	if c.ListenTLS != nil && (c.ListenTLS.CertFile == "" || c.ListenTLS.KeyFile == "") {
+		errs = append(errs, errors.New("listen_tls: cert_file and key_file are both required"))
 	}
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)

@@ -38,6 +38,15 @@ type nextCall struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
+const maxPageSize = 100
+
+// boundPageSize gives p, a property that caps how many results a call returns, a range of 1 to maxPageSize and a
+// default of 25, and appends the range to p's description.
+func boundPageSize(p *jsonschema.Schema) {
+	p.Minimum, p.Maximum, p.Default = new(1.0), new(float64(maxPageSize)), json.RawMessage("25")
+	p.Description += fmt.Sprintf(", from 1 to %d", maxPageSize)
+}
+
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
 // A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it.

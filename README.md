@@ -4,12 +4,19 @@
 
 Temporal Cloud targets with an API key also connect to the Cloud Ops API at `saas-api.tmprl.cloud:443` for `list_search_attributes` and `search_workflows`.
 
-## Prerequisites
+## Install
 
-- Go 1.27 or later (see `go.mod`).
-- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests in `internal/server` use to start a Temporal dev server. Without it, the first test run downloads the CLI.
+Each [release](https://github.com/temporalio/operator-mcp/releases) has archives for Linux (`linux`) and macOS (`darwin`) on amd64 and arm64. Download the one for your platform, check that GitHub Actions built it from this repository, and extract `operator-mcp`. For Linux on amd64:
 
-## Build
+```sh
+gh release download --repo temporalio/operator-mcp --pattern '*_linux_amd64.tar.gz'
+gh attestation verify operator-mcp_*_linux_amd64.tar.gz --repo temporalio/operator-mcp
+tar -xzf operator-mcp_*_linux_amd64.tar.gz operator-mcp
+```
+
+## Build from source
+
+With Go 1.27.2 or later:
 
 ```sh
 go build -o bin/ .
@@ -110,6 +117,8 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
 ## Test
+
+The end-to-end tests in `internal/server` use the `temporal` CLI on your `PATH` to start a Temporal dev server. Without it, the first test run downloads the CLI.
 
 ```sh
 go test ./...

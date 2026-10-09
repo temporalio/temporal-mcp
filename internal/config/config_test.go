@@ -243,6 +243,16 @@ func TestParseInvalid(t *testing.T) {
 			want: []string{"listen: address 127.0.0.1: missing port"},
 		},
 		{
+			name: "listen_tls without key_file",
+			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/operator-mcp/tls.crt}\n" + validTargets,
+			want: []string{"listen_tls: cert_file and key_file are both required"},
+		},
+		{
+			name: "listen_tls with no value",
+			yaml: "listen: 127.0.0.1:8080\nlisten_tls:\n" + validTargets,
+			want: []string{"listen_tls: cert_file and key_file are both required"},
+		},
+		{
 			name: "no targets key",
 			yaml: "listen: 127.0.0.1:8080\n",
 			want: []string{"at least one target is required"},

@@ -5,6 +5,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -82,17 +83,39 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
+	scheme := "http"
+	if cfg.ListenTLS != nil {
+		if _, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile); err != nil {
+			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
+		}
+		srv.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			cert, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile)
+			if err != nil {
+				logger.Error("cannot load listen_tls certificate", "error", err.Error())
+				return nil, err
+			}
+			return &cert, nil
+		}}
+		scheme = "https"
+	}
+
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "%s: listening on http://%s/mcp\n", name, ln.Addr())
+	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, scheme, ln.Addr())
 
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ln) }()
+	go func() {
+		if srv.TLSConfig != nil {
+			served <- srv.ServeTLS(ln, "", "")
+			return
+		}
+		served <- srv.Serve(ln)
+	}()
 	select {
 	case err := <-served:
 		return err

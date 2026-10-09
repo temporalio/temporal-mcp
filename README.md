@@ -17,6 +17,18 @@ go build -o bin/ .
 
 This writes `bin/operator-mcp`.
 
+## HTTPS
+
+With a `listen_tls` section, `operator-mcp` serves HTTPS on `listen`. Without one, it serves plain HTTP, for running behind a reverse proxy or load balancer that terminates TLS.
+
+```yaml
+listen_tls:
+  cert_file: /etc/operator-mcp/tls.crt   # PEM certificate chain, leaf first
+  key_file: /etc/operator-mcp/tls.key    # PEM private key
+```
+
+A renewed certificate takes effect for new connections without a restart.
+
 ## Auth
 
 Each issuer's `audience` must identify this server as an API, such as its resource URL or API identifier, never the client app users sign in with. ID tokens issued to that app have the same `aud`, so they would pass as access tokens. With Microsoft Entra ID v2, the audience is the client ID of the API's app registration, which must be a different registration from the one the MCP client signs in with.
@@ -113,11 +125,7 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-```sh
-go test ./...
-```
-
-With the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...

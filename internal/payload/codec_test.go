@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"testing"
@@ -17,6 +18,7 @@ func TestRequestFailure(t *testing.T) {
 		want string
 	}{
 		{"deadline exceeded", context.DeadlineExceeded, "timed out waiting for the codec server"},
+		{"wrapped deadline exceeded", fmt.Errorf("read: %w", context.DeadlineExceeded), "timed out waiting for the codec server"},
 		{"transport timeout", &net.DNSError{IsTimeout: true}, "timed out waiting for the codec server"},
 		{"untrusted certificate", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "the TLS certificate check with the codec server failed"},
 		{"canceled", context.Canceled, "the request to the codec server failed"},

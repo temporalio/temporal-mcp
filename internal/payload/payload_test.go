@@ -187,15 +187,13 @@ func TestRenderFailsClosed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := t.Context()
 			if tt.timeout > 0 {
-				// Only the deliberately unresponsive server needs a short deadline.
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, tt.timeout)
-				defer cancel()
+				// Only the deliberately unresponsive server needs a short codec timeout.
+				defer func(d time.Duration) { codecTimeout = d }(codecTimeout)
+				codecTimeout = tt.timeout
 			}
 			var logs bytes.Buffer
-			if got := newRenderer(t, tt.endpoint, tt.auth, &logs).CheckCodec(ctx, "t"); got != tt.reason {
+			if got := newRenderer(t, tt.endpoint, tt.auth, &logs).CheckCodec(t.Context(), "t"); got != tt.reason {
 				t.Errorf("CheckCodec = %q, want %q", got, tt.reason)
 			}
 			if log := logs.String(); !strings.Contains(log, tt.reason) || strings.Contains(log, customerData) {

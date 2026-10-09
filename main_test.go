@@ -9,8 +9,10 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/sdk/testsuite"
 )
 
 func buildBinary(t *testing.T, buildArgs ...string) string {
@@ -157,6 +160,62 @@ func TestHTTPS(t *testing.T) {
 	}
 	if err := connect(writeCertificate(t, certFile, keyFile)); err != nil {
 		t.Errorf("connecting after replacing the certificate: %v", err)
+	}
+}
+
+func TestStdio(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	exe, _ := exec.LookPath("temporal")
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dev.Stop() })
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default}\n", dev.FrontendHostPort())
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.CommandContext(ctx, buildBinary(t), "--stdio", "--config", configPath)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	// The client fails on any line of stdout that is not a JSON-RPC message.
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("%v\nstderr:\n%s", err, &stderr)
+	}
+	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+		t.Errorf("protocol version = %s, want 2026-07-28", got)
+	}
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "dev"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check struct {
+		Result struct {
+			Stages []struct{ Name, Status string }
+		}
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if res.IsError || json.Unmarshal(b, &check) != nil {
+		t.Fatalf("check_connection = %s", b)
+	}
+	statuses := map[string]string{}
+	for _, s := range check.Result.Stages {
+		statuses[s.Name] = s.Status
+	}
+	if want := map[string]string{"server": "ok", "namespace": "ok", "codec": "skipped"}; !maps.Equal(statuses, want) {
+		t.Errorf("check_connection = %s, want stage statuses %v", b, want)
+	}
+
+	// Closing the session closes the server's stdin and returns the error of the server's exit.
+	if err := session.Close(); err != nil {
+		t.Fatalf("server did not exit cleanly when stdin closed: %v\nstderr:\n%s", err, &stderr)
+	}
+	if !strings.Contains(stderr.String(), `"tool":"check_connection"`) {
+		t.Errorf("stderr has no audit record of the call:\n%s", &stderr)
 	}
 }
 

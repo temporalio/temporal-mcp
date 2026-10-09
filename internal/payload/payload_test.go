@@ -166,8 +166,6 @@ func TestRenderFailsClosed(t *testing.T) {
 	}))
 	t.Cleanup(cut.Close)
 
-	defer func(d time.Duration) { codecTimeout = d }(codecTimeout)
-	codecTimeout = 100 * time.Millisecond
 	const customerData = "customer data"
 	malformed := respond(http.StatusOK, `{"payloads":[{"data":"`+customerData+`"}]}`)
 
@@ -176,20 +174,28 @@ func TestRenderFailsClosed(t *testing.T) {
 		endpoint string
 		auth     *config.Secret
 		reason   string
+		timeout  time.Duration
 	}{
-		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized"},
-		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads"},
-		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent"},
-		{"unreachable", closed, nil, "the request to the codec server failed"},
-		{"untrusted certificate", tlsServer.URL, nil, "the TLS certificate check with the codec server failed"},
-		{"no response", hang.URL, nil, "timed out waiting for the codec server"},
-		{"response cut short", cut.URL, nil, "the codec server's response could not be read"},
-		{"unreadable authorization header", malformed, &config.Secret{File: filepath.Join(t.TempDir(), "missing")}, "the authorization header for the codec server could not be read"},
+		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized", 0},
+		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads", 0},
+		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent", 0},
+		{"unreachable", closed, nil, "the request to the codec server failed", 0},
+		{"untrusted certificate", tlsServer.URL, nil, "the TLS certificate check with the codec server failed", 0},
+		{"no response", hang.URL, nil, "timed out waiting for the codec server", 100 * time.Millisecond},
+		{"response cut short", cut.URL, nil, "the codec server's response could not be read", 0},
+		{"unreadable authorization header", malformed, &config.Secret{File: filepath.Join(t.TempDir(), "missing")}, "the authorization header for the codec server could not be read", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			if tt.timeout > 0 {
+				// Only the deliberately unresponsive server needs a short deadline.
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.timeout)
+				defer cancel()
+			}
 			var logs bytes.Buffer
-			if got := newRenderer(t, tt.endpoint, tt.auth, &logs).CheckCodec(t.Context(), "t"); got != tt.reason {
+			if got := newRenderer(t, tt.endpoint, tt.auth, &logs).CheckCodec(ctx, "t"); got != tt.reason {
 				t.Errorf("CheckCodec = %q, want %q", got, tt.reason)
 			}
 			if log := logs.String(); !strings.Contains(log, tt.reason) || strings.Contains(log, customerData) {

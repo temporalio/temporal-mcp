@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -87,8 +86,7 @@ func searchWorkflowsInputSchema() *jsonschema.Schema {
 	if err != nil {
 		panic(fmt.Errorf("search_workflows: input schema: %w", err))
 	}
-	p := schema.Properties["page_size"]
-	p.Minimum, p.Maximum, p.Default = new(1.0), new(100.0), json.RawMessage("25")
+	boundPageSize(schema.Properties["page_size"])
 	return schema
 }
 

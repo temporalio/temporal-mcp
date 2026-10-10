@@ -1,15 +1,27 @@
-# operator-mcp
+# operator-mcp ([Pre-release])
 
 `operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`.
 
-Temporal Cloud targets with an API key also connect to the Cloud Ops API at `saas-api.tmprl.cloud:443` for `list_search_attributes` and `search_workflows`.
+> [!NOTE]
+>
+> **Pre-release:** This project is under active development and evolving quickly. It is not ready for production use.
+> Open a GitHub issue if you have questions or want to follow along.
+> If you're evaluating this project for your organization, please reach out to your Temporal representative for
+> guidance and to share feedback.
 
-## Prerequisites
+## Install
 
-- Go 1.27 or later (see `go.mod`).
-- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests in `internal/server` use to start a Temporal dev server. Without it, the first test run downloads the CLI.
+Each [release](https://github.com/temporalio/operator-mcp/releases) has archives for Linux (`linux`) and macOS (`darwin`) on amd64 and arm64. Download the one for your platform, check that GitHub Actions built it from this repository, and extract `operator-mcp`. For Linux on amd64:
 
-## Build
+```sh
+gh release download --repo temporalio/operator-mcp --pattern '*_linux_amd64.tar.gz'
+gh attestation verify operator-mcp_*_linux_amd64.tar.gz --repo temporalio/operator-mcp
+tar -xzf operator-mcp_*_linux_amd64.tar.gz operator-mcp
+```
+
+## Build from source
+
+With Go 1.27.2 or later:
 
 ```sh
 go build -o bin/ .
@@ -112,12 +124,12 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-```sh
-go test ./...
-```
+The end-to-end tests in `internal/server` use the `temporal` CLI on your `PATH` to start a Temporal dev server. Without it, the first test run downloads the CLI.
 
-With the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...
 ```
+
+[Pre-release]: https://docs.temporal.io/evaluate/development-production-features/release-stages

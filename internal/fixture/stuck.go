@@ -2,6 +2,7 @@ package fixture
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.temporal.io/sdk/client"
@@ -12,13 +13,21 @@ import (
 const (
 	// LedgerTaskQueue is the task queue of the stuck ledger workflows and their activities.
 	LedgerTaskQueue = "ledger"
-	// StuckWorkerIdentity is the identity of the worker that NewStuckWorker returns.
+	// StuckWorkerIdentity is the identity of the worker that polls LedgerTaskQueue for workflow tasks.
 	StuckWorkerIdentity = "stuck-worker"
-	// StuckLedgerWorkflowID is the ID of the stuck ledger workflow that starts three activities.
-	StuckLedgerWorkflowID = "ledger-reconciliation-main"
-	// StuckLedgerActivities is the number of activities that the stuck ledger workflows start together.
-	StuckLedgerActivities = 7
+	// StuckLedgerWorkflowID is the ID of a stuck ledger workflow that starts three activities.
+	StuckLedgerWorkflowID = "session2-payment-reconciliation-main"
 )
+
+var stuckLedgerPopulations = []struct {
+	workflowType, idPrefix string
+	count                  int
+}{
+	{"PaymentReconciliationWorkflow", "payment-reconciliation", 800},
+	{"PaymentSettlementWorkflow", "payment-settlement", 500},
+	{"LedgerCompactionWorkflow", "ledger-compaction", 300},
+	{"BalanceSnapshotWorkflow", "balance-snapshot", 230},
+}
 
 func reconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 12 * time.Hour})
@@ -34,21 +43,41 @@ func reconcileLedgerWorkflow(ctx workflow.Context, batches int) error {
 	return nil
 }
 
-// NewStuckWorker returns an unstarted worker that polls LedgerTaskQueue for workflow tasks only, so no
-// FetchLedgerBatch activity ever starts.
-func NewStuckWorker(c client.Client) worker.Worker {
+// SeedStuckLedger starts a worker, with identity StuckWorkerIdentity, that polls LedgerTaskQueue for workflow tasks
+// only, and the 1,830 workflows of stuckLedgerPopulations on LedgerTaskQueue. StuckLedgerWorkflowID and the next 539
+// each start three FetchLedgerBatch activities and the rest two, so 4,200 activities wait with no worker to run them.
+// namespace must be c's namespace. It returns once they all wait, with a function that stops the worker.
+func SeedStuckLedger(ctx context.Context, c client.Client, namespace string) (stop func(), err error) {
 	w := worker.New(c, LedgerTaskQueue, worker.Options{Identity: StuckWorkerIdentity, LocalActivityWorkerOnly: true})
-	w.RegisterWorkflow(reconcileLedgerWorkflow)
-	return w
-}
-
-// StartStuckLedger starts reconcileLedgerWorkflow as StuckLedgerWorkflowID with three batches and as two more
-// workflows with two batches each.
-func StartStuckLedger(ctx context.Context, c client.Client) error {
-	for id, batches := range map[string]int{StuckLedgerWorkflowID: 3, "ledger-reconciliation-2": 2, "ledger-reconciliation-3": 2} {
-		if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, reconcileLedgerWorkflow, batches); err != nil {
-			return err
+	for _, p := range stuckLedgerPopulations {
+		w.RegisterWorkflowWithOptions(reconcileLedgerWorkflow, workflow.RegisterOptions{Name: p.workflowType})
+	}
+	if err := w.Start(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			w.Stop()
+		}
+	}()
+	var runs, activities int
+	for _, p := range stuckLedgerPopulations {
+		for i := range p.count {
+			id, batches := fmt.Sprintf("session2-%s-%04d", p.idPrefix, i+1), 2
+			if runs == 0 {
+				id = StuckLedgerWorkflowID
+			}
+			if runs < 540 {
+				batches = 3
+			}
+			if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, p.workflowType, batches); err != nil {
+				return nil, err
+			}
+			runs, activities = runs+1, activities+batches
 		}
 	}
-	return nil
+	if err := WaitForBacklog(ctx, c, namespace, LedgerTaskQueue, activities); err != nil {
+		return nil, waitingFor(fmt.Sprintf("the %d ledger activities to queue", activities), err)
+	}
+	return w.Stop, waitingFor("the stuck ledger workflows to show as running in Visibility", waitForCount(ctx, c, fmt.Sprintf("TaskQueue = '%s' AND ExecutionStatus = 'Running'", LedgerTaskQueue), runs))
 }

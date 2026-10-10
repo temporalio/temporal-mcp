@@ -27,15 +27,14 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
 	"go.temporal.io/api/operatorservice/v1"
-	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
-	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
 
@@ -192,27 +191,12 @@ func rejectWithDetails(workflow.Context) error {
 	return temporal.NewApplicationError("order rejected", "OrderRejected", "detail-1")
 }
 
-func waitUntil(ctx context.Context, t *testing.T, what string, done func() bool) {
-	t.Helper()
-	for !done() {
-		select {
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for %s", what)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-}
-
 func waitForDescribe(ctx context.Context, t *testing.T, c client.Client, workflowID, what string, done func(*workflowservice.DescribeWorkflowExecutionResponse) bool) *workflowservice.DescribeWorkflowExecutionResponse {
 	t.Helper()
-	var desc *workflowservice.DescribeWorkflowExecutionResponse
-	waitUntil(ctx, t, what, func() bool {
-		var err error
-		if desc, err = c.DescribeWorkflowExecution(ctx, workflowID, ""); err != nil {
-			t.Fatal(err)
-		}
-		return done(desc)
-	})
+	desc, err := fixture.WaitForDescribe(ctx, c, workflowID, done)
+	if err != nil {
+		t.Fatalf("waiting for %s: %v", what, err)
+	}
 	return desc
 }
 
@@ -237,7 +221,7 @@ func TestToolsOnDevServer(t *testing.T) {
 	if err := os.WriteFile(codecAuthorization, []byte("Bearer codec-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
+	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib), Logger: log.NewStructuredLogger(slog.New(slog.DiscardHandler))}
 	// encode returns value as the test's clients and workers store it.
 	encode := func(t *testing.T, value any) *commonpb.Payload {
 		t.Helper()
@@ -257,6 +241,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		"--search-attribute", "SaDatetime=Datetime",
 		"--search-attribute", "SaKeywordList=KeywordList",
 		"--search-attribute", "Domain=Keyword",
+		"--search-attribute", "Team=Keyword",
 		// Small history pages let a filtered get_workflow_history read reach its page limit on a short history.
 		"--dynamic-config-value", "frontend.historyMaxPageSize=5",
 	}})
@@ -278,13 +263,25 @@ func TestToolsOnDevServer(t *testing.T) {
 	}
 	t.Cleanup(w.Stop)
 
-	failed, err := fixture.StartFailedOrder(ctx, c)
+	failed, err := fixture.SeedOrders(ctx, c, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := failed.Get(ctx, nil); err == nil {
-		t.Fatal("order-88231 completed, want it to fail")
+	stop, err := fixture.SeedStuckLedger(ctx, c, "default")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(stop)
+	deployed, stop, err := fixture.SeedFulfillment(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	incidentStart, incidentEnd, stop, err := fixture.SeedIncident(ctx, c, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
 
 	start := func(id string, memo map[string]any, wf any, args ...any) client.WorkflowRun {
 		t.Helper()
@@ -1045,15 +1042,26 @@ func TestToolsOnDevServer(t *testing.T) {
 		if want := map[string]any{"count": float64(len(pages)), "groups": []any{}}; !reflect.DeepEqual(env["result"], want) || env["complete"] != true {
 			t.Errorf("envelope = %#v, want result %#v and complete true", env, want)
 		}
-		env = callTool(t, "count_workflows", map[string]any{"target": "dev", "query": "WorkflowId IN ('order-88231', 'order-completed', 'order-running', 'order-terminated', 'order-canceled')", "group_by": "ExecutionStatus"})
-		result := env["result"].(map[string]any)
-		groups := map[any]any{}
-		for _, g := range result["groups"].([]any) {
-			groups[g.(map[string]any)["value"]] = g.(map[string]any)["count"]
+		failedOrder, err := c.DescribeWorkflowExecution(ctx, "order-88231", "")
+		if err != nil {
+			t.Fatal(err)
 		}
-		want := map[any]any{"Failed": 1.0, "Completed": 1.0, "Running": 1.0, "Terminated": 1.0, "Canceled": 1.0}
-		if result["count"] != 5.0 || !reflect.DeepEqual(groups, want) {
-			t.Errorf("result = %#v, want count 5 and groups %v", result, want)
+		for _, tt := range []struct {
+			query string
+			count float64
+			want  map[any]any
+		}{
+			{"WorkflowId IN ('order-88231', 'order-completed', 'order-running', 'order-terminated', 'order-canceled')", 5, map[any]any{"Failed": 1.0, "Completed": 1.0, "Running": 1.0, "Terminated": 1.0, "Canceled": 1.0}},
+			{fmt.Sprintf("WorkflowId STARTS_WITH 'order-recovered-' AND StartTime > '%s'", failedOrder.GetWorkflowExecutionInfo().GetCloseTime().AsTime().Format(time.RFC3339Nano)), 12, map[any]any{"Completed": 12.0}},
+		} {
+			result := callTool(t, "count_workflows", map[string]any{"target": "dev", "query": tt.query, "group_by": "ExecutionStatus"})["result"].(map[string]any)
+			groups := map[any]any{}
+			for _, g := range result["groups"].([]any) {
+				groups[g.(map[string]any)["value"]] = g.(map[string]any)["count"]
+			}
+			if result["count"] != tt.count || !reflect.DeepEqual(groups, tt.want) {
+				t.Errorf("%s: result = %#v, want count %v and groups %v", tt.query, result, tt.count, tt.want)
+			}
 		}
 		all := callTool(t, "count_workflows", map[string]any{"target": "local"})["result"].(map[string]any)
 		byStatus := callTool(t, "count_workflows", map[string]any{"target": "local", "group_by": "ExecutionStatus"})["result"].(map[string]any)
@@ -1082,7 +1090,7 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Errorf("attribute %#v has an unknown category", attr)
 			}
 		}
-		wantCustom := map[string]any{"OrderId": "Keyword", "SaInt": "Int", "SaDouble": "Double", "SaBool": "Bool", "SaKeyword": "Keyword", "SaText": "Text", "SaDatetime": "Datetime", "SaKeywordList": "KeywordList", "Domain": "Keyword"}
+		wantCustom := map[string]any{"OrderId": "Keyword", "SaInt": "Int", "SaDouble": "Double", "SaBool": "Bool", "SaKeyword": "Keyword", "SaText": "Text", "SaDatetime": "Datetime", "SaKeywordList": "KeywordList", "Domain": "Keyword", "Team": "Keyword"}
 		if !reflect.DeepEqual(custom, wantCustom) {
 			t.Errorf("custom attributes = %v, want %v", custom, wantCustom)
 		}
@@ -1160,13 +1168,14 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 		return env, rec["temporal_calls"].(float64)
 	}
-	historyEvents := func(env map[string]any) []map[string]any {
-		events := []map[string]any{}
-		for _, e := range env["result"].(map[string]any)["events"].([]any) {
-			events = append(events, e.(map[string]any))
+	listed := func(env map[string]any, key string) []map[string]any {
+		items := []map[string]any{}
+		for _, e := range env["result"].(map[string]any)[key].([]any) {
+			items = append(items, e.(map[string]any))
 		}
-		return events
+		return items
 	}
+	historyEvents := func(env map[string]any) []map[string]any { return listed(env, "events") }
 	typesOf := func(events []map[string]any) []string {
 		types := []string{}
 		for _, e := range events {
@@ -1177,16 +1186,20 @@ func TestToolsOnDevServer(t *testing.T) {
 	attributes := func(e map[string]any) map[string]any { return e["attributes"].(map[string]any) }
 	pageThrough := func(t *testing.T, name string, args map[string]any) ([]map[string]any, []float64) {
 		t.Helper()
-		var events []map[string]any
+		key := "events"
+		if name == "search_workflows" {
+			key = "workflows"
+		}
+		var items []map[string]any
 		var calls []float64
 		for {
 			env, n := callCounted(t, name, args)
-			events, calls = append(events, historyEvents(env)...), append(calls, n)
+			items, calls = append(items, listed(env, key)...), append(calls, n)
 			if env["complete"] == true {
 				if env["next_call"] != nil {
 					t.Errorf("next_call = %#v on a complete call, want null", env["next_call"])
 				}
-				return events, calls
+				return items, calls
 			}
 			if len(calls) == 100 {
 				t.Fatal("still not complete after 100 calls")
@@ -1194,16 +1207,6 @@ func TestToolsOnDevServer(t *testing.T) {
 			next := env["next_call"].(map[string]any)
 			name, args = next["name"].(string), next["arguments"].(map[string]any)
 		}
-	}
-	waitForBacklog := func(t *testing.T, queue string, typ enumspb.TaskQueueType, n int64) {
-		t.Helper()
-		waitUntil(ctx, t, fmt.Sprintf("a backlog of %d on %s", n, queue), func() bool {
-			resp, err := c.WorkflowService().DescribeTaskQueue(ctx, &workflowservice.DescribeTaskQueueRequest{Namespace: "default", TaskQueue: &taskqueuepb.TaskQueue{Name: queue}, TaskQueueType: typ, ReportStats: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			return resp.GetStats().GetApproximateBacklogCount() == n
-		})
 	}
 	section := func(env map[string]any, typ string) map[string]any {
 		s, _ := env["result"].(map[string]any)[typ].(map[string]any)
@@ -1466,85 +1469,64 @@ func TestToolsOnDevServer(t *testing.T) {
 	})
 
 	t.Run("non-determinism population", func(t *testing.T) {
-		v1 := fixture.NewFulfillmentWorker(c, 1)
-		if err := v1.Start(); err != nil {
-			t.Fatal(err)
-		}
-		shippingBranch := map[string]bool{"nde-affected": true, "nde-clean": false, "nde-unexposed": true}
-		for id, branch := range shippingBranch {
-			if _, err := fixture.StartFulfillment(ctx, c, id, branch); err != nil {
-				t.Fatal(err)
+		runs, _ := pageThrough(t, "search_workflows", map[string]any{"target": "dev", "query": "WorkflowType = 'FulfillmentWorkflow'", "fields": []any{"ExecutionStatus"}, "page_size": 100})
+		signaledRuns, nondeterministic := 0, []string{}
+		for _, run := range runs {
+			id := run["workflow_id"].(string)
+			events := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": id, "event_types": []any{"ActivityTaskScheduled", "WorkflowExecutionSignaled", "failures"}}))
+			types := typesOf(events)
+			shippingBranch, signaled := slices.Contains(types, "ActivityTaskScheduled"), slices.Contains(types, "WorkflowExecutionSignaled")
+			want := []string{}
+			if signaled {
+				signaledRuns++
+				want = []string{"WorkflowExecutionSignaled"}
+			}
+			if shippingBranch {
+				nondeterministic = append(nondeterministic, id)
+				want = []string{"ActivityTaskScheduled", "WorkflowExecutionSignaled", "WorkflowTaskFailed"}
+			}
+			if !slices.Equal(types, want) || run["ExecutionStatus"] != "Running" {
+				t.Errorf("%s: status %v, events %v; want Running and %v: only a signaled run on the shipping branch fails, once, as later attempts are not recorded", id, run["ExecutionStatus"], types, want)
+				continue
+			}
+			for _, e := range events {
+				at, err := time.Parse(time.RFC3339Nano, e["event_time"].(string))
+				if err != nil || at.After(deployed) != (e["event_type"] != "ActivityTaskScheduled") {
+					t.Errorf("%s: %s at %v, want the activity scheduled before version 2 was deployed at %v and the rest after", id, e["event_type"], e["event_time"], deployed)
+				}
+				if e["event_type"] == "WorkflowTaskFailed" && attributes(e)["cause"] != "NonDeterministicError" {
+					t.Errorf("%s: WorkflowTaskFailed attributes = %#v, want cause NonDeterministicError", id, attributes(e))
+				}
 			}
 		}
-		for id := range shippingBranch {
-			waitForDescribe(ctx, t, c, id, id+"'s first workflow task", func(desc *workflowservice.DescribeWorkflowExecutionResponse) bool {
-				return desc.GetPendingWorkflowTask() == nil && desc.GetWorkflowExecutionInfo().GetHistoryLength() >= 4
-			})
+		if len(runs) != 230 || signaledRuns != 190 || len(nondeterministic) != 43 {
+			t.Fatalf("%d runs, %d signaled, %d nondeterministic; want 230, 190 and 43", len(runs), signaledRuns, len(nondeterministic))
 		}
-		v1.Stop()
-		worker.PurgeStickyWorkflowCache()
-		v2 := fixture.NewFulfillmentWorker(c, 2)
-		if err := v2.Start(); err != nil {
-			t.Fatal(err)
+		affected := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": nondeterministic[0], "event_types": []any{"failures"}}))
+		newest := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": nondeterministic[0], "event_types": []any{"failures"}, "order": "newest_first", "limit": 1}))
+		if len(affected) != 1 || len(newest) != 1 || newest[0]["event_id"] != affected[0]["event_id"] {
+			t.Fatalf("newest failure = %#v, want the only failure, %#v", newest, affected)
 		}
-		t.Cleanup(v2.Stop)
-		for _, id := range []string{"nde-affected", "nde-clean"} {
-			if err := c.SignalWorkflow(ctx, id, "", "deployment_probe", nil); err != nil {
-				t.Fatal(err)
+		var build any
+		for _, e := range historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": nondeterministic[0], "event_types": []any{"WorkflowTaskStarted"}})) {
+			if e["event_id"] == attributes(affected[0])["started_event_id"] {
+				build = attributes(e)["worker_version"]
 			}
 		}
-		waitForDescribe(ctx, t, c, "nde-affected", "a retry of the failed workflow task", func(desc *workflowservice.DescribeWorkflowExecutionResponse) bool {
-			return desc.GetPendingWorkflowTask().GetAttempt() >= 2
-		})
-		waitForDescribe(ctx, t, c, "nde-clean", "the probe's workflow task", func(desc *workflowservice.DescribeWorkflowExecutionResponse) bool {
-			return desc.GetPendingWorkflowTask() == nil && desc.GetWorkflowExecutionInfo().GetHistoryLength() >= 8
-		})
-
-		failures := func(t *testing.T, id string) []map[string]any {
-			t.Helper()
-			env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": id, "event_types": []any{"failures"}})
-			if env["complete"] != true {
-				t.Errorf("%s: complete = false, want true", id)
-			}
-			return historyEvents(env)
-		}
-		affected := failures(t, "nde-affected")
-		if got := typesOf(affected); !slices.Equal(got, []string{"WorkflowTaskFailed"}) {
-			t.Fatalf("nde-affected failures = %v, want one WorkflowTaskFailed: later attempts are not recorded", got)
-		}
-		a := attributes(affected[0])
-		if a["cause"] != "NonDeterministicError" {
-			t.Errorf("WorkflowTaskFailed attributes = %#v, want cause NonDeterministicError", a)
-		}
-		newest := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "nde-affected", "event_types": []any{"failures"}, "order": "newest_first", "limit": 1}))
-		if len(newest) != 1 || newest[0]["event_id"] != affected[0]["event_id"] {
-			t.Errorf("newest failure = %#v, want event %v", newest, affected[0]["event_id"])
-		}
-		for _, id := range []string{"nde-clean", "nde-unexposed"} {
-			if got := failures(t, id); len(got) != 0 {
-				t.Errorf("%s failures = %v, want none", id, typesOf(got))
-			}
+		if !reflect.DeepEqual(build, map[string]any{"build_id": "fulfillment-v2"}) {
+			t.Errorf("worker_version of the failed workflow task's WorkflowTaskStarted = %#v, want build_id fulfillment-v2", build)
 		}
 	})
 
 	t.Run("stuck workflow", func(t *testing.T) {
-		w := fixture.NewStuckWorker(c)
-		if err := w.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(w.Stop)
-		if err := fixture.StartStuckLedger(ctx, c); err != nil {
-			t.Fatal(err)
-		}
-		waitForBacklog(t, fixture.LedgerTaskQueue, enumspb.TASK_QUEUE_TYPE_ACTIVITY, fixture.StuckLedgerActivities)
 		env := callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.LedgerTaskQueue})
 		if got := identities(section(env, "workflow")); !slices.Contains(got, fixture.StuckWorkerIdentity) {
 			t.Errorf("workflow pollers = %v, want %s among them", got, fixture.StuckWorkerIdentity)
 		}
 		activities := section(env, "activity")
 		age, err := strconv.ParseFloat(strings.TrimSuffix(fmt.Sprint(activities["backlog_age"]), "s"), 64)
-		if len(identities(activities)) != 0 || activities["backlog_count"] != float64(fixture.StuckLedgerActivities) || err != nil || age <= 0 {
-			t.Errorf("activity section = %#v, want no pollers and a backlog of %d with an age", activities, fixture.StuckLedgerActivities)
+		if len(identities(activities)) != 0 || activities["backlog_count"] != 4200.0 || err != nil || age <= 0 {
+			t.Errorf("activity section = %#v, want no pollers and a backlog of 4200 with an age", activities)
 		}
 		if got := identities(section(env, "nexus")); len(got) != 0 {
 			t.Errorf("nexus pollers = %v, want none", got)
@@ -1560,73 +1542,53 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Errorf("event %v attributes = %#v, want a FetchLedgerBatch activity on %s", e["event_id"], a, fixture.LedgerTaskQueue)
 			}
 		}
+
+		runs, _ := pageThrough(t, "search_workflows", map[string]any{"target": "dev", "query": fmt.Sprintf("TaskQueue = '%s'", fixture.LedgerTaskQueue), "fields": []any{"WorkflowType", "ExecutionStatus"}, "page_size": 100})
+		ids, types, statuses := map[any]bool{}, map[any]bool{}, map[any]int{}
+		for _, r := range runs {
+			ids[r["workflow_id"]], types[r["WorkflowType"]] = true, true
+			statuses[r["ExecutionStatus"]]++
+		}
+		if len(ids) != 1830 || len(runs) != 1830 || len(types) != 4 || statuses["Running"] != 1830 {
+			t.Errorf("%d runs, %d distinct, of %d types, by status %v; want 1830 distinct running runs of 4 types", len(runs), len(ids), len(types), statuses)
+		}
 	})
 
 	t.Run("incident window", func(t *testing.T) {
-		w := fixture.NewIncidentWorker(c)
-		if err := w.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(w.Stop)
-		start := func(id string, entry fixture.LedgerEntry) client.WorkflowRun {
-			t.Helper()
-			run, err := fixture.StartLedgerEntry(ctx, c, id, entry)
-			if err != nil {
-				t.Fatal(err)
+		runs, _ := pageThrough(t, "search_workflows", map[string]any{"target": "dev", "query": "Team IS NOT NULL", "fields": []any{"WorkflowType", "Team", "Domain", "ExecutionStatus", "StartTime", "CloseTime"}, "page_size": 100})
+		types, teams, domains, statuses := map[any]int{}, map[any]int{}, map[any]int{}, map[any]int{}
+		var recovered, rejected string
+		for _, r := range runs {
+			types[r["WorkflowType"]]++
+			teams[r["Team"]]++
+			domains[r["Domain"]]++
+			statuses[r["ExecutionStatus"]]++
+			started, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(r["StartTime"]))
+			closed, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(r["CloseTime"]))
+			if started.Before(incidentStart) || started.After(incidentEnd) || !closed.After(incidentEnd) {
+				t.Errorf("%s started at %v and closed at %v, want started during the incident, from %v to %v, and closed after it", r["workflow_id"], r["StartTime"], r["CloseTime"], incidentStart, incidentEnd)
 			}
-			return run
-		}
-		start("ledger-payments-before", fixture.LedgerEntry{Domain: "payments"})
-		windowStart := time.Now().UTC()
-		recovered := start("ledger-payments-recovered", fixture.LedgerEntry{Domain: "payments"})
-		rejected := start("ledger-payments-rejected", fixture.LedgerEntry{Domain: "payments", Terminal: true})
-		start("ledger-core", fixture.LedgerEntry{Domain: "core"})
-		windowEnd := time.Now().UTC()
-		waitForBacklog(t, fixture.PaymentsTaskQueue, enumspb.TASK_QUEUE_TYPE_ACTIVITY, 3)
-
-		payments := func() map[string]any {
-			return section(callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.PaymentsTaskQueue, "types": []any{"activity"}}), "activity")
-		}
-		if s := payments(); len(identities(s)) != 0 || s["backlog_count"] != 3.0 {
-			t.Errorf("payments activity section during the incident = %#v, want no pollers and a backlog of 3", s)
-		}
-
-		query := fmt.Sprintf("StartTime BETWEEN '%s' AND '%s' AND Domain = 'payments'", windowStart.Format(time.RFC3339Nano), windowEnd.Format(time.RFC3339Nano))
-		waitUntil(ctx, t, "Visibility to show the incident's runs", func() bool {
-			n, err := c.CountWorkflow(ctx, &workflowservice.CountWorkflowExecutionsRequest{Query: query})
-			if err != nil {
-				t.Fatal(err)
+			if r["Domain"] == "payments" && r["ExecutionStatus"] == "Completed" {
+				recovered = r["workflow_id"].(string)
 			}
-			return n.GetCount() == 2
-		})
-		found := []string{}
-		for _, row := range callTool(t, "search_workflows", map[string]any{"target": "dev", "query": query})["result"].(map[string]any)["workflows"].([]any) {
-			found = append(found, row.(map[string]any)["workflow_id"].(string))
+			if r["Domain"] == "payments" && r["ExecutionStatus"] == "Failed" {
+				rejected = r["workflow_id"].(string)
+			}
 		}
-		if slices.Sort(found); !slices.Equal(found, []string{"ledger-payments-recovered", "ledger-payments-rejected"}) {
-			t.Errorf("payments runs started in the window = %v, want the recovered and rejected ones", found)
+		if len(runs) != 160 || len(types) != 6 || len(teams) != 6 || len(domains) != 3 || domains["payments"] != 90 || !reflect.DeepEqual(statuses, map[any]int{"Completed": 150, "Failed": 10}) {
+			t.Fatalf("%d runs of types %v, teams %v, domains %v, by status %v; want 160 runs of 6 types and 6 teams across 3 domains, 90 in payments, 150 completed and 10 failed", len(runs), types, teams, domains, statuses)
 		}
 
-		recoveryStart := time.Now().UTC()
-		recovery := fixture.NewRecoveryWorker(c)
-		if err := recovery.Start(); err != nil {
+		if err := fixture.WaitForBacklog(ctx, c, "default", fixture.PaymentsTaskQueue, 0); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(recovery.Stop)
-		if err := recovered.Get(ctx, nil); err != nil {
-			t.Fatal(err)
-		}
-		if err := rejected.Get(ctx, nil); err == nil {
-			t.Fatal("ledger-payments-rejected completed, want it to fail")
-		}
-		waitForBacklog(t, fixture.PaymentsTaskQueue, enumspb.TASK_QUEUE_TYPE_ACTIVITY, 0)
-		if s := payments(); !slices.Contains(identities(s), fixture.RecoveryWorkerIdentity) || s["backlog_count"] != 0.0 {
+		if s := section(callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.PaymentsTaskQueue, "types": []any{"activity"}}), "activity"); !slices.Contains(identities(s), fixture.RecoveryWorkerIdentity) || s["backlog_count"] != 0.0 {
 			t.Errorf("payments activity section after recovery = %#v, want %s polling and no backlog", s, fixture.RecoveryWorkerIdentity)
 		}
 
-		events := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "ledger-payments-recovered", "event_types": []any{"ActivityTaskScheduled", "ActivityTaskStarted"}}))
+		events := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": recovered, "event_types": []any{"ActivityTaskScheduled", "ActivityTaskStarted"}}))
 		if got := typesOf(events); !slices.Equal(got, []string{"ActivityTaskScheduled", "ActivityTaskStarted"}) {
-			t.Fatalf("activity events = %v, want ActivityTaskScheduled and ActivityTaskStarted", got)
+			t.Fatalf("activity events of %s = %v, want ActivityTaskScheduled and ActivityTaskStarted", recovered, got)
 		}
 		scheduledAt, _ := time.Parse(time.RFC3339Nano, events[0]["event_time"].(string))
 		startedAt, _ := time.Parse(time.RFC3339Nano, events[1]["event_time"].(string))
@@ -1634,13 +1596,13 @@ func TestToolsOnDevServer(t *testing.T) {
 		if msg, _ := started["last_failure"].(map[string]any)["message"].(string); started["attempt"] != 2.0 || !strings.Contains(msg, "LedgerServiceUnavailable") {
 			t.Errorf("ActivityTaskStarted attributes = %#v, want attempt 2 after a LedgerServiceUnavailable failure", started)
 		}
-		if !scheduledAt.Before(recoveryStart) || !startedAt.After(recoveryStart) {
-			t.Errorf("activity scheduled at %v and started at %v, want scheduled during the incident and started after recovery began at %v", scheduledAt, startedAt, recoveryStart)
+		if !scheduledAt.Before(incidentEnd) || !startedAt.After(incidentEnd) {
+			t.Errorf("activity scheduled at %v and started at %v, want scheduled during the incident and started after it ended at %v", scheduledAt, startedAt, incidentEnd)
 		}
 
-		events = historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "ledger-payments-rejected", "event_types": []any{"failures"}}))
+		events = historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": rejected, "event_types": []any{"failures"}}))
 		if got := typesOf(events); !slices.Equal(got, []string{"ActivityTaskFailed", "WorkflowExecutionFailed"}) {
-			t.Fatalf("failures = %v, want ActivityTaskFailed and WorkflowExecutionFailed", got)
+			t.Fatalf("failures of %s = %v, want ActivityTaskFailed and WorkflowExecutionFailed", rejected, got)
 		}
 		if got := attributes(events[0])["failure"].(map[string]any)["application"]; !reflect.DeepEqual(got, map[string]any{"type": "LedgerWriteRejected", "non_retryable": true}) {
 			t.Errorf("ActivityTaskFailed application failure = %#v, want the non-retryable LedgerWriteRejected", got)

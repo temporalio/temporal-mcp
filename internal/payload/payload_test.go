@@ -166,6 +166,13 @@ func TestRenderFailsClosed(t *testing.T) {
 	}))
 	t.Cleanup(cut.Close)
 
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the codec client followed the codec server's redirect")
+	}))
+	t.Cleanup(redirectTarget.Close)
+	redirect := httptest.NewServer(http.RedirectHandler(redirectTarget.URL, http.StatusTemporaryRedirect))
+	t.Cleanup(redirect.Close)
+
 	defer func(d time.Duration) { codecTimeout = d }(codecTimeout)
 	codecTimeout = 100 * time.Millisecond
 	const customerData = "customer data"
@@ -178,6 +185,7 @@ func TestRenderFailsClosed(t *testing.T) {
 		reason   string
 	}{
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized"},
+		{"redirect", redirect.URL, nil, "the codec server responded HTTP 307 Temporary Redirect"},
 		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads"},
 		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent"},
 		{"unreachable", closed, nil, "the request to the codec server failed"},
@@ -212,5 +220,21 @@ func TestRenderFailsClosed(t *testing.T) {
 	cancel()
 	if got, err := render(t, ctx, r.Batch("t"), payload("binary/encrypted", "a")); got != want || !errors.Is(err, context.Canceled) || logs.Len() != 0 {
 		t.Errorf("caller gone: fields = %s, err %v, log %q; want %s, the context's error and no log", got, err, logs.String(), want)
+	}
+}
+
+func TestNewRendererWarnsOfPlainHTTP(t *testing.T) {
+	for endpoint, warns := range map[string]bool{
+		"http://codec.example.com":             true,
+		"http://{namespace}.codec.example.com": true,
+		"http://localhost:8080":                false,
+		"http://127.0.0.1:8080":                false,
+		"https://codec.example.com":            false,
+	} {
+		var logs bytes.Buffer
+		newRenderer(t, endpoint, nil, &logs)
+		if log := logs.String(); strings.Contains(log, "level=WARN") != warns || warns && !strings.Contains(log, "codec=c") {
+			t.Errorf("%s: log %q, want warning %v (naming codec c)", endpoint, log, warns)
+		}
 	}
 }

@@ -84,8 +84,9 @@ targets:
     codec: payments
 ```
 
-- `endpoint` is the same value as the CLI's `--codec-endpoint`, including its `{namespace}` placeholder.
+- `endpoint` is the same value as the CLI's `--codec-endpoint`, including its `{namespace}` placeholder. Its scheme decides whether `operator-mcp` reaches the codec server over HTTPS or plain HTTP.
 - `authorization_header`, which is optional, holds the whole `Authorization` header value, such as `Bearer abc`, like `--codec-auth`. Its `env` is read at startup and its `file` on every request. The codec server must accept this header from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
+- An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set `SSL_CERT_FILE` or `SSL_CERT_DIR`. These replace the trusted CAs for every connection `operator-mcp` makes, including to Temporal Cloud and identity providers, so they must include the public CAs too.
 
 ## Audit
 

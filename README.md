@@ -129,11 +129,7 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-```sh
-go test ./...
-```
-
-With the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...

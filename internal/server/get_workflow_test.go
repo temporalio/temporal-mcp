@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -238,9 +237,8 @@ func TestToolsOnDevServer(t *testing.T) {
 	if err := os.WriteFile(codecAuthorization, []byte("Bearer codec-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	exe, _ := exec.LookPath("temporal")
 	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe, ClientOptions: encoded, ExtraArgs: []string{
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ClientOptions: encoded, ExtraArgs: []string{
 		"--search-attribute", "OrderId=Keyword",
 		"--search-attribute", "SaInt=Int",
 		"--search-attribute", "SaDouble=Double",

@@ -41,6 +41,21 @@ listen_tls:
 
 A renewed certificate takes effect for new connections without a restart.
 
+## Client certificates
+
+A target with a `tls` section presents a client certificate to its Temporal server instead of an `api_key`, as Temporal Cloud namespaces that use mTLS require:
+
+```yaml
+targets:
+  - name: payments-prod
+    # ...
+    tls:
+      cert_file: /etc/operator-mcp/payments.crt   # PEM certificate chain, leaf first
+      key_file: /etc/operator-mcp/payments.key    # PEM private key
+```
+
+A renewed certificate takes effect without a restart once the Temporal server replaces the connection.
+
 ## Auth
 
 Each issuer's `audience` must identify this server as an API, such as its resource URL or API identifier, never the client app users sign in with. ID tokens issued to that app have the same `aud`, so they would pass as access tokens. With Microsoft Entra ID v2, the audience is the client ID of the API's app registration, which must be a different registration from the one the MCP client signs in with.

@@ -141,7 +141,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_CountWorkflowExecutions_FullMethodName,
 	}, countWorkflows(cfg, clients)), addTool(s, &mcp.Tool{
 		Name:        "list_search_attributes",
-		Description: "List the search attributes that a target's Visibility queries can use, with their types.",
+		Description: "List the search attributes that a target's Visibility queries can use, with their types. complete is false when the target's custom search attributes cannot be listed.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,

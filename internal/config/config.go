@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,8 +23,8 @@ type Config struct {
 	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
 	Listen string `yaml:"listen"`
 	// ListenTLS, when set, makes the server serve HTTPS on Listen rather than plain HTTP.
-	ListenTLS *ListenTLS `yaml:"listen_tls"`
-	Targets   []Target   `yaml:"targets"`
+	ListenTLS *Certificate `yaml:"listen_tls"`
+	Targets   []Target     `yaml:"targets"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
@@ -32,13 +33,23 @@ type Config struct {
 	Authorization *Authorization `yaml:"authorization"`
 }
 
-// ListenTLS is the certificate and key the server serves HTTPS with. A renewed
-// certificate takes effect for new connections without a restart.
-type ListenTLS struct {
+// Certificate is a certificate and its private key, in files that are read again
+// for every TLS handshake, so a renewed certificate takes effect for new
+// connections without a restart.
+type Certificate struct {
 	// CertFile is the path of a PEM certificate chain, leaf first.
 	CertFile string `yaml:"cert_file"`
 	// KeyFile is the path of the certificate's PEM private key.
 	KeyFile string `yaml:"key_file"`
+}
+
+// Load reads the certificate and its key from their files.
+func (c *Certificate) Load() (*tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &cert, nil
 }
 
 // Authorization gives each caller the profiles of the rules its access token
@@ -95,9 +106,12 @@ type Target struct {
 	Description string   `yaml:"description"`
 	Address     string   `yaml:"address"`
 	Namespace   string   `yaml:"namespace"`
-	// APIKey says where to read the target's API key. With one the server connects
-	// over TLS; without one it connects in plaintext with no credentials.
+	// APIKey says where to read the target's API key.
 	APIKey *Secret `yaml:"api_key"`
+	// TLS is the client certificate the server presents to the target instead of
+	// an API key. With either, the server connects over TLS; with neither it
+	// connects in plaintext with no credentials.
+	TLS *Certificate `yaml:"tls"`
 	// PayloadHandling says how tool responses show the target's payloads:
 	// PayloadOmit, PayloadPassthrough or PayloadDecode. Empty means PayloadOmit.
 	PayloadHandling string `yaml:"payload_handling"`
@@ -184,7 +198,7 @@ func parse(data []byte) (*Config, error) {
 	}
 	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
 	if cfg.ListenTLS == nil && hasKey(data, "listen_tls") {
-		cfg.ListenTLS = &ListenTLS{}
+		cfg.ListenTLS = &Certificate{}
 	}
 	if cfg.Auth == nil && hasKey(data, "auth") {
 		cfg.Auth = &Auth{}
@@ -228,8 +242,8 @@ func (c *Config) validate() error {
 	if err := validateListen(c.Listen, c.Auth != nil); err != nil {
 		errs = append(errs, err)
 	}
-	if c.ListenTLS != nil && (c.ListenTLS.CertFile == "" || c.ListenTLS.KeyFile == "") {
-		errs = append(errs, errors.New("listen_tls: cert_file and key_file are both required"))
+	if err := validateCertificate("listen_tls", c.ListenTLS); err != nil {
+		errs = append(errs, err)
 	}
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)
@@ -278,6 +292,12 @@ func (c *Config) validate() error {
 		}
 		if err := validateSecret(label+": api_key", t.APIKey); err != nil {
 			errs = append(errs, err)
+		}
+		if err := validateCertificate(label+": tls", t.TLS); err != nil {
+			errs = append(errs, err)
+		}
+		if t.APIKey != nil && t.TLS != nil {
+			errs = append(errs, fmt.Errorf("%s: at most one of api_key or tls is allowed", label))
 		}
 		switch t.PayloadHandling {
 		case "", PayloadOmit, PayloadPassthrough, PayloadDecode:
@@ -429,6 +449,13 @@ func (a *Auth) validate() []error {
 		}
 	}
 	return errs
+}
+
+func validateCertificate(label string, c *Certificate) error {
+	if c != nil && (c.CertFile == "" || c.KeyFile == "") {
+		return fmt.Errorf("%s: cert_file and key_file are both required", label)
+	}
+	return nil
 }
 
 func validateSecret(label string, s *Secret) error {

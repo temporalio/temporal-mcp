@@ -159,18 +159,37 @@ func (s *Secret) Reader() (func() (string, error), error) {
 	}, nil
 }
 
-// Load reads the YAML file at path and returns the validated configuration.
-// With stdio, the configuration is for serving MCP over stdin and stdout, so
-// it must not have the sections that configure HTTP.
-func Load(path string, stdio bool) (*Config, error) {
+// Load reads the YAML file at path and returns the validated configuration for
+// serving MCP over HTTP.
+func Load(path string) (*Config, error) {
+	return load(path, parse)
+}
+
+// LoadStdio reads the YAML file at path and returns the validated configuration
+// for serving MCP over stdin and stdout, which must not have the sections that
+// configure HTTP.
+func LoadStdio(path string) (*Config, error) {
+	return load(path, parseStdio)
+}
+
+func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return parse(data, stdio)
+	return parse(data)
 }
 
-func parse(data []byte, stdio bool) (*Config, error) {
+func parse(data []byte) (*Config, error) {
+	return decode(data, func(c *Config) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+}
+
+func parseStdio(data []byte) (*Config, error) {
+	return decode(data, func(*Config) error { return httpOnlyKeys(data) })
+}
+
+// decode decodes data and validates it with validate and validateTargets.
+func decode(data []byte, validate func(*Config) error) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
@@ -194,13 +213,7 @@ func parse(data []byte, stdio bool) (*Config, error) {
 	if cfg.Authorization == nil && hasKey(data, "authorization") {
 		cfg.Authorization = &Authorization{}
 	}
-	var err error
-	if stdio {
-		err = httpOnlyKeys(data)
-	} else {
-		err = errors.Join(cfg.validateHTTP(), nonStringRuleValues(data))
-	}
-	if err := errors.Join(err, cfg.validateTargets()); err != nil {
+	if err := errors.Join(validate(&cfg), cfg.validateTargets()); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

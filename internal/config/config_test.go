@@ -29,7 +29,7 @@ codecs:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path, false)
+	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ authorization:
 
 func TestParseLoopbackListen(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "127.0.0.1:0"} {
-		if _, err := parse([]byte("listen: \""+listen+"\"\n"+validTargets), false); err != nil {
+		if _, err := parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
 			t.Errorf("listen %s: %v", listen, err)
 		}
 	}
@@ -84,23 +84,50 @@ func TestParseLoopbackListen(t *testing.T) {
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
 		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
-		if _, err := parse([]byte(data), false); err != nil {
+		if _, err := parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
 }
 
-func TestParseStdioRejectsHTTPSections(t *testing.T) {
-	data := "listen: 127.0.0.1:8080\nlisten_tls:\n" + "targets:\n  - {name: a}\n" +
-		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n" + validAuthorization
-	_, err := parse([]byte(data), true)
-	if err == nil {
-		t.Fatal("want an error")
-	}
-	for _, want := range []string{"listen, listen_tls, auth, authorization: not allowed with --stdio", "targets[0]: address is required"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not contain %q", err, want)
-		}
+func TestParseStdio(t *testing.T) {
+	const auth = "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n"
+	for _, tt := range []struct {
+		name, yaml string
+		want       []string
+	}{
+		{"targets only", validTargets, nil},
+		{"listen", "listen: 127.0.0.1:8080\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"empty listen", "listen: \"\"\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"listen_tls", "listen_tls: {cert_file: a.crt, key_file: a.key}\n" + validTargets, []string{"listen_tls: not allowed with --stdio"}},
+		{"auth", auth + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"empty auth", "auth:\n" + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
+		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
+			"listen, listen_tls, auth, authorization: not allowed with --stdio",
+			"targets[0]: address is required",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseStdio([]byte(tt.yaml))
+			if tt.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !strings.HasPrefix(err.Error(), tt.want[0]) {
+				t.Errorf("error %q does not start with %q", err, tt.want[0])
+			}
+			for _, want := range tt.want[1:] {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -108,7 +135,7 @@ func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
 		"  - {name: prod, description: x, address: b:7233, namespace: b}\n"
-	if _, err := parse([]byte(data), false); err != nil {
+	if _, err := parse([]byte(data)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -117,7 +144,7 @@ func TestParseAPIKey(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}}\n" +
 		"  - {name: b, description: x, address: b:7233, namespace: b, api_key: {file: /keys/b}}\n"
-	cfg, err := parse([]byte(data), false)
+	cfg, err := parse([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +522,7 @@ func TestParseInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parse([]byte(tt.yaml), false)
+			_, err := parse([]byte(tt.yaml))
 			if err == nil {
 				t.Fatal("want an error")
 			}

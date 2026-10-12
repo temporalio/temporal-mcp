@@ -31,13 +31,13 @@ const (
 var version = "dev"
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stdout, stderr io.Writer) error {
+func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Writer) error {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
@@ -55,7 +55,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("unexpected arguments %q", flags.Args())
 	}
 
-	cfg, err := config.Load(*configPath, *stdio)
+	load := config.Load
+	if *stdio {
+		load = config.LoadStdio
+	}
+	cfg, err := load(*configPath)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -72,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	// Over stdio, stdout carries only MCP messages, so the audit records go to stderr with the logs.
-	records := stdout
+	var records io.Writer = stdout
 	if *stdio {
 		records = stderr
 	}
@@ -81,7 +85,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 	if *stdio {
-		return s.Run(context.Background(), &mcp.StdioTransport{})
+		return s.Run(context.Background(), &mcp.IOTransport{Reader: stdin, Writer: stdout})
 	}
 
 	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}

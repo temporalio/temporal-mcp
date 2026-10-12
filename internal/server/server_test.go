@@ -29,7 +29,7 @@ import (
 // connect writes the server's logs and audit records to out.
 func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
-	cfg, err := config.Load(configPath, false)
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}

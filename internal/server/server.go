@@ -1,6 +1,7 @@
-// Package server exposes the MCP tools as an MCP server, which NewMux serves over streamable HTTP. With auth configured, NewMux
-// puts the token check in front of /mcp, limits each caller to the tools and targets that
-// the authorization section gives it, and serves the protected resource metadata.
+// Package server exposes the MCP tools as an MCP server, which runs over stdio or, through
+// NewMux, over streamable HTTP. With auth configured, NewMux puts the token check in front
+// of /mcp, limits each caller to the tools and targets that the authorization section
+// gives it, and serves the protected resource metadata.
 package server
 
 import (

@@ -186,6 +186,7 @@ func TestStdio(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\nstderr:\n%s", err, &stderr)
 	}
+	t.Cleanup(func() { _ = session.Close() })
 	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
 		t.Errorf("protocol version = %s, want 2026-07-28", got)
 	}

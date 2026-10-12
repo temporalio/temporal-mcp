@@ -30,6 +30,7 @@ func fulfillmentV2(ctx workflow.Context, _ bool) error {
 
 func newFulfillmentWorker(c client.Client, version int) worker.Worker {
 	w := worker.New(c, fulfillmentTaskQueue, worker.Options{
+		Identity:                "fulfillment-worker",
 		DeploymentOptions:       worker.DeploymentOptions{Version: worker.WorkerDeploymentVersion{BuildID: fmt.Sprintf("fulfillment-v%d", version)}},
 		LocalActivityWorkerOnly: true,
 	})
@@ -41,13 +42,13 @@ func newFulfillmentWorker(c client.Client, version int) worker.Worker {
 	return w
 }
 
-// SeedFulfillment starts 230 FulfillmentWorkflow runs, session3-fulfillment-0001 to session3-fulfillment-0230, on a
-// worker with build ID fulfillment-v1. 43 of the first 190 take the shipping branch, which starts a
-// PrepareShippingLabel activity on a task queue that no worker polls, and then every run waits. It then deploys
-// version 2, which only waits, on a worker with build ID fulfillment-v2, and signals the first 190 with
-// deployment_probe, so the workflow tasks of the 43 fail as nondeterministic. It returns once those 43 have failed
-// and the other 147 have handled the signal, with the time version 2 was deployed, a whole second that follows every
-// version 1 event and precedes every signal, and a function that stops its worker.
+// SeedFulfillment starts 230 FulfillmentWorkflow runs, fulfillment-0001 to fulfillment-0230, on a worker with build
+// ID fulfillment-v1. 43 of the first 190 take the shipping branch, which starts a PrepareShippingLabel activity on a
+// task queue that no worker polls, and then every run waits. It then deploys version 2, which only waits, on a worker
+// with build ID fulfillment-v2, and signals the first 190 with address_updated. It returns once the signal's
+// workflow task has failed as nondeterministic for those 43 and completed on version 2 for the other 147, with the
+// time version 2 was deployed, a whole second that follows every version 1 event and precedes every signal, and a
+// function that stops its worker.
 func SeedFulfillment(ctx context.Context, c client.Client) (deployed time.Time, stop func(), err error) {
 	const runs, signaled, nondeterministic = 230, 190, 43
 	shippingBranch := map[int]bool{}
@@ -73,7 +74,6 @@ func SeedFulfillment(ctx context.Context, c client.Client) (deployed time.Time, 
 		}
 	}
 	v1.Stop()
-	worker.PurgeStickyWorkflowCache()
 
 	deployed = waitForNextSecond()
 	v2 := newFulfillmentWorker(c, 2)
@@ -86,7 +86,7 @@ func SeedFulfillment(ctx context.Context, c client.Client) (deployed time.Time, 
 		}
 	}()
 	for i := range signaled {
-		if err := c.SignalWorkflow(ctx, fulfillmentID(i), "", "deployment_probe", nil); err != nil {
+		if err := c.SignalWorkflow(ctx, fulfillmentID(i), "", "address_updated", nil); err != nil {
 			return time.Time{}, nil, err
 		}
 	}
@@ -97,12 +97,12 @@ func SeedFulfillment(ctx context.Context, c client.Client) (deployed time.Time, 
 			}
 			return desc.GetPendingWorkflowTask() == nil && desc.GetWorkflowExecutionInfo().GetHistoryLength() >= 8
 		}); err != nil {
-			return time.Time{}, nil, waitingFor(fulfillmentID(i)+"'s deployment_probe workflow task to run on version 2", err)
+			return time.Time{}, nil, waitingFor(fulfillmentID(i)+"'s address_updated workflow task to run on version 2", err)
 		}
 	}
 	return deployed, v2.Stop, waitingFor("the fulfillment runs to show in Visibility", waitForCount(ctx, c, fmt.Sprintf("TaskQueue = '%s'", fulfillmentTaskQueue), runs))
 }
 
 func fulfillmentID(i int) string {
-	return fmt.Sprintf("session3-fulfillment-%04d", i+1)
+	return fmt.Sprintf("fulfillment-%04d", i+1)
 }

@@ -15,13 +15,13 @@ import (
 )
 
 const (
-	incidentTaskQueue = "ledger-incident"
+	incidentTaskQueue = "ledger-entries"
 	// PaymentsTaskQueue is the task queue of the ProcessLedgerEntry activities for the payments domain.
 	PaymentsTaskQueue = "ledger-payments"
 	coreTaskQueue     = "ledger-core"
 	// RecoveryWorkerIdentity is the identity of the workers that run the ProcessLedgerEntry
 	// activities once the incident ends.
-	RecoveryWorkerIdentity = "recovery-worker"
+	RecoveryWorkerIdentity = "ledger-entries-worker"
 )
 
 var (
@@ -42,8 +42,7 @@ var incidentPopulations = []struct {
 }
 
 type ledgerEntry struct {
-	Domain   string `json:"domain"`
-	Terminal bool   `json:"terminal"`
+	Domain string `json:"domain"`
 }
 
 func ledgerEntryWorkflow(ctx workflow.Context, entry ledgerEntry) error {
@@ -88,7 +87,7 @@ func SeedIncident(ctx context.Context, c client.Client, failedAttempts int) (sta
 		return nil
 	}
 
-	w := worker.New(c, incidentTaskQueue, worker.Options{LocalActivityWorkerOnly: true})
+	w := worker.New(c, incidentTaskQueue, worker.Options{Identity: "ledger-entries-workflow-worker", LocalActivityWorkerOnly: true})
 	for _, p := range incidentPopulations {
 		w.RegisterWorkflowWithOptions(ledgerEntryWorkflow, workflow.RegisterOptions{Name: p.workflowType})
 	}
@@ -96,13 +95,16 @@ func SeedIncident(ctx context.Context, c client.Client, failedAttempts int) (sta
 		return start, end, nil, err
 	}
 	var runs []client.WorkflowRun
+	rejected := map[string]bool{}
 	for _, p := range incidentPopulations {
 		for i := range p.count {
+			id := fmt.Sprintf("%s-%04d", p.idPrefix, i+1)
+			rejected[id] = len(runs)%16 == 0
 			r, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-				ID:                    fmt.Sprintf("session4-%s-%04d", p.idPrefix, i+1),
+				ID:                    id,
 				TaskQueue:             incidentTaskQueue,
 				TypedSearchAttributes: temporal.NewSearchAttributes(team.ValueSet(p.team), domain.ValueSet(p.domain)),
-			}, p.workflowType, ledgerEntry{Domain: p.domain, Terminal: len(runs)%16 == 0})
+			}, p.workflowType, ledgerEntry{Domain: p.domain})
 			if err != nil {
 				return start, end, nil, err
 			}
@@ -118,8 +120,8 @@ func SeedIncident(ctx context.Context, c client.Client, failedAttempts int) (sta
 	}
 	end = waitForNextSecond()
 
-	process := func(ctx context.Context, entry ledgerEntry) error {
-		if entry.Terminal {
+	process := func(ctx context.Context, _ ledgerEntry) error {
+		if rejected[activity.GetInfo(ctx).WorkflowExecution.ID] {
 			return temporal.NewNonRetryableApplicationError("LedgerWriteRejected: the ledger rejected the entry", "LedgerWriteRejected", nil)
 		}
 		if activity.GetInfo(ctx).Attempt <= int32(failedAttempts) {

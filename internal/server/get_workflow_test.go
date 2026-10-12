@@ -324,7 +324,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	latestRunID := latest.GetWorkflowExecutionInfo().GetExecution().GetRunId()
-	stuck := fixture.OrderInput{OrderID: "2", CatalogShouldFail: true, RetryIntervalSeconds: 3600}
+	fixture.CatalogDown.Store(true)
+	stuck := fixture.OrderInput{OrderID: "2", RetryIntervalSeconds: 3600}
 	running := start("order-running", nil, fixture.OrderWorkflow, stuck)
 	terminated := start("order-terminated", nil, fixture.OrderWorkflow, stuck)
 	if err := c.TerminateWorkflow(ctx, "order-terminated", "", "stopped by test"); err != nil {
@@ -343,6 +344,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		pa := desc.GetPendingActivities()
 		return len(pa) == 1 && pa[0].GetAttempt() == 2
 	})
+	fixture.CatalogDown.Store(false)
 	parent := start("order-parent", nil, parentOfWaiting)
 	child := waitForDescribe(ctx, t, c, "order-parent", "the child workflow to start", func(desc *workflowservice.DescribeWorkflowExecutionResponse) bool {
 		pc := desc.GetPendingChildren()
@@ -1052,7 +1054,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			want  map[any]any
 		}{
 			{"WorkflowId IN ('order-88231', 'order-completed', 'order-running', 'order-terminated', 'order-canceled')", 5, map[any]any{"Failed": 1.0, "Completed": 1.0, "Running": 1.0, "Terminated": 1.0, "Canceled": 1.0}},
-			{fmt.Sprintf("WorkflowId STARTS_WITH 'order-recovered-' AND StartTime > '%s'", failedOrder.GetWorkflowExecutionInfo().GetCloseTime().AsTime().Format(time.RFC3339Nano)), 12, map[any]any{"Completed": 12.0}},
+			{fmt.Sprintf("WorkflowId STARTS_WITH 'order-882' AND StartTime > '%s'", failedOrder.GetWorkflowExecutionInfo().GetCloseTime().AsTime().Format(time.RFC3339Nano)), 12, map[any]any{"Completed": 12.0}},
 		} {
 			result := callTool(t, "count_workflows", map[string]any{"target": "dev", "query": tt.query, "group_by": "ExecutionStatus"})["result"].(map[string]any)
 			groups := map[any]any{}
@@ -1233,7 +1235,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			return out
 		}
-		input := decoded(map[string]any{"order_id": "88231", "catalog_should_fail": true, "retry_interval_seconds": float64(1)})
+		input := decoded(map[string]any{"order_id": "88231", "retry_interval_seconds": float64(1)})
 
 		var scheduledID, failedID int64
 		t.Run("failures", func(t *testing.T) {
@@ -1285,7 +1287,7 @@ func TestToolsOnDevServer(t *testing.T) {
 
 		t.Run("payload handling", func(t *testing.T) {
 			a := attributes(historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev-omit", "workflow_id": "order-88231", "limit": 1}))[0])
-			stored := encode(t, fixture.OrderInput{OrderID: "88231", CatalogShouldFail: true, RetryIntervalSeconds: 1})
+			stored := encode(t, fixture.OrderInput{OrderID: "88231", RetryIntervalSeconds: 1})
 			omitted := map[string]any{"handling": "omitted", "reason": "payload_handling", "encoding": "binary/zlib", "size_bytes": float64(len(stored.GetData()))}
 			if !reflect.DeepEqual(a["input"], []any{omitted}) || !reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
 				t.Errorf("first event's input = %#v, search_attributes = %#v; want the input omitted with its encoding and size, and the search attributes decoded", a["input"], a["search_attributes"])

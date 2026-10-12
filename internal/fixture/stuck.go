@@ -14,9 +14,9 @@ const (
 	// LedgerTaskQueue is the task queue of the stuck ledger workflows and their activities.
 	LedgerTaskQueue = "ledger"
 	// StuckWorkerIdentity is the identity of the worker that polls LedgerTaskQueue for workflow tasks.
-	StuckWorkerIdentity = "stuck-worker"
+	StuckWorkerIdentity = "ledger-worker"
 	// StuckLedgerWorkflowID is the ID of a stuck ledger workflow that starts three activities.
-	StuckLedgerWorkflowID = "session2-payment-reconciliation-main"
+	StuckLedgerWorkflowID = "payment-reconciliation-main"
 )
 
 var stuckLedgerPopulations = []struct {
@@ -63,7 +63,7 @@ func SeedStuckLedger(ctx context.Context, c client.Client, namespace string) (st
 	var runs, activities int
 	for _, p := range stuckLedgerPopulations {
 		for i := range p.count {
-			id, batches := fmt.Sprintf("session2-%s-%04d", p.idPrefix, i+1), 2
+			id, batches := fmt.Sprintf("%s-%04d", p.idPrefix, i+1), 2
 			if runs == 0 {
 				id = StuckLedgerWorkflowID
 			}

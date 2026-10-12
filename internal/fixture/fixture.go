@@ -1,11 +1,13 @@
-// Package fixture provides the seeded Temporal workflows that tests run
-// against a dev server.
+// Package fixture provides the seeded Temporal workflows that the tests and the acceptance sessions run against a
+// dev server.
 package fixture
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -19,14 +21,17 @@ import (
 )
 
 // TaskQueue is the task queue the order workflow runs on.
-const TaskQueue = "orders-demo"
+const TaskQueue = "orders"
 
 var orderID = temporal.NewSearchAttributeKeyKeyword("OrderId")
+
+// CatalogDown, while true, makes OrderWorkflow's catalog activity, enrich_product, fail with a retryable 503 Service
+// Unavailable from the catalog service.
+var CatalogDown atomic.Bool
 
 // OrderInput is the input of OrderWorkflow.
 type OrderInput struct {
 	OrderID              string `json:"order_id"`
-	CatalogShouldFail    bool   `json:"catalog_should_fail"`
 	RetryIntervalSeconds int    `json:"retry_interval_seconds"`
 }
 
@@ -60,7 +65,7 @@ func authorizePayment(_ context.Context, order OrderInput) (string, error) {
 }
 
 func enrichProduct(_ context.Context, order OrderInput) (string, error) {
-	if order.CatalogShouldFail {
+	if CatalogDown.Load() {
 		return "", temporal.NewApplicationError("503 Service Unavailable from catalog service", "CatalogServiceUnavailable")
 	}
 	return "product-enriched:" + order.OrderID, nil
@@ -69,20 +74,21 @@ func enrichProduct(_ context.Context, order OrderInput) (string, error) {
 // NewWorker returns an unstarted worker for TaskQueue with OrderWorkflow and
 // its activities registered.
 func NewWorker(c client.Client) worker.Worker {
-	w := worker.New(c, TaskQueue, worker.Options{})
+	w := worker.New(c, TaskQueue, worker.Options{Identity: "orders-worker"})
 	w.RegisterWorkflow(OrderWorkflow)
 	w.RegisterActivityWithOptions(authorizePayment, activity.RegisterOptions{Name: "authorize_payment"})
 	w.RegisterActivityWithOptions(enrichProduct, activity.RegisterOptions{Name: "enrich_product"})
 	return w
 }
 
-// SeedOrders runs order 88231, as workflow order-88231, until it fails, its catalog activity failing all three
-// attempts retryIntervalSeconds apart. It then runs orders recovered-01 to recovered-12, as workflows
-// order-recovered-01 to order-recovered-12 with the same retry interval, until they complete. Each run's OrderId
-// search attribute is its order's ID, such as 88231 or recovered-01, not its workflow ID. A worker from NewWorker
-// must be running and search attribute OrderId registered. It returns order-88231's run.
+// SeedOrders sets CatalogDown and runs order 88231, as workflow order-88231, until it fails, its catalog activity
+// failing all three attempts retryIntervalSeconds apart. It then clears CatalogDown and runs orders 88232 to 88243,
+// as workflows order-88232 to order-88243 with the same retry interval, until they complete. Each run's OrderId
+// search attribute is its order's ID, such as 88231, not its workflow ID. A worker from NewWorker must be running
+// and search attribute OrderId registered. It returns order-88231's run.
 func SeedOrders(ctx context.Context, c client.Client, retryIntervalSeconds int) (client.WorkflowRun, error) {
-	failed, err := startOrder(ctx, c, OrderInput{OrderID: "88231", CatalogShouldFail: true, RetryIntervalSeconds: retryIntervalSeconds})
+	CatalogDown.Store(true)
+	failed, err := startOrder(ctx, c, OrderInput{OrderID: "88231", RetryIntervalSeconds: retryIntervalSeconds})
 	if err != nil {
 		return nil, err
 	}
@@ -90,9 +96,10 @@ func SeedOrders(ctx context.Context, c client.Client, retryIntervalSeconds int) 
 	if err := failed.Get(ctx, nil); !errors.As(err, &failure) {
 		return nil, fmt.Errorf("order-88231 ended with %v, want a workflow failure", err)
 	}
+	CatalogDown.Store(false)
 	var recovered []client.WorkflowRun
 	for i := range 12 {
-		run, err := startOrder(ctx, c, OrderInput{OrderID: fmt.Sprintf("recovered-%02d", i+1), RetryIntervalSeconds: retryIntervalSeconds})
+		run, err := startOrder(ctx, c, OrderInput{OrderID: strconv.Itoa(88232 + i), RetryIntervalSeconds: retryIntervalSeconds})
 		if err != nil {
 			return nil, err
 		}
@@ -103,7 +110,7 @@ func SeedOrders(ctx context.Context, c client.Client, retryIntervalSeconds int) 
 			return nil, waitingFor(run.GetID()+" to complete", err)
 		}
 	}
-	return failed, waitingFor("the 12 recovered orders to show as completed in Visibility", waitForCount(ctx, c, "WorkflowId STARTS_WITH 'order-recovered-' AND ExecutionStatus = 'Completed'", len(recovered)))
+	return failed, waitingFor("orders 88232 to 88243 to show as completed in Visibility", waitForCount(ctx, c, "WorkflowId STARTS_WITH 'order-882' AND ExecutionStatus = 'Completed'", len(recovered)))
 }
 
 func startOrder(ctx context.Context, c client.Client, order OrderInput) (client.WorkflowRun, error) {

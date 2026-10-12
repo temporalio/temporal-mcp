@@ -90,6 +90,47 @@ func TestParseAuth(t *testing.T) {
 	}
 }
 
+func TestParseStdio(t *testing.T) {
+	const auth = "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n"
+	for _, tt := range []struct {
+		name, yaml string
+		want       []string
+	}{
+		{"targets only", validTargets, nil},
+		{"listen", "listen: 127.0.0.1:8080\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"empty listen", "listen: \"\"\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"listen_tls", "listen_tls: {cert_file: a.crt, key_file: a.key}\n" + validTargets, []string{"listen_tls: not allowed with --stdio"}},
+		{"auth", auth + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"empty auth", "auth:\n" + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
+		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
+			"listen, listen_tls, auth, authorization: not allowed with --stdio",
+			"targets[0]: address is required",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseStdio([]byte(tt.yaml))
+			if tt.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !strings.HasPrefix(err.Error(), tt.want[0]) {
+				t.Errorf("error %q does not start with %q", err, tt.want[0])
+			}
+			for _, want := range tt.want[1:] {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +

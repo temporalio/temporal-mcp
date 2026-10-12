@@ -1,6 +1,6 @@
 # operator-mcp ([Pre-release])
 
-`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`.
+`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. It identifies itself to agents as `temporal-operator`.
 
 > [!NOTE]
 >
@@ -28,6 +28,24 @@ go build -o bin/ .
 ```
 
 This writes `bin/operator-mcp`.
+
+## Stdio
+
+With `--stdio`, `operator-mcp` serves MCP over stdin and stdout to the MCP client that launches it, such as Claude Code with this `.mcp.json` for a target with `api_key: {env: PAYMENTS_STAGING_API_KEY}`:
+
+```json
+{
+  "mcpServers": {
+    "temporal-operator": {
+      "command": "/path/to/operator-mcp",
+      "args": ["--stdio", "--config", "/path/to/config.yaml"],
+      "env": {"PAYMENTS_STAGING_API_KEY": "${PAYMENTS_STAGING_API_KEY}"}
+    }
+  }
+}
+```
+
+The config has `targets` and `codecs` only: `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Every tool is available on every target, so the targets' API keys decide what the developer can read. Logs and audit records go to stderr.
 
 ## HTTPS
 
@@ -101,7 +119,7 @@ targets:
 
 ## Audit
 
-`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr.
+`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token.
 
 ## Lint
 

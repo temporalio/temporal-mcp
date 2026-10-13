@@ -56,7 +56,15 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	records, err := openLog(cfg.AuditLogFile, stdout)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: audit_log_file: %w", *configPath, err)
+	}
+	logs, err := openLog(cfg.ErrorLogFile, stderr)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
+	}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
 	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
@@ -67,7 +75,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, stdout, logger)
+	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, records, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -99,4 +107,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return srv.ServeTLS(ln, "", "")
 	}
 	return srv.Serve(ln)
+}
+
+func openLog(path string, fallback io.Writer) (io.Writer, error) {
+	if path == "" {
+		return fallback, nil
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }

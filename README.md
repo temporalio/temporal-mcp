@@ -99,9 +99,9 @@ targets:
 - `endpoint` is the same value as the CLI's `--codec-endpoint`, including its `{namespace}` placeholder.
 - `authorization_header`, which is optional, holds the whole `Authorization` header value, such as `Bearer abc`, like `--codec-auth`. Its `env` is read at startup and its `file` on every request. The codec server must accept this header from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
 
-## Audit
+## Audit records and logs
 
-`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr.
+`operator-mcp` writes an audit record of each tool call that passes the token check, as one line of JSON, to stdout, and its logs to stderr. `audit_log_file` sends the audit records to the file it names instead, and `error_log_file` sends the logs to the file it names. `operator-mcp` appends to each file, creating it with mode 0600 if it does not exist.
 
 ## Lint
 

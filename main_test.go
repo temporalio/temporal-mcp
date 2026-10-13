@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/sdk/testsuite"
 )
 
 func buildBinary(t *testing.T, buildArgs ...string) string {
@@ -186,51 +188,120 @@ func TestLogFiles(t *testing.T) {
 	}
 	closedAddr := ln.Addr().String()
 	ln.Close()
-	dir := t.TempDir()
-	auditLog, errorLog, configPath := filepath.Join(dir, "audit.log"), filepath.Join(dir, "error.log"), filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(errorLog, []byte("earlier line\n"), 0o600); err != nil {
+	bin := buildBinary(t)
+	for _, stdio := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stdio=%t", stdio), func(t *testing.T) {
+			dir := t.TempDir()
+			auditLog, errorLog, configPath := filepath.Join(dir, "audit.log"), filepath.Join(dir, "error.log"), filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(errorLog, []byte("earlier line\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(errorLog, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			config := fmt.Sprintf("audit_log_file: %q\nerror_log_file: %q\n"+
+				"targets:\n  - {name: prod, description: x, address: %q, namespace: default, payload_handling: decode, codec: c}\n"+
+				"codecs:\n  c: {endpoint: \"http://%s\"}\n", auditLog, errorLog, closedAddr, closedAddr)
+			if !stdio {
+				config = "listen: 127.0.0.1:0\n" + config
+			}
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var transport mcp.Transport = &mcp.CommandTransport{Command: exec.Command(bin, "--stdio", "--config", configPath)}
+			if !stdio {
+				transport = &mcp.StreamableClientTransport{Endpoint: startServer(t, bin, configPath, nil)}
+			}
+			session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), transport, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "prod"}}); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(auditLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record struct{ Tool, Target string }
+			if err := json.Unmarshal(data, &record); err != nil || record.Tool != "check_connection" || record.Target != "prod" {
+				t.Errorf("audit log = %q (%v), want one check_connection record for prod", data, err)
+			}
+			if data, err = os.ReadFile(errorLog); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(string(data), "earlier line\n") || !strings.Contains(string(data), `msg="codec check failed"`) {
+				t.Errorf("error log = %q, want the earlier line followed by the codec check failure", data)
+			}
+			for path, want := range map[string]os.FileMode{auditLog: 0o600, errorLog: 0o640} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != want {
+					t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestStdio(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	exe, _ := exec.LookPath("temporal")
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(errorLog, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	config := fmt.Sprintf("listen: 127.0.0.1:0\naudit_log_file: %q\nerror_log_file: %q\n"+
-		"targets:\n  - {name: prod, description: x, address: %q, namespace: default, payload_handling: decode, codec: c}\n"+
-		"codecs:\n  c: {endpoint: \"http://%s\"}\n", auditLog, errorLog, closedAddr, closedAddr)
+	t.Cleanup(func() { _ = dev.Stop() })
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default}\n", dev.FrontendHostPort())
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: startServer(t, buildBinary(t), configPath, nil)}, nil)
+
+	cmd := exec.CommandContext(ctx, buildBinary(t), "--stdio", "--config", configPath)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	// The client fails on any line of stdout that is not a JSON-RPC message.
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("%v\nstderr:\n%s", err, &stderr)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+		t.Errorf("protocol version = %s, want 2026-07-28", got)
+	}
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "dev"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Close()
-	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "prod"}}); err != nil {
-		t.Fatal(err)
+	var check struct {
+		Result struct {
+			Stages []struct{ Name, Status string }
+		}
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	if res.IsError || json.Unmarshal(b, &check) != nil {
+		t.Fatalf("check_connection = %s", b)
+	}
+	statuses := map[string]string{}
+	for _, s := range check.Result.Stages {
+		statuses[s.Name] = s.Status
+	}
+	if want := map[string]string{"server": "ok", "namespace": "ok", "codec": "skipped"}; !maps.Equal(statuses, want) {
+		t.Errorf("check_connection = %s, want stage statuses %v", b, want)
 	}
 
-	data, err := os.ReadFile(auditLog)
-	if err != nil {
-		t.Fatal(err)
+	// Closing the session closes the server's stdin and returns the error of the server's exit.
+	if err := session.Close(); err != nil {
+		t.Fatalf("server did not exit cleanly when stdin closed: %v\nstderr:\n%s", err, &stderr)
 	}
-	var record struct{ Tool, Target string }
-	if err := json.Unmarshal(data, &record); err != nil || record.Tool != "check_connection" || record.Target != "prod" {
-		t.Errorf("audit log = %q (%v), want one check_connection record for prod", data, err)
-	}
-	if data, err = os.ReadFile(errorLog); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(string(data), "earlier line\n") || !strings.Contains(string(data), `msg="codec check failed"`) {
-		t.Errorf("error log = %q, want the earlier line followed by the codec check failure", data)
-	}
-	for path, want := range map[string]os.FileMode{auditLog: 0o600, errorLog: 0o640} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != want {
-			t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
-		}
+	if !strings.Contains(stderr.String(), `"tool":"check_connection"`) {
+		t.Errorf("stderr has no audit record of the call:\n%s", &stderr)
 	}
 }
 

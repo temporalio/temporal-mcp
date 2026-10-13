@@ -115,10 +115,10 @@ func TestAudit(t *testing.T) {
 	token := sign(map[string]any{})
 	var callToken atomic.Pointer[string]
 	callToken.Store(&token)
-	authed := connectTo(newMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
+	authed := connectTo(NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
 	openCfg := &config.Config{Targets: targets}
 	open, _ := newServer("temporal-operator", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
-	unauthed := connectTo(newMux(open.Server, openCfg, logger), http.DefaultTransport)
+	unauthed := connectTo(NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}

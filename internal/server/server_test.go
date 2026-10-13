@@ -196,11 +196,12 @@ func TestToolCalls(t *testing.T) {
 }
 
 func TestToolErrorHasResultType(t *testing.T) {
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
+	logger := slog.New(slog.DiscardHandler)
+	s, err := NewServer("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(NewMux(s, &config.Config{}, logger))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if err != nil {
@@ -257,17 +258,17 @@ func TestNewMux(t *testing.T) {
 		callers <- identity.CallerFrom(ctx)
 		return nil, struct{}{}, nil
 	})
-	withAuth := httptest.NewServer(newMux(s.Server, authCfg, logger))
+	withAuth := httptest.NewServer(NewMux(s.Server, authCfg, logger))
 	t.Cleanup(withAuth.Close)
 	noSlashCfg := *authCfg
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
-	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
+	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	plain, err := NewServer("temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutAuth := httptest.NewServer(h)
+	withoutAuth := httptest.NewServer(NewMux(plain, &config.Config{}, logger))
 	t.Cleanup(withoutAuth.Close)
 
 	tests := []struct {

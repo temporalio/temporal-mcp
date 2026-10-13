@@ -166,8 +166,7 @@ func TestHTTPS(t *testing.T) {
 func TestStdio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	exe, _ := exec.LookPath("temporal")
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe})
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

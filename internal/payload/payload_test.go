@@ -134,6 +134,35 @@ func TestRenderDecodes(t *testing.T) {
 	}
 }
 
+func TestRenderPassesThrough(t *testing.T) {
+	r, err := NewRenderer(&config.Config{
+		Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}},
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := render(t, t.Context(), r.Batch("t"),
+		payload("json/plain", `{"order_id": 9007199254740993}`),
+		payload("binary/null", ""),
+		payload("json/protobuf", `{"seconds":"5"}`),
+		payload("binary/plain", "raw"),
+		payload("json/plain", `{"truncated":`),
+		payload("binary/encrypted", "secret"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"handling":"passthrough","value":{"order_id":9007199254740993}},` +
+		`{"handling":"passthrough","value":null},` +
+		`{"handling":"passthrough","value":{"seconds":"5"}},` +
+		`{"handling":"passthrough","encoding":"binary/plain","data":"cmF3"},` +
+		`{"handling":"passthrough","encoding":"json/plain","data":"eyJ0cnVuY2F0ZWQiOg=="},` +
+		`{"handling":"passthrough","encoding":"binary/encrypted","data":"c2VjcmV0"}]`
+	if got != want {
+		t.Errorf("fields = %s\nwant %s", got, want)
+	}
+}
+
 func TestRenderFailsClosed(t *testing.T) {
 	respond := func(status int, body string) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

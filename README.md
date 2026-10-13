@@ -102,6 +102,8 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 - `passthrough` returns them as Temporal stores them, which the model can read unless your codec encrypts them. A JSON payload, such as one from the SDKs' default data converter, is shown as JSON, and any other in base64.
 - `decode` has the target's `codec` server decode them. If decoding fails, every payload in that response is left out as with `omit`, and the cause goes to the log.
 
+`list_available_targets` shows each target's `payload_handling`, so an agent knows before it asks for payloads whether it will see them.
+
 ```yaml
 codecs:
   payments:

@@ -29,18 +29,13 @@ import (
 
 // Field is a payload in a tool response. Batch.Render fills it in.
 type Field struct {
-	Handling string  `json:"handling" jsonschema:"decoded, passthrough or omitted"`
-	Value    any     `json:"value,omitempty" jsonschema:"with handling decoded or passthrough, the payload as JSON; absent if the payload is not JSON, and then encoding and data hold it"`
-	Encoding *string `json:"encoding,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's encoding, such as binary/protobuf or binary/encrypted"`
-	Data     *string `json:"data,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's bytes in base64; passthrough bytes are as stored, so may be encrypted or compressed"`
-	Reason   string  `json:"reason,omitempty" jsonschema:"with handling omitted, why: payload_handling if this target leaves payloads out of responses, decode_failed if its codec server could not decode this response's payloads, with the cause in the server log; check_connection's codec stage shows whether the codec server is reachable and accepts this server's credentials"`
+	Handling  string  `json:"handling" jsonschema:"decoded, passthrough or omitted"`
+	Value     any     `json:"value,omitempty" jsonschema:"with handling decoded or passthrough, the payload as JSON; absent if the payload is not JSON, and then encoding and data hold it"`
+	Encoding  *string `json:"encoding,omitempty" jsonschema:"with handling omitted, or decoded or passthrough and no value: the payload's encoding, such as json/plain, binary/protobuf or binary/encrypted; an omitted payload's encoding is as stored, so json/plain or json/protobuf means passthrough would show it as JSON"`
+	Data      *string `json:"data,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's bytes in base64; passthrough bytes are as stored, so may be encrypted or compressed"`
+	SizeBytes *int    `json:"size_bytes,omitempty" jsonschema:"with handling omitted: the size in bytes of the payload's data as stored, not counting its metadata"`
+	Reason    string  `json:"reason,omitempty" jsonschema:"with handling omitted, why: payload_handling if this target leaves payloads out of responses, decode_failed if its codec server could not decode this response's payloads, with the cause in the server log; check_connection's codec stage shows whether the codec server is reachable and accepts this server's credentials"`
 }
-
-// The Fields of payloads left out of a response.
-var (
-	omitted      = Field{Handling: "omitted", Reason: "payload_handling"}
-	decodeFailed = Field{Handling: "omitted", Reason: "decode_failed"}
-)
 
 // Renderer renders the payloads of each target's tool responses.
 type Renderer struct {
@@ -151,7 +146,7 @@ func (b *Batch) Render(ctx context.Context) error {
 			return b.decode(ctx)
 		}
 	default:
-		b.fill(omitted)
+		b.omit("payload_handling")
 	}
 	return nil
 }
@@ -159,7 +154,7 @@ func (b *Batch) Render(ctx context.Context) error {
 func (b *Batch) decode(ctx context.Context) error {
 	decoded, err := b.target.codec.decode(ctx, b.payloads)
 	if err != nil {
-		b.fill(decodeFailed)
+		b.omit("decode_failed")
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -169,7 +164,7 @@ func (b *Batch) decode(ctx context.Context) error {
 	for i, p := range decoded {
 		f, ok := field("decoded", p)
 		if !ok {
-			f = decodeFailed
+			f = omitted("decode_failed", b.payloads[i])
 			err := fmt.Sprintf("the codec server decoded a payload to encoding %s, but its data is not valid UTF-8 JSON", encoding(p))
 			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", err)
 		}
@@ -178,10 +173,17 @@ func (b *Batch) decode(ctx context.Context) error {
 	return nil
 }
 
-func (b *Batch) fill(f Field) {
-	for _, field := range b.fields {
-		*field = f
+func (b *Batch) omit(reason string) {
+	for i, p := range b.payloads {
+		*b.fields[i] = omitted(reason, p)
 	}
+}
+
+// omitted renders p, which a response leaves out for reason, as its encoding and
+// size as stored, without its data.
+func omitted(reason string, p *commonpb.Payload) Field {
+	enc, size := encoding(p), len(p.GetData())
+	return Field{Handling: "omitted", Reason: reason, Encoding: &enc, SizeBytes: &size}
 }
 
 // field renders p with the given handling: as JSON if its encoding is binary/null,

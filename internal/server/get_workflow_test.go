@@ -117,7 +117,7 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 	}
 	cfg := &config.Config{Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}}}
 	payloads := newRenderer(t, cfg, slog.New(slog.DiscardHandler))
-	beat := `[{"handling":"passthrough","encoding":"json/plain","data":"ImJlYXQi"}]`
+	beat := `[{"handling":"passthrough","value":"beat"}]`
 
 	// want is [encoded_attributes, last_heartbeat_details].
 	tests := []struct {
@@ -131,7 +131,7 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 				EncodedAttributes: encoded,
 				FailureInfo:       &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: &failurepb.ApplicationFailureInfo{Type: "T"}},
 			},
-			want: `[{"handling":"passthrough","encoding":"json/plain","data":"InNlY3JldCI="},[]]`,
+			want: `[{"handling":"passthrough","value":"secret"},[]]`,
 		},
 		{
 			name: "timeout",

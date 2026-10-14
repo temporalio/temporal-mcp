@@ -19,6 +19,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
@@ -29,9 +30,9 @@ import (
 // Field is a payload in a tool response. Batch.Render fills it in.
 type Field struct {
 	Handling string  `json:"handling" jsonschema:"decoded, passthrough or omitted"`
-	Value    any     `json:"value,omitempty" jsonschema:"with handling decoded, the payload as JSON; absent if the payload is not JSON, and then encoding and data hold it"`
-	Encoding *string `json:"encoding,omitempty" jsonschema:"with handling passthrough, or decoded without value: the payload's encoding, such as json/plain or binary/encrypted"`
-	Data     *string `json:"data,omitempty" jsonschema:"with handling passthrough, or decoded without value: the payload's bytes in base64; passthrough bytes are as stored, so may be encrypted or compressed"`
+	Value    any     `json:"value,omitempty" jsonschema:"with handling decoded or passthrough, the payload as JSON; absent if the payload is not JSON, and then encoding and data hold it"`
+	Encoding *string `json:"encoding,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's encoding, such as binary/protobuf or binary/encrypted"`
+	Data     *string `json:"data,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's bytes in base64; passthrough bytes are as stored, so may be encrypted or compressed"`
 	Reason   string  `json:"reason,omitempty" jsonschema:"with handling omitted, why: payload_handling if this target leaves payloads out of responses, decode_failed if its codec server could not decode this response's payloads, with the cause in the server log; check_connection's codec stage shows whether the codec server is reachable and accepts this server's credentials"`
 }
 
@@ -142,7 +143,8 @@ func (b *Batch) Render(ctx context.Context) error {
 	switch {
 	case b.target != nil && b.target.handling == config.PayloadPassthrough:
 		for i, p := range b.payloads {
-			*b.fields[i] = stored("passthrough", p)
+			// A payload whose data is not the JSON its encoding says is shown as stored.
+			*b.fields[i], _ = field("passthrough", p)
 		}
 	case b.target != nil && b.target.codec != nil:
 		if len(b.payloads) > 0 {
@@ -165,10 +167,11 @@ func (b *Batch) decode(ctx context.Context) error {
 		return nil
 	}
 	for i, p := range decoded {
-		f, err := decodedField(p)
-		if err != nil {
+		f, ok := field("decoded", p)
+		if !ok {
 			f = decodeFailed
-			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", err.Error())
+			err := fmt.Sprintf("the codec server decoded a payload to encoding %s, but its data is not valid UTF-8 JSON", encoding(p))
+			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", err)
 		}
 		*b.fields[i] = f
 	}
@@ -181,23 +184,29 @@ func (b *Batch) fill(f Field) {
 	}
 }
 
-// decodedField renders a payload the codec server decoded: as JSON if its encoding
-// is a JSON one, and otherwise as its encoding and bytes.
-func decodedField(p *commonpb.Payload) (Field, error) {
-	switch enc := string(p.GetMetadata()[converter.MetadataEncoding]); enc {
+// field renders p with the given handling: as JSON if its encoding is binary/null,
+// or a JSON one and its data is valid UTF-8 JSON, and otherwise as its encoding and
+// bytes. ok is false if p's encoding is a JSON one but its data is not valid UTF-8 JSON.
+func field(handling string, p *commonpb.Payload) (f Field, ok bool) {
+	switch encoding(p) {
 	case converter.MetadataEncodingNil:
-		return Field{Handling: "decoded", Value: json.RawMessage("null")}, nil
+		return Field{Handling: handling, Value: json.RawMessage("null")}, true
 	case converter.MetadataEncodingJSON, converter.MetadataEncodingProtoJSON:
 		// Kept as raw JSON, so that numbers keep every digit.
-		if !json.Valid(p.GetData()) {
-			return Field{}, fmt.Errorf("the codec server decoded a payload to encoding %s, but its data is not JSON", enc)
+		data := p.GetData()
+		if !utf8.Valid(data) || !json.Valid(data) {
+			return stored(handling, p), false
 		}
-		return Field{Handling: "decoded", Value: json.RawMessage(p.GetData())}, nil
+		return Field{Handling: handling, Value: json.RawMessage(data)}, true
 	}
-	return stored("decoded", p), nil
+	return stored(handling, p), true
 }
 
 func stored(handling string, p *commonpb.Payload) Field {
-	enc, data := string(p.GetMetadata()[converter.MetadataEncoding]), base64.StdEncoding.EncodeToString(p.GetData())
+	enc, data := encoding(p), base64.StdEncoding.EncodeToString(p.GetData())
 	return Field{Handling: handling, Encoding: &enc, Data: &data}
+}
+
+func encoding(p *commonpb.Payload) string {
+	return string(p.GetMetadata()[converter.MetadataEncoding])
 }

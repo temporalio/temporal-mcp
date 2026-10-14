@@ -125,12 +125,101 @@ func TestRenderDecodes(t *testing.T) {
 			t.Errorf("sent payloads %v, want %v", req.payloads, sent)
 		}
 	}
-	if !strings.Contains(logs.String(), "but its data is not JSON") {
+	if !strings.Contains(logs.String(), "but its data is not valid UTF-8 JSON") {
 		t.Errorf("log %q does not give the cause of the payload that is not JSON", logs.String())
 	}
 
 	if got, err := render(t, t.Context(), r.Batch("t")); err != nil || got != "[]" || len(take()) != 0 {
 		t.Errorf("empty batch: fields %s, err %v; want [], no error and no codec request", got, err)
+	}
+}
+
+func TestRenderPassesThrough(t *testing.T) {
+	r, err := NewRenderer(&config.Config{
+		Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}},
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := render(t, t.Context(), r.Batch("t"),
+		payload("json/plain", `{"order_id": 9007199254740993}`),
+		payload("binary/null", ""),
+		payload("json/protobuf", `{"seconds":"5"}`),
+		payload("binary/plain", "raw"),
+		payload("json/plain", `{"truncated":`),
+		payload("binary/encrypted", "secret"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"handling":"passthrough","value":{"order_id":9007199254740993}},` +
+		`{"handling":"passthrough","value":null},` +
+		`{"handling":"passthrough","value":{"seconds":"5"}},` +
+		`{"handling":"passthrough","encoding":"binary/plain","data":"cmF3"},` +
+		`{"handling":"passthrough","encoding":"json/plain","data":"eyJ0cnVuY2F0ZWQiOg=="},` +
+		`{"handling":"passthrough","encoding":"binary/encrypted","data":"c2VjcmV0"}]`
+	if got != want {
+		t.Errorf("fields = %s\nwant %s", got, want)
+	}
+}
+
+func TestRenderJSONUTF8(t *testing.T) {
+	// The codec returns the payloads unchanged, including their original bytes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(w, r.Body)
+	}))
+	t.Cleanup(srv.Close)
+	var logs bytes.Buffer
+	r, err := NewRenderer(&config.Config{
+		Codecs: map[string]config.Codec{"c": {Endpoint: srv.URL}},
+		Targets: []config.Target{
+			{Name: "passthrough", PayloadHandling: config.PayloadPassthrough},
+			{Name: "decode", PayloadHandling: config.PayloadDecode, Codec: "c"},
+		},
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, data, base64 string
+	}{
+		{"invalid byte", "\"\xff\"", "Iv8i"},
+		{"truncated sequence", "\"\xc3\"", "IsMi"},
+		{"valid Unicode", `"café 🌍"`, ""},
+	}
+	for _, handling := range []string{"passthrough", "decode"} {
+		for _, encoding := range []string{"json/plain", "json/protobuf"} {
+			for _, tt := range tests {
+				t.Run(handling+"/"+encoding+"/"+tt.name, func(t *testing.T) {
+					logs.Reset()
+					got, err := render(t, t.Context(), r.Batch(handling), payload(encoding, tt.data))
+					if err != nil {
+						t.Fatal(err)
+					}
+					shownHandling := "passthrough"
+					if handling == "decode" {
+						shownHandling = "decoded"
+					}
+					want := `[{"handling":"` + shownHandling + `","value":` + tt.data + `}]`
+					if tt.base64 != "" {
+						want = `[{"handling":"passthrough","encoding":"` + encoding + `","data":"` + tt.base64 + `"}]`
+						if handling == "decode" {
+							want = `[{"handling":"omitted","reason":"decode_failed"}]`
+						}
+					}
+					if got != want {
+						t.Errorf("fields = %q\nwant %q", got, want)
+					}
+					if handling == "decode" && tt.base64 != "" {
+						if !strings.Contains(logs.String(), "but its data is not valid UTF-8 JSON") {
+							t.Errorf("log %q does not explain the invalid UTF-8", logs.String())
+						}
+					} else if logs.Len() != 0 {
+						t.Errorf("unexpected log: %q", logs.String())
+					}
+				})
+			}
+		}
 	}
 }
 

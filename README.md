@@ -55,9 +55,9 @@ With `--stdio`, `operator-mcp` serves MCP over stdin and stdout to the MCP clien
 }
 ```
 
-## Audit
+## Audit records and logs
 
-`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token.
+`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
 
 ## Lint
 

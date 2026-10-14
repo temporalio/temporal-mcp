@@ -23,6 +23,9 @@ targets:
       endpoint: <url>
       [ authorization_header: <secret> ] ]
 
+[ audit_log_file: <filename> ]
+[ error_log_file: <filename> ]
+
 # HTTP mode only.
 listen: <host:port>
 
@@ -88,6 +91,15 @@ A codec server is an HTTP service that decodes payloads, the same one the Tempor
 - `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `http` or `https` URL with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header.
 - `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
 
+## `audit_log_file` and `error_log_file`
+
+Optional in both modes. These send the server's audit records and logs to files.
+
+- `audit_log_file` (filename, optional): The file the server appends its audit records to, one line of JSON for each tool call that passes the token check. Without it, the records go to stdout in HTTP mode and to stderr in `--stdio` mode.
+- `error_log_file` (filename, optional): The file the server appends its logs to. Without it, the logs go to stderr in both modes. The `listening on` line and any error that stops the server still go to stderr.
+
+The server creates each file with mode 0600 if it does not exist, and does not start if it cannot open one of them. It opens each file once, at startup, and never reopens it, so rotate the files with logrotate's `copytruncate` or restart the server after rotating them. Otherwise, after a rotation that renames a file, the server keeps writing to the renamed file, and its records are lost once that file is deleted.
+
 ## `listen` and `listen_tls`
 
 These say where and how the server serves MCP in HTTP mode, and are not allowed in `--stdio` mode.
@@ -131,7 +143,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has only `targets` and, optionally, `codecs`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. There is no authorization: the targets' API keys and client certificates decide what the developer can read.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read.
 
 ## Types
 

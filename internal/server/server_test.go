@@ -37,6 +37,13 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveTools(t, cfg, clients, out, extra...)
+}
+
+// serveTools serves cfg's tools over clients, writing the server's logs and audit records to out, and returns a session
+// connected to it.
+func serveTools(t *testing.T, cfg *config.Config, clients *temporal.Clients, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(out, nil))
 	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
 	for _, add := range extra {

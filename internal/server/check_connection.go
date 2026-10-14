@@ -116,7 +116,8 @@ func rpcErrorMessage(err error, t *config.Target, p *peer.Peer, server string) s
 	reached := p.Addr != nil
 	// Errors raised before a call reaches the server name its address, which results must not reveal.
 	switch {
-	case code == codes.Unavailable && !reached && strings.Contains(st.Message(), "authentication handshake failed"):
+	// Under TLS 1.3 a server rejects a client certificate after the client's side of the handshake, as a remote TLS alert.
+	case code == codes.Unavailable && !reached && (strings.Contains(st.Message(), "authentication handshake failed") || strings.Contains(st.Message(), "remote error: tls:")):
 		return "the TLS handshake or certificate check with " + server + " failed"
 	case code == codes.Unavailable && !reached:
 		return "could not connect to " + server

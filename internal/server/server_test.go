@@ -116,16 +116,18 @@ func TestListAvailableTargets(t *testing.T) {
 		"result": map[string]any{
 			"targets": []any{
 				map[string]any{
-					"name":        "prod",
-					"aliases":     []any{"production", "prod-us"},
-					"namespace":   "payments.abc12",
-					"description": "Production payments namespace.",
+					"name":             "prod",
+					"aliases":          []any{"production", "prod-us"},
+					"namespace":        "payments.abc12",
+					"description":      "Production payments namespace.",
+					"payload_handling": "omit",
 				},
 				map[string]any{
-					"name":        "staging",
-					"aliases":     []any{},
-					"namespace":   "default",
-					"description": "Staging namespace on a local dev server.",
+					"name":             "staging",
+					"aliases":          []any{},
+					"namespace":        "default",
+					"description":      "Staging namespace on a local dev server.",
+					"payload_handling": "passthrough",
 				},
 			},
 		},

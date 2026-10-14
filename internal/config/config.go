@@ -230,6 +230,9 @@ type keyNodes struct {
 		APIKey yaml.Node `yaml:"api_key"`
 		TLS    yaml.Node `yaml:"tls"`
 	} `yaml:"targets"`
+	Codecs map[string]struct {
+		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
+	} `yaml:"codecs"`
 }
 
 // decode decodes data and validates it with validate and validateTargets.
@@ -256,6 +259,11 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		for i, t := range keys.Targets {
 			emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
 			emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
+		}
+		for name, c := range keys.Codecs {
+			codec := cfg.Codecs[name]
+			emptyIfPresent(&codec.AuthorizationHeader, c.AuthorizationHeader)
+			cfg.Codecs[name] = codec
 		}
 	}
 	if err := errors.Join(validate(&cfg, &keys), cfg.validateTargets()); err != nil {

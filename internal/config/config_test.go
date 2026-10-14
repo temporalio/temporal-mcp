@@ -429,6 +429,11 @@ func TestParseInvalid(t *testing.T) {
 			},
 		},
 		{
+			name: "codec authorization header with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n",
+			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
+		},
+		{
 			name: "auth with no value",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n",
 			want: []string{"auth: resource is required", "auth: issuers: at least one issuer is required"},

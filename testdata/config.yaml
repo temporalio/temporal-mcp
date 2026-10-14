@@ -9,3 +9,4 @@ targets:
     description: Staging namespace on a local dev server.
     address: localhost:7233
     namespace: default
+    payload_handling: passthrough

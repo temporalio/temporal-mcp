@@ -1,9 +1,11 @@
-// Package server exposes the MCP tools over streamable HTTP. With auth configured, NewMux
-// puts the token check in front of /mcp, limits each caller to the tools and targets that
-// the authorization section gives it, and serves the protected resource metadata.
+// Package server exposes the MCP tools as an MCP server, which runs over stdio or, through
+// NewMux, over streamable HTTP. With auth configured, NewMux puts the token check in front
+// of /mcp, limits each caller to the tools and targets that the authorization section
+// gives it, and serves the protected resource metadata.
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -91,7 +93,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	names := &searchAttributeNames{}
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
-		Description: "List the Temporal targets you can read from.",
+		Description: "List the Temporal targets you can read from, and how tool responses show each one's payloads.",
 		Annotations: readOnlyAnnotations,
 	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
@@ -149,20 +151,17 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	}, listSearchAttributes(cfg, clients, names))}
 }
 
-// NewMux returns an HTTP handler that serves the MCP streamable HTTP transport
-// at /mcp for the given configuration, making Temporal calls through clients
-// and rendering the payloads in tool responses with payloads.
-// With auth configured, /mcp requires a valid access token, each caller may use
-// only what cfg's authorization gives it, and the protected resource metadata
-// is served at the path the token challenge points to.
+// NewServer returns the MCP server for the given configuration, making
+// Temporal calls through clients and rendering the payloads in tool responses
+// with payloads. Without auth, every caller may use every tool on every target;
+// with it, each caller may use only what cfg's authorization gives it.
 // records gets an audit record of each tool call, as a line of JSON; a call
 // whose record cannot be written fails. logger gets the cause of each internal
-// error and the reason for each rejected token or verification failure. When
-// auth has more than one issuer, it also gets a warning for each rule without
-// an issuer.
+// error. When auth has more than one issuer, it also gets a warning for each
+// rule without an issuer.
 // It fails if cfg has an auth section but no authorization, or if an
 // authorization profile names a tool the server does not have.
-func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (http.Handler, error) {
+func NewServer(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")
 	}
@@ -177,10 +176,15 @@ func NewMux(name, version string, cfg *config.Config, clients *temporal.Clients,
 			}
 		}
 	}
-	return newMux(s.Server, cfg, logger), nil
+	return s.Server, nil
 }
 
-func newMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
+// NewMux returns an HTTP handler that serves s, a [NewServer] server for cfg,
+// over the MCP streamable HTTP transport at /mcp. With auth configured, /mcp
+// requires a valid access token, logger gets the reason for each rejected token
+// or verification failure, and the protected resource metadata is served at the
+// path the token challenge points to.
+func NewMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	handler := newHandler(s, cfg)
 	if cfg.Auth != nil {
@@ -218,10 +222,11 @@ type targetList struct {
 }
 
 type targetInfo struct {
-	Name        string   `json:"name"`
-	Aliases     []string `json:"aliases"`
-	Namespace   string   `json:"namespace"`
-	Description string   `json:"description"`
+	Name            string   `json:"name"`
+	Aliases         []string `json:"aliases"`
+	Namespace       string   `json:"namespace"`
+	Description     string   `json:"description"`
+	PayloadHandling string   `json:"payload_handling" jsonschema:"how tool responses show this target's payloads, such as workflow inputs and results: omit leaves their contents out; passthrough shows them as Temporal stores them, which may be encrypted or compressed; decode shows them as the target's codec server decodes them. Whoever runs this server sets it for each target"`
 }
 
 func listAvailableTargets(cfg *config.Config) mcp.ToolHandlerFor[struct{}, envelope[targetList]] {
@@ -236,10 +241,11 @@ func listAvailableTargets(cfg *config.Config) mcp.ToolHandlerFor[struct{}, envel
 				aliases = []string{}
 			}
 			targets.Targets = append(targets.Targets, targetInfo{
-				Name:        t.Name,
-				Aliases:     aliases,
-				Namespace:   t.Namespace,
-				Description: t.Description,
+				Name:            t.Name,
+				Aliases:         aliases,
+				Namespace:       t.Namespace,
+				Description:     t.Description,
+				PayloadHandling: cmp.Or(t.PayloadHandling, config.PayloadOmit),
 			})
 		}
 		return nil, envelope[targetList]{Result: targets, Complete: true}, nil

@@ -243,8 +243,8 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "unknown target field",
-			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    address: a:7233\n    namespace: a\n    tls: true\n",
-			want: []string{"field tls not found"},
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    address: a:7233\n    namespace: a\n    bogus: true\n",
+			want: []string{"field bogus not found"},
 		},
 		{
 			name: "missing listen",
@@ -373,6 +373,28 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {}}\n",
 			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "api key with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    api_key:\n",
+			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "tls with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    tls:\n",
+			want: []string{"targets[0]: tls: cert_file and key_file are both required"},
+		},
+		{
+			name: "tls without key_file",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, tls: {cert_file: /certs/a.crt}}\n",
+			want: []string{"targets[0]: tls: cert_file and key_file are both required"},
+		},
+		{
+			name: "api key and tls",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}, tls: {cert_file: /certs/a.crt, key_file: /certs/a.key}}\n",
+			want: []string{"targets[0]: at most one of api_key or tls is allowed"},
 		},
 		{
 			name: "inline api key",

@@ -99,16 +99,15 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
 	scheme := "http"
 	if cfg.ListenTLS != nil {
-		if _, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile); err != nil {
+		if err := cfg.ListenTLS.Check(logger); err != nil {
 			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			cert, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile)
+			cert, err := cfg.ListenTLS.Load()
 			if err != nil {
 				logger.Error("cannot load listen_tls certificate", "error", err.Error())
-				return nil, err
 			}
-			return &cert, nil
+			return cert, err
 		}}
 		scheme = "https"
 	}

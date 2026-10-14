@@ -3,9 +3,11 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/netip"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -22,8 +25,8 @@ type Config struct {
 	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
 	Listen string `yaml:"listen"`
 	// ListenTLS, when set, makes the server serve HTTPS on Listen rather than plain HTTP.
-	ListenTLS *ListenTLS `yaml:"listen_tls"`
-	Targets   []Target   `yaml:"targets"`
+	ListenTLS *Certificate `yaml:"listen_tls"`
+	Targets   []Target     `yaml:"targets"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
@@ -36,13 +39,36 @@ type Config struct {
 	ErrorLogFile string `yaml:"error_log_file"`
 }
 
-// ListenTLS is the certificate and key the server serves HTTPS with. A renewed
-// certificate takes effect for new connections without a restart.
-type ListenTLS struct {
+// Certificate is a certificate and its private key, in files that are read again
+// for every TLS handshake, so a renewed certificate takes effect for new
+// connections without a restart.
+type Certificate struct {
 	// CertFile is the path of a PEM certificate chain, leaf first.
 	CertFile string `yaml:"cert_file"`
 	// KeyFile is the path of the certificate's PEM private key.
 	KeyFile string `yaml:"key_file"`
+}
+
+// Load reads the certificate and its key from their files.
+func (c *Certificate) Load() (*tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &cert, nil
+}
+
+// Check loads the certificate and its key, failing if they cannot be loaded,
+// and logs a warning to logger if the certificate has expired.
+func (c *Certificate) Check(logger *slog.Logger) error {
+	cert, err := c.Load()
+	if err != nil {
+		return err
+	}
+	if time.Now().After(cert.Leaf.NotAfter) {
+		logger.Warn("certificate has expired, so TLS handshakes with it fail until it is renewed", "cert_file", c.CertFile, "not_after", cert.Leaf.NotAfter)
+	}
+	return nil
 }
 
 // Authorization gives each caller the profiles of the rules its access token
@@ -99,9 +125,12 @@ type Target struct {
 	Description string   `yaml:"description"`
 	Address     string   `yaml:"address"`
 	Namespace   string   `yaml:"namespace"`
-	// APIKey says where to read the target's API key. With one the server connects
-	// over TLS; without one it connects in plaintext with no credentials.
+	// APIKey says where to read the target's API key.
 	APIKey *Secret `yaml:"api_key"`
+	// TLS is the client certificate the server presents to the target instead of
+	// an API key. With either, the server connects over TLS; with neither it
+	// connects in plaintext with no credentials.
+	TLS *Certificate `yaml:"tls"`
 	// PayloadHandling says how tool responses show the target's payloads:
 	// PayloadOmit, PayloadPassthrough or PayloadDecode. Empty means PayloadOmit.
 	PayloadHandling string `yaml:"payload_handling"`
@@ -187,15 +216,28 @@ func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 }
 
 func parse(data []byte) (*Config, error) {
-	return decode(data, func(c *Config) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
 }
 
 func parseStdio(data []byte) (*Config, error) {
-	return decode(data, func(*Config) error { return httpOnlyKeys(data) })
+	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
+}
+
+// keyNodes holds the YAML nodes of the keys whose presence matters, even with
+// no value. A missing key's node has Kind 0.
+type keyNodes struct {
+	Listen        yaml.Node `yaml:"listen"`
+	ListenTLS     yaml.Node `yaml:"listen_tls"`
+	Auth          yaml.Node `yaml:"auth"`
+	Authorization yaml.Node `yaml:"authorization"`
+	Targets       []struct {
+		APIKey yaml.Node `yaml:"api_key"`
+		TLS    yaml.Node `yaml:"tls"`
+	} `yaml:"targets"`
 }
 
 // decode decodes data and validates it with validate and validateTargets.
-func decode(data []byte, validate func(*Config) error) (*Config, error) {
+func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
@@ -210,16 +252,17 @@ func decode(data []byte, validate func(*Config) error) (*Config, error) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
 	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
-	if cfg.ListenTLS == nil && hasKey(data, "listen_tls") {
-		cfg.ListenTLS = &ListenTLS{}
+	var keys keyNodes
+	if yaml.Unmarshal(data, &keys) == nil {
+		emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
+		emptyIfPresent(&cfg.Auth, keys.Auth)
+		emptyIfPresent(&cfg.Authorization, keys.Authorization)
+		for i, t := range keys.Targets {
+			emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
+			emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
+		}
 	}
-	if cfg.Auth == nil && hasKey(data, "auth") {
-		cfg.Auth = &Auth{}
-	}
-	if cfg.Authorization == nil && hasKey(data, "authorization") {
-		cfg.Authorization = &Authorization{}
-	}
-	if err := errors.Join(validate(&cfg), cfg.validateTargets()); err != nil {
+	if err := errors.Join(validate(&cfg, &keys), cfg.validateTargets()); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -245,17 +288,21 @@ func nonStringRuleValues(data []byte) error {
 	return errors.Join(errs...)
 }
 
-func hasKey(data []byte, key string) bool {
-	var doc map[string]yaml.Node
-	return yaml.Unmarshal(data, &doc) == nil && doc[key].Kind != 0
+func emptyIfPresent[T any](section **T, key yaml.Node) {
+	if *section == nil && key.Kind != 0 {
+		*section = new(T)
+	}
 }
 
 // httpOnlyKeys rejects the sections that configure HTTP, which serving MCP over stdio has no use for.
-func httpOnlyKeys(data []byte) error {
+func httpOnlyKeys(k *keyNodes) error {
 	var keys []string
-	for _, key := range []string{"listen", "listen_tls", "auth", "authorization"} {
-		if hasKey(data, key) {
-			keys = append(keys, key)
+	for _, key := range []struct {
+		name string
+		node yaml.Node
+	}{{"listen", k.Listen}, {"listen_tls", k.ListenTLS}, {"auth", k.Auth}, {"authorization", k.Authorization}} {
+		if key.node.Kind != 0 {
+			keys = append(keys, key.name)
 		}
 	}
 	if len(keys) > 0 {
@@ -270,8 +317,8 @@ func (c *Config) validateHTTP() error {
 	if err := validateListen(c.Listen, c.Auth != nil); err != nil {
 		errs = append(errs, err)
 	}
-	if c.ListenTLS != nil && (c.ListenTLS.CertFile == "" || c.ListenTLS.KeyFile == "") {
-		errs = append(errs, errors.New("listen_tls: cert_file and key_file are both required"))
+	if err := validateCertificate("listen_tls", c.ListenTLS); err != nil {
+		errs = append(errs, err)
 	}
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)
@@ -334,6 +381,12 @@ func (c *Config) validateTargets() error {
 		}
 		if err := validateSecret(label+": api_key", t.APIKey); err != nil {
 			errs = append(errs, err)
+		}
+		if err := validateCertificate(label+": tls", t.TLS); err != nil {
+			errs = append(errs, err)
+		}
+		if t.APIKey != nil && t.TLS != nil {
+			errs = append(errs, fmt.Errorf("%s: at most one of api_key or tls is allowed", label))
 		}
 		switch t.PayloadHandling {
 		case "", PayloadOmit, PayloadPassthrough, PayloadDecode:
@@ -477,6 +530,13 @@ func (a *Auth) validate() []error {
 		}
 	}
 	return errs
+}
+
+func validateCertificate(label string, c *Certificate) error {
+	if c != nil && (c.CertFile == "" || c.KeyFile == "") {
+		return fmt.Errorf("%s: cert_file and key_file are both required", label)
+	}
+	return nil
 }
 
 func validateSecret(label string, s *Secret) error {

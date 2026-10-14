@@ -12,6 +12,9 @@ targets:
     address: <host:port>
     namespace: <string>
     [ api_key: <secret> ]
+    [ tls:
+        cert_file: <filename>
+        key_file: <filename> ]
     [ payload_handling: <string> | default = omit ]
     [ codec: <string> ]
 
@@ -64,11 +67,16 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `description` (string, required): What the target is, shown to agents so they can pick the right one.
 - `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`.
 - `namespace` (string, required): The Temporal namespace, such as `my-namespace.a1b2c` or `default`.
-- `api_key` (secret, optional): Where to read the API key the server connects with.
+- `api_key` (secret, optional): Where to read the API key the server connects with. `api_key:` with no value is an error.
+- `tls` (optional): A client certificate the server presents to the target instead of an API key, as Temporal Cloud namespaces that use mTLS require. It is not allowed with `api_key`, and `tls:` with no value is an error.
+  - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
+  - `key_file` (filename, required): Path of the certificate's PEM private key.
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the codec server in `codecs` that decodes the target's payloads. When set, it must be a key of `codecs`. It is ignored unless `payload_handling` is `decode`.
 
-With an `api_key`, the server connects to the target over TLS and sends the key with each call. Without one, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use.
+With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
+
+With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection. The Temporal server's own certificate must chain to a CA in the system trust store, as Temporal Cloud's does.
 
 ## Payloads and `codecs`
 
@@ -101,7 +109,7 @@ These say where and how the server serves MCP in HTTP mode, and are not allowed 
   - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
   - `key_file` (filename, required): Path of the certificate's PEM private key.
 
-The server does not start if it cannot load the certificate and key. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
+The server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
 
 ## `auth`
 
@@ -135,7 +143,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys decide what the developer can read.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read.
 
 ## Types
 
@@ -147,4 +155,4 @@ In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding the secret. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.
 
-  A secret field with no value, such as `api_key:` on its own line, is the same as leaving the field out.
+  A secret field with no value, such as `authorization_header:` on its own line, is the same as leaving the field out, except `api_key`, where it is an error.

@@ -6,6 +6,8 @@ package temporal
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,20 +35,35 @@ type Clients struct {
 	cloud  map[string]cloudservice.CloudServiceClient
 }
 
-// An Option changes how NewClients connects to the Cloud Ops API.
-type Option func(*cloudclient.Options)
+// An Option changes how NewClients connects. Options are for tests.
+type Option func(*options)
 
-// WithPlaintextCloudOpsAPI makes the clients call the Temporal Cloud Ops API at address, in plaintext, rather than at its public endpoint. It is for tests.
+type options struct {
+	rootCAs         *x509.CertPool
+	cloudOpsAddress string
+}
+
+// WithRootCAs makes the clients trust only the CAs in pool, rather than the system's, when they connect to targets with a client certificate.
+func WithRootCAs(pool *x509.CertPool) Option {
+	return func(o *options) { o.rootCAs = pool }
+}
+
+// WithPlaintextCloudOpsAPI makes the clients call the Temporal Cloud Ops API at address, in plaintext, rather than at its public endpoint.
 func WithPlaintextCloudOpsAPI(address string) Option {
-	return func(o *cloudclient.Options) { o.HostPort, o.AllowInsecure = address, true }
+	return func(o *options) { o.cloudOpsAddress = address }
 }
 
 // NewClients returns the clients for targets. Calls identify this server by
 // name and version in the gRPC user agent and the client-name and
 // client-version headers. The clients log to logger. It fails if an API key's
-// environment variable is unset or empty, if a target's address cannot be
-// parsed, or if a Cloud Ops API client cannot be created.
+// environment variable is unset or empty, if a client certificate cannot be
+// loaded, if a target's address cannot be parsed, or if a Cloud Ops API client
+// cannot be created.
 func NewClients(targets []config.Target, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	c := &Clients{byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
 	var errs []error
 	for i, t := range targets {
@@ -55,14 +72,20 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 			errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
 			continue
 		}
-		cl, err := lazyClient(t, name, version, cred, logger)
+		if t.TLS != nil {
+			if err := t.TLS.Check(logger); err != nil {
+				errs = append(errs, fmt.Errorf("targets[%d]: tls: %w", i, err))
+				continue
+			}
+		}
+		cl, err := lazyClient(t, name, version, cred, o.rootCAs, logger)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("targets[%d]: address: %w", i, err))
 			continue
 		}
 		c.byName[t.Name] = cl
-		if cred != nil && isCloud(t.Address) {
-			ops, err := cloudOpsClient(t, name, version, cred, opts)
+		if cred != nil && IsCloud(t.Address) {
+			ops, err := cloudOpsClient(t, name, version, cred, o.cloudOpsAddress)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: %w", i, err))
 				continue
@@ -96,7 +119,7 @@ func apiKeyCredential(k *config.Secret) (credential, error) {
 	}, nil
 }
 
-func lazyClient(t config.Target, name, version string, cred credential, logger *slog.Logger) (client.Client, error) {
+func lazyClient(t config.Target, name, version string, cred credential, rootCAs *x509.CertPool, logger *slog.Logger) (client.Client, error) {
 	opts := client.Options{
 		HostPort:  t.Address,
 		Namespace: t.Namespace,
@@ -108,6 +131,15 @@ func lazyClient(t config.Target, name, version string, cred credential, logger *
 				grpc.WithUserAgent(name + "/" + version),
 			},
 		},
+	}
+	if t.TLS != nil {
+		opts.ConnectionOptions.TLS = &tls.Config{RootCAs: rootCAs, GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			cert, err := t.TLS.Load()
+			if err != nil {
+				logger.Error("cannot load client certificate", "target", t.Name, "error", err.Error())
+			}
+			return cert, err
+		}}
 	}
 	if cred != nil {
 		opts.Credentials = client.NewAPIKeyDynamicCredentials(func(ctx context.Context) (string, error) {
@@ -127,8 +159,8 @@ func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 	return c.cloud[name]
 }
 
-// isCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
-func isCloud(address string) bool {
+// IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
+func IsCloud(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address
@@ -138,7 +170,7 @@ func isCloud(address string) bool {
 }
 
 // cloudOpsClient returns a client for the Cloud Ops API that calls it with t's API key and the same limits and identity as t's Temporal client.
-func cloudOpsClient(t config.Target, name, version string, cred credential, opts []Option) (cloudservice.CloudServiceClient, error) {
+func cloudOpsClient(t config.Target, name, version string, cred credential, cloudOpsAddress string) (cloudservice.CloudServiceClient, error) {
 	o := cloudclient.Options{
 		APIKeyReader: apiKeyReader(func(ctx context.Context) (string, error) {
 			return cred(ctx, identity.CallerFrom(ctx), &t)
@@ -151,8 +183,8 @@ func cloudOpsClient(t config.Target, name, version string, cred credential, opts
 			grpc.WithChainUnaryInterceptor(identify(name, version)),
 		},
 	}
-	for _, opt := range opts {
-		opt(&o)
+	if cloudOpsAddress != "" {
+		o.HostPort, o.AllowInsecure = cloudOpsAddress, true
 	}
 	c, err := cloudclient.New(o)
 	if err != nil {

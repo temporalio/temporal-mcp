@@ -348,6 +348,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	unopenableAuditLog, unopenableErrorLog := writeLogConfig("audit_log_file"), writeLogConfig("error_log_file")
 	missingCertificate := writeTLSConfig(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "a.key"))
 	mismatchedKey := writeTLSConfig(filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key"))
+	mismatchedClientKey := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, tls: {cert_file: %q, key_file: %q}}\n", filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key")))
 	tests := []struct {
 		name     string
 		args     []string
@@ -361,6 +362,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable OPERATOR_MCP_TEST_UNSET_KEY is unset or empty`},
 		{"unreadable certificate", []string{"--config", missingCertificate}, 1, "invalid config " + missingCertificate + ": listen_tls: open " + filepath.Join(dir, "missing.crt")},
 		{"key does not match certificate", []string{"--config", mismatchedKey}, 1, "invalid config " + mismatchedKey + ": listen_tls: tls: private key does not match public key"},
+		{"client key does not match certificate", []string{"--config", mismatchedClientKey}, 1, "invalid config " + mismatchedClientKey + ": targets[0]: tls: tls: private key does not match public key"},
 		{"unopenable audit log", []string{"--config", unopenableAuditLog}, 1, "invalid config " + unopenableAuditLog + ": audit_log_file: open " + missingLog},
 		{"unopenable error log", []string{"--config", unopenableErrorLog}, 1, "invalid config " + unopenableErrorLog + ": error_log_file: open " + missingLog},
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflow`},

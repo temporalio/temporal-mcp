@@ -54,7 +54,7 @@ A value in `< >` is a placeholder for a value of that type, defined under [Types
 
 ## `targets`
 
-Required in both modes, with at least one entry. Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace and description.
+Required in both modes, with at least one entry. Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace, description and `payload_handling`.
 
 - `name` (string, required): The name agents and authorization profiles use for the target. Names must be unique and are compared exactly, so `prod` and `Prod` are two different targets.
 - `aliases` (list of strings, optional): Other names agents may use for the target. A target name in a tool call matches an alias ignoring case, but a `name` only exactly. An alias must not be empty, and must differ from every name and every other alias ignoring case, including its own target's name.
@@ -65,15 +65,15 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the codec server in `codecs` that decodes the target's payloads. When set, it must be a key of `codecs`. It is ignored unless `payload_handling` is `decode`.
 
-With an `api_key`, the server connects to the target over TLS and sends the key with each call. Without one, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use.
+With an `api_key`, the server connects to the target over TLS and sends the key with each call. Without one, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use.
 
 ## Payloads and `codecs`
 
 Payloads are your application's data in Temporal: workflow inputs and results, memos, heartbeat details and failure details. Each target's `payload_handling` says how tool responses show them:
 
-- `omit` leaves payloads out. It hides only payloads, so failure messages, stack traces, termination reasons and search attribute values are still shown.
-- `passthrough` returns payloads as Temporal stores them, in base64, which the agent can read unless your application encrypts them.
-- `decode` has the target's codec server decode them. If the request to the codec server fails, every payload in that response is left out, and a payload the codec server returns as invalid JSON is left out on its own. Either way, the cause goes to the log. For a target that decodes, `check_connection` also checks its codec server.
+- `omit` leaves each payload's data out and shows only its encoding and its size in bytes as stored, so you can tell whether `passthrough` would show it as JSON or it needs `decode`. A `binary/null` payload, such as the result of a workflow that returned nothing, shows encoding `binary/null` and size zero. It hides only payloads, so failure messages, stack traces, termination reasons and search attribute values are still shown.
+- `passthrough` shows payloads as Temporal stores them, which the agent can read unless your application encrypts them. A payload with encoding `json/plain` or `json/protobuf`, such as one from the SDKs' default data converter, is shown as JSON, and a `binary/null` payload as JSON `null`. Any other payload, including one whose encoding says JSON but whose data is not valid JSON, is shown as its encoding and its data in base64.
+- `decode` has the target's codec server decode payloads, and shows a decoded payload the way `passthrough` shows a stored one, except that a decoded payload with a JSON encoding but data that is not valid JSON is left out as with `omit`, showing its encoding and size as stored. If the request to the codec server fails, every payload in that response is left out the same way. Either way, the cause goes to the log. For a target that decodes, `check_connection` also checks its codec server.
 
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
@@ -98,7 +98,7 @@ Optional, HTTP mode only. With this section, every request to `/mcp` must carry 
 - `resource` (url, required): The URL at which agents reach this server's MCP endpoint, such as `https://temporal-mcp.example.com/mcp`.
 - `issuers` (list, required): The identity providers whose access tokens the server accepts, at least one.
   - `issuer` (url, required): The exact `iss` claim of the provider's tokens, including any trailing slash. Each must be unique. When the server first verifies a token from an issuer, it fetches the `issuer` URL, without any trailing slash, followed by `/.well-known/openid-configuration`, and the `issuer` in that document must equal this value exactly.
-  - `audience` (string, required): A value the `aud` claim of a token for this server must contain. It must identify this server as an API, such as its resource URL or API identifier, and never the client app users sign in with, because ID tokens issued to that app carry the same `aud` and would pass as access tokens.
+  - `audience` (string, required): A value the `aud` claim of a token for this server must contain. It must identify this server as an API, such as its resource URL or API identifier, and never the client app users sign in with, because ID tokens issued to that app carry the same `aud` and would pass as access tokens. Copy it from the `aud` claim of a decoded access token for this server.
 - `authorization_servers` (list of urls, default each `issuer`): Where agents are told to get tokens. Set it only if that differs from the `issuer` URLs.
 - `scopes_supported` (list of strings, optional): The scopes advertised to agents, in the metadata and in the `WWW-Authenticate` challenge. They do not grant or deny access. Each must be non-empty and contain only printable ASCII characters other than space, `"` and `\`.
 

@@ -5,6 +5,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -92,7 +93,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	names := &searchAttributeNames{}
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
-		Description: "List the Temporal targets you can read from.",
+		Description: "List the Temporal targets you can read from, and how tool responses show each one's payloads.",
 		Annotations: readOnlyAnnotations,
 	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
@@ -221,10 +222,11 @@ type targetList struct {
 }
 
 type targetInfo struct {
-	Name        string   `json:"name"`
-	Aliases     []string `json:"aliases"`
-	Namespace   string   `json:"namespace"`
-	Description string   `json:"description"`
+	Name            string   `json:"name"`
+	Aliases         []string `json:"aliases"`
+	Namespace       string   `json:"namespace"`
+	Description     string   `json:"description"`
+	PayloadHandling string   `json:"payload_handling" jsonschema:"how tool responses show this target's payloads, such as workflow inputs and results: omit leaves their contents out; passthrough shows them as Temporal stores them, which may be encrypted or compressed; decode shows them as the target's codec server decodes them. Whoever runs this server sets it for each target"`
 }
 
 func listAvailableTargets(cfg *config.Config) mcp.ToolHandlerFor[struct{}, envelope[targetList]] {
@@ -239,10 +241,11 @@ func listAvailableTargets(cfg *config.Config) mcp.ToolHandlerFor[struct{}, envel
 				aliases = []string{}
 			}
 			targets.Targets = append(targets.Targets, targetInfo{
-				Name:        t.Name,
-				Aliases:     aliases,
-				Namespace:   t.Namespace,
-				Description: t.Description,
+				Name:            t.Name,
+				Aliases:         aliases,
+				Namespace:       t.Namespace,
+				Description:     t.Description,
+				PayloadHandling: cmp.Or(t.PayloadHandling, config.PayloadOmit),
 			})
 		}
 		return nil, envelope[targetList]{Result: targets, Complete: true}, nil

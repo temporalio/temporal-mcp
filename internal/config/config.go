@@ -33,6 +33,10 @@ type Config struct {
 	Auth *Auth `yaml:"auth"`
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
 	Authorization *Authorization `yaml:"authorization"`
+	// AuditLogFile is the path of the file the server appends audit records to; stdout, or stderr over stdio, if empty.
+	AuditLogFile string `yaml:"audit_log_file"`
+	// ErrorLogFile is the path of the file the server appends its logs to; stderr if empty.
+	ErrorLogFile string `yaml:"error_log_file"`
 }
 
 // Certificate is a certificate and its private key, in files that are read again

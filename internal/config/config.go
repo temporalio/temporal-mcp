@@ -137,9 +137,11 @@ type Target struct {
 
 // The values of Target.PayloadHandling.
 const (
-	// PayloadOmit leaves each payload out of tool responses.
+	// PayloadOmit leaves each payload's data out of tool responses, showing only its
+	// encoding and size.
 	PayloadOmit = "omit"
-	// PayloadPassthrough shows each payload as stored, in base64.
+	// PayloadPassthrough shows each payload as stored: as JSON if it is JSON or
+	// null, and otherwise in base64.
 	PayloadPassthrough = "passthrough"
 	// PayloadDecode shows each payload as the target's codec server decodes it.
 	PayloadDecode = "decode"
@@ -188,8 +190,20 @@ func (s *Secret) Reader() (func() (string, error), error) {
 	}, nil
 }
 
-// Load reads the YAML file at path and returns the validated configuration.
+// Load reads the YAML file at path and returns the validated configuration for
+// serving MCP over HTTP.
 func Load(path string) (*Config, error) {
+	return load(path, parse)
+}
+
+// LoadStdio reads the YAML file at path and returns the validated configuration
+// for serving MCP over stdin and stdout, which must not have the sections that
+// configure HTTP.
+func LoadStdio(path string) (*Config, error) {
+	return load(path, parseStdio)
+}
+
+func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -198,6 +212,28 @@ func Load(path string) (*Config, error) {
 }
 
 func parse(data []byte) (*Config, error) {
+	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+}
+
+func parseStdio(data []byte) (*Config, error) {
+	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
+}
+
+// keyNodes holds the YAML nodes of the keys whose presence matters, even with
+// no value. A missing key's node has Kind 0.
+type keyNodes struct {
+	Listen        yaml.Node `yaml:"listen"`
+	ListenTLS     yaml.Node `yaml:"listen_tls"`
+	Auth          yaml.Node `yaml:"auth"`
+	Authorization yaml.Node `yaml:"authorization"`
+	Targets       []struct {
+		APIKey yaml.Node `yaml:"api_key"`
+		TLS    yaml.Node `yaml:"tls"`
+	} `yaml:"targets"`
+}
+
+// decode decodes data and validates it with validate and validateTargets.
+func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
@@ -212,15 +248,7 @@ func parse(data []byte) (*Config, error) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
 	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
-	var keys struct {
-		ListenTLS     yaml.Node `yaml:"listen_tls"`
-		Auth          yaml.Node `yaml:"auth"`
-		Authorization yaml.Node `yaml:"authorization"`
-		Targets       []struct {
-			APIKey yaml.Node `yaml:"api_key"`
-			TLS    yaml.Node `yaml:"tls"`
-		} `yaml:"targets"`
-	}
+	var keys keyNodes
 	if yaml.Unmarshal(data, &keys) == nil {
 		emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
 		emptyIfPresent(&cfg.Auth, keys.Auth)
@@ -230,7 +258,7 @@ func parse(data []byte) (*Config, error) {
 			emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
 		}
 	}
-	if err := errors.Join(cfg.validate(), nonStringRuleValues(data)); err != nil {
+	if err := errors.Join(validate(&cfg, &keys), cfg.validateTargets()); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -262,7 +290,25 @@ func emptyIfPresent[T any](section **T, key yaml.Node) {
 	}
 }
 
-func (c *Config) validate() error {
+// httpOnlyKeys rejects the sections that configure HTTP, which serving MCP over stdio has no use for.
+func httpOnlyKeys(k *keyNodes) error {
+	var keys []string
+	for _, key := range []struct {
+		name string
+		node yaml.Node
+	}{{"listen", k.Listen}, {"listen_tls", k.ListenTLS}, {"auth", k.Auth}, {"authorization", k.Authorization}} {
+		if key.node.Kind != 0 {
+			keys = append(keys, key.name)
+		}
+	}
+	if len(keys) > 0 {
+		return fmt.Errorf("%s: not allowed with --stdio, which serves MCP over stdin and stdout rather than HTTP; remove them, or run without --stdio", strings.Join(keys, ", "))
+	}
+	return nil
+}
+
+// validateHTTP validates the sections that configure HTTP.
+func (c *Config) validateHTTP() error {
 	var errs []error
 	if err := validateListen(c.Listen, c.Auth != nil); err != nil {
 		errs = append(errs, err)
@@ -273,6 +319,20 @@ func (c *Config) validate() error {
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)
 	}
+	switch {
+	case c.Auth != nil && c.Authorization == nil:
+		errs = append(errs, errors.New("authorization: required with an auth section"))
+	case c.Auth == nil && c.Authorization != nil:
+		errs = append(errs, errors.New("authorization: not allowed without an auth section, whose access tokens carry the claims that rules match"))
+	case c.Authorization != nil:
+		errs = append(errs, c.Authorization.validate(c)...)
+	}
+	return errors.Join(errs...)
+}
+
+// validateTargets validates the targets and the codecs they use.
+func (c *Config) validateTargets() error {
+	var errs []error
 	if len(c.Targets) == 0 {
 		errs = append(errs, errors.New("targets: at least one target is required"))
 	}
@@ -344,14 +404,6 @@ func (c *Config) validate() error {
 		if err := validateSecret(label+": authorization_header", codec.AuthorizationHeader); err != nil {
 			errs = append(errs, err)
 		}
-	}
-	switch {
-	case c.Auth != nil && c.Authorization == nil:
-		errs = append(errs, errors.New("authorization: required with an auth section"))
-	case c.Auth == nil && c.Authorization != nil:
-		errs = append(errs, errors.New("authorization: not allowed without an auth section, whose access tokens carry the claims that rules match"))
-	case c.Authorization != nil:
-		errs = append(errs, c.Authorization.validate(c)...)
 	}
 	return errors.Join(errs...)
 }

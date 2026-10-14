@@ -73,7 +73,7 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 			continue
 		}
 		if t.TLS != nil {
-			if _, err := t.TLS.Load(); err != nil {
+			if err := t.TLS.Check(logger); err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: tls: %w", i, err))
 				continue
 			}

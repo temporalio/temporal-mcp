@@ -75,7 +75,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
 	scheme := "http"
 	if cfg.ListenTLS != nil {
-		if _, err := cfg.ListenTLS.Load(); err != nil {
+		if err := cfg.ListenTLS.Check(logger); err != nil {
 			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {

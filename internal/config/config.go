@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -50,6 +52,19 @@ func (c *Certificate) Load() (*tls.Certificate, error) {
 		return nil, err
 	}
 	return &cert, nil
+}
+
+// Check loads the certificate and its key, failing if they cannot be loaded,
+// and logs a warning to logger if the certificate has expired.
+func (c *Certificate) Check(logger *slog.Logger) error {
+	cert, err := c.Load()
+	if err != nil {
+		return err
+	}
+	if time.Now().After(cert.Leaf.NotAfter) {
+		logger.Warn("certificate has expired, so TLS handshakes with it fail until it is renewed", "cert_file", c.CertFile, "not_after", cert.Leaf.NotAfter)
+	}
+	return nil
 }
 
 // Authorization gives each caller the profiles of the rules its access token
@@ -197,14 +212,23 @@ func parse(data []byte) (*Config, error) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
 	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
-	if cfg.ListenTLS == nil && hasKey(data, "listen_tls") {
-		cfg.ListenTLS = &Certificate{}
+	var keys struct {
+		ListenTLS     yaml.Node `yaml:"listen_tls"`
+		Auth          yaml.Node `yaml:"auth"`
+		Authorization yaml.Node `yaml:"authorization"`
+		Targets       []struct {
+			APIKey yaml.Node `yaml:"api_key"`
+			TLS    yaml.Node `yaml:"tls"`
+		} `yaml:"targets"`
 	}
-	if cfg.Auth == nil && hasKey(data, "auth") {
-		cfg.Auth = &Auth{}
-	}
-	if cfg.Authorization == nil && hasKey(data, "authorization") {
-		cfg.Authorization = &Authorization{}
+	if yaml.Unmarshal(data, &keys) == nil {
+		emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
+		emptyIfPresent(&cfg.Auth, keys.Auth)
+		emptyIfPresent(&cfg.Authorization, keys.Authorization)
+		for i, t := range keys.Targets {
+			emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
+			emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
+		}
 	}
 	if err := errors.Join(cfg.validate(), nonStringRuleValues(data)); err != nil {
 		return nil, err
@@ -232,9 +256,10 @@ func nonStringRuleValues(data []byte) error {
 	return errors.Join(errs...)
 }
 
-func hasKey(data []byte, key string) bool {
-	var doc map[string]yaml.Node
-	return yaml.Unmarshal(data, &doc) == nil && doc[key].Kind != 0
+func emptyIfPresent[T any](section **T, key yaml.Node) {
+	if *section == nil && key.Kind != 0 {
+		*section = new(T)
+	}
 }
 
 func (c *Config) validate() error {

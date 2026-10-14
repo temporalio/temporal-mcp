@@ -334,6 +334,16 @@ func TestParseInvalid(t *testing.T) {
 			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
 		},
 		{
+			name: "api key with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    api_key:\n",
+			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "tls with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    tls:\n",
+			want: []string{"targets[0]: tls: cert_file and key_file are both required"},
+		},
+		{
 			name: "tls without key_file",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, tls: {cert_file: /certs/a.crt}}\n",

@@ -103,6 +103,7 @@ func TestParseStdio(t *testing.T) {
 		{"auth", auth + validTargets, []string{"auth: not allowed with --stdio"}},
 		{"empty auth", "auth:\n" + validTargets, []string{"auth: not allowed with --stdio"}},
 		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
+		{"codec authorization header with no value", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n", []string{`codecs: "c": authorization_header: exactly one of env or file is required`}},
 		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
 			"listen, listen_tls, auth, authorization: not allowed with --stdio",
 			"targets[0]: address is required",
@@ -431,6 +432,11 @@ func TestParseInvalid(t *testing.T) {
 		{
 			name: "codec authorization header with no value",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n",
+			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
+		},
+		{
+			name: "codec authorization header with its lines commented out",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n      # env: CODEC_AUTH\n      # file: /keys/codec\n",
 			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
 		},
 		{

@@ -98,9 +98,9 @@ With Microsoft Entra ID, match [app roles](https://learn.microsoft.com/en-us/ent
 
 Payloads are your application's data in Temporal: workflow inputs and results, memos, heartbeat details and failure details. Each target's `payload_handling` says how tool responses show them:
 
-- `omit`, the default, leaves payloads out. It hides only payloads: failure messages, stack traces, termination reasons and search attribute values are still shown.
+- `omit`, the default, leaves payloads out. It hides only payloads: failure messages, stack traces, termination reasons and search attribute values are still shown. Each payload's encoding and size are shown too, so you can tell whether `passthrough` would show it as JSON or it needs `decode`. A `binary/null` payload, such as the result of a workflow that returned nothing, is omitted with encoding `binary/null` and size zero.
 - `passthrough` returns them as Temporal stores them, which the model can read unless your codec encrypts them. A JSON payload, such as one from the SDKs' default data converter, is shown as JSON, and any other in base64.
-- `decode` has the target's `codec` server decode them. If decoding fails, every payload in that response is left out, and the cause goes to the log.
+- `decode` has the target's `codec` server decode them. If decoding fails, every payload in that response is left out as with `omit`, and the cause goes to the log.
 
 ```yaml
 codecs:

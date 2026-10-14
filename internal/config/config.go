@@ -112,9 +112,11 @@ type Target struct {
 
 // The values of Target.PayloadHandling.
 const (
-	// PayloadOmit leaves each payload out of tool responses.
+	// PayloadOmit leaves each payload's data out of tool responses, showing only its
+	// encoding and size.
 	PayloadOmit = "omit"
-	// PayloadPassthrough shows each payload as stored, in base64.
+	// PayloadPassthrough shows each payload as stored: as JSON if it is JSON or
+	// null, and otherwise in base64.
 	PayloadPassthrough = "passthrough"
 	// PayloadDecode shows each payload as the target's codec server decodes it.
 	PayloadDecode = "decode"

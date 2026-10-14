@@ -86,7 +86,7 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
 - `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `http` or `https` URL with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header.
-- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
+- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
 
 ## `listen` and `listen_tls`
 
@@ -143,4 +143,4 @@ In `--stdio` mode the config has only `targets` and, optionally, `codecs`; `list
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding the secret. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.
 
-  A secret field with no value, such as `authorization_header:` on its own line, is the same as leaving the field out, except `api_key`, where it is an error.
+  A secret field with no value, such as `authorization_header:` on its own line, is an error.

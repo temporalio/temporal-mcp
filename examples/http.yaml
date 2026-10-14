@@ -1,0 +1,15 @@
+# HTTP without auth: only a loopback IP address is allowed in listen, and every
+# caller may use every tool on every target. See docs/config.md.
+listen: 127.0.0.1:8080
+targets:
+  - name: payments-staging
+    aliases: [staging]
+    description: Staging namespace of the payments service, on Temporal Cloud.
+    address: payments-staging.a1b2c.tmprl.cloud:7233
+    namespace: payments-staging.a1b2c
+    # Read on every use, so a rotated key takes effect without a restart.
+    api_key: {file: /etc/operator-mcp/payments-staging.key}
+  - name: local
+    description: Local Temporal dev server.
+    address: localhost:7233
+    namespace: default

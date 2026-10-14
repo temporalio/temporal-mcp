@@ -19,6 +19,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
@@ -169,7 +170,7 @@ func (b *Batch) decode(ctx context.Context) error {
 		f, ok := field("decoded", p)
 		if !ok {
 			f = decodeFailed
-			err := fmt.Sprintf("the codec server decoded a payload to encoding %s, but its data is not JSON", encoding(p))
+			err := fmt.Sprintf("the codec server decoded a payload to encoding %s, but its data is not valid UTF-8 JSON", encoding(p))
 			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", err)
 		}
 		*b.fields[i] = f
@@ -184,18 +185,19 @@ func (b *Batch) fill(f Field) {
 }
 
 // field renders p with the given handling: as JSON if its encoding is binary/null,
-// or a JSON one and its data is JSON, and otherwise as its encoding and bytes. ok
-// is false if p's encoding is a JSON one but its data is not JSON.
+// or a JSON one and its data is valid UTF-8 JSON, and otherwise as its encoding and
+// bytes. ok is false if p's encoding is a JSON one but its data is not valid UTF-8 JSON.
 func field(handling string, p *commonpb.Payload) (f Field, ok bool) {
 	switch encoding(p) {
 	case converter.MetadataEncodingNil:
 		return Field{Handling: handling, Value: json.RawMessage("null")}, true
 	case converter.MetadataEncodingJSON, converter.MetadataEncodingProtoJSON:
 		// Kept as raw JSON, so that numbers keep every digit.
-		if !json.Valid(p.GetData()) {
+		data := p.GetData()
+		if !utf8.Valid(data) || !json.Valid(data) {
 			return stored(handling, p), false
 		}
-		return Field{Handling: handling, Value: json.RawMessage(p.GetData())}, true
+		return Field{Handling: handling, Value: json.RawMessage(data)}, true
 	}
 	return stored(handling, p), true
 }

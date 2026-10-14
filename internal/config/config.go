@@ -123,6 +123,8 @@ type Codec struct {
 	// Endpoint is the codec server's URL, without the /decode path. The
 	// placeholder {namespace} in it stands for the namespace of the target.
 	Endpoint string `yaml:"endpoint"`
+	// AllowPlainHTTP allows an http Endpoint on any host, not only a loopback one.
+	AllowPlainHTTP bool `yaml:"allow_plain_http"`
 	// AuthorizationHeader says where to read the whole value of the Authorization
 	// header sent to the codec server, such as "Bearer abc". Without one, requests
 	// carry no Authorization header.
@@ -345,7 +347,7 @@ func (c *Config) validateTargets() error {
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
 		codec, label := c.Codecs[name], fmt.Sprintf("codecs: %q", name)
-		if err := validateURL(label+": endpoint", codec.Endpoint, true); err != nil {
+		if err := validateURL(label+": endpoint", codec.Endpoint, true, codec.AllowPlainHTTP); err != nil {
 			errs = append(errs, err)
 		}
 		if err := validateSecret(label+": authorization_header", codec.AuthorizationHeader); err != nil {
@@ -442,7 +444,7 @@ func validateListen(listen string, authenticated bool) error {
 
 func (a *Auth) validate() []error {
 	var errs []error
-	if err := validateURL("auth: resource", a.Resource, false); err != nil {
+	if err := validateURL("auth: resource", a.Resource, false, false); err != nil {
 		errs = append(errs, err)
 	}
 	if len(a.Issuers) == 0 {
@@ -451,7 +453,7 @@ func (a *Auth) validate() []error {
 	seen := map[string]int{}
 	for i, iss := range a.Issuers {
 		label := fmt.Sprintf("auth: issuers[%d]", i)
-		if err := validateURL(label+": issuer", iss.Issuer, false); err != nil {
+		if err := validateURL(label+": issuer", iss.Issuer, false, false); err != nil {
 			errs = append(errs, err)
 		} else if j, ok := seen[iss.Issuer]; ok {
 			errs = append(errs, fmt.Errorf("%s: issuer %q conflicts with the issuer of issuers[%d]", label, iss.Issuer, j))
@@ -463,7 +465,7 @@ func (a *Auth) validate() []error {
 		}
 	}
 	for i, s := range a.AuthorizationServers {
-		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s, false); err != nil {
+		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s, false, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -482,10 +484,10 @@ func validateSecret(label string, s *Secret) error {
 	return nil
 }
 
-// validateURL requires value to be an https URL, or an http one for a codec endpoint or
-// a loopback host, with a host and no user info, query or fragment. A codec endpoint's
-// {namespace} placeholder parses as a namespace.
-func validateURL(label, value string, codecEndpoint bool) error {
+// validateURL requires value to be an https URL, or an http one for a loopback host or
+// with allowPlainHTTP, with a host and no user info, query or fragment. A codec
+// endpoint's {namespace} placeholder parses as a namespace.
+func validateURL(label, value string, codecEndpoint, allowPlainHTTP bool) error {
 	if value == "" {
 		return fmt.Errorf("%s is required", label)
 	}
@@ -494,10 +496,10 @@ func validateURL(label, value string, codecEndpoint bool) error {
 		parsed = strings.ReplaceAll(value, "{namespace}", "namespace")
 	}
 	u, err := url.Parse(parsed)
-	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !codecEndpoint && !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+	if err != nil || u.Scheme != "https" && (u.Scheme != "http" || !allowPlainHTTP && !LoopbackHost(u.Hostname())) || u.Host == "" || u.User != nil || strings.ContainsAny(value, "?#") {
 		scheme := "an https URL (http only for a loopback host)"
 		if codecEndpoint {
-			scheme = "an http or https URL"
+			scheme = "an https URL (http only for a loopback host, or for any host with allow_plain_http: true)"
 		}
 		return fmt.Errorf("%s: %q must be %s with a host and no user info, query or fragment", label, value, scheme)
 	}

@@ -80,7 +80,11 @@ func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &codecError{fmt.Sprintf("the codec server responded HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode)), nil}
+		reason := fmt.Sprintf("the codec server responded HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		if resp.StatusCode/100 == 3 {
+			reason += "; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode"
+		}
+		return nil, &codecError{reason, nil}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCodecResponse+1))
 	if err != nil {

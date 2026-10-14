@@ -18,6 +18,7 @@ targets:
 [ codecs:
     <string>:
       endpoint: <url>
+      [ allow_plain_http: <boolean> | default = false ]
       [ authorization_header: <secret> ] ]
 
 # HTTP mode only.
@@ -77,10 +78,11 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
-- `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `http` or `https` URL with a host and no user info, query (`?`) or fragment (`#`), and its scheme decides whether the server reaches the codec server over HTTPS or plain HTTP. `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header.
+- `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address (or for any host with `allow_plain_http: true`), with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header. The server does not follow redirects, so the endpoint must be the codec server's final URL.
+- `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
 - `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
 
-An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too.
+An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These can replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too.
 
 ## `listen` and `listen_tls`
 
@@ -130,6 +132,7 @@ In `--stdio` mode the config has only `targets` and, optionally, `codecs`; `list
 ## Types
 
 - `<string>`: A YAML string.
+- `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
 - `<filename>`: The path of a file on the machine the server runs on.

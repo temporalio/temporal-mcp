@@ -24,8 +24,14 @@ func TestLoadValid(t *testing.T) {
   - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
 codecs:
   payments:
-    endpoint: http://codec.internal/{namespace}
+    endpoint: http://{namespace}.codec.internal
+    allow_plain_http: true
     authorization_header: {env: CODEC_AUTHORIZATION}
+  local:
+    endpoint: http://localhost:8081/{namespace}
+  secure:
+    endpoint: https://codec.example.com/{namespace}
+    allow_plain_http: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +61,15 @@ codecs:
 			Namespace:   "dev",
 			Codec:       "payments",
 		}},
-		Codecs: map[string]Codec{"payments": {
-			Endpoint:            "http://codec.internal/{namespace}",
-			AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
-		}},
+		Codecs: map[string]Codec{
+			"payments": {
+				Endpoint:            "http://{namespace}.codec.internal",
+				AllowPlainHTTP:      true,
+				AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
+			},
+			"local":  {Endpoint: "http://localhost:8081/{namespace}"},
+			"secure": {Endpoint: "https://codec.example.com/{namespace}", AllowPlainHTTP: true},
+		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
@@ -398,11 +409,13 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `codecs:
   none: {}
   grpc: {endpoint: "grpc://{namespace}.codec.example.com"}
+  plain: {endpoint: "http://{namespace}.codec.example.com"}
   neither: {endpoint: https://codec.example.com, authorization_header: {}}
 `,
 			want: []string{
 				`codecs: "none": endpoint is required`,
-				`codecs: "grpc": endpoint: "grpc://{namespace}.codec.example.com" must be an http or https URL with a host and no user info, query or fragment`,
+				`codecs: "grpc": endpoint: "grpc://{namespace}.codec.example.com" must be an https URL (http only for a loopback host, or for any host with allow_plain_http: true) with a host and no user info, query or fragment`,
+				`codecs: "plain": endpoint: "http://{namespace}.codec.example.com" must be an https URL (http only for a loopback host, or for any host with allow_plain_http: true) with a host and no user info, query or fragment`,
 				`codecs: "neither": authorization_header: exactly one of env or file is required`,
 			},
 		},

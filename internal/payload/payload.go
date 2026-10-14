@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -50,17 +49,13 @@ type target struct {
 	codec    *codec // set when handling is decode
 }
 
-// NewRenderer returns the Renderer for cfg's targets. logger gets a warning for
-// each codec endpoint that is plain HTTP on a host other than loopback, and the
-// cause of each payload that is not decoded. It fails if a codec's authorization
-// header is read from an environment variable that is unset or empty.
+// NewRenderer returns the Renderer for cfg's targets. logger gets the cause of
+// each payload that is not decoded. It fails if a codec's authorization header
+// is read from an environment variable that is unset or empty.
 func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(cfg.Codecs)) {
-		if u, err := url.Parse(strings.ReplaceAll(cfg.Codecs[name].Endpoint, "{namespace}", "namespace")); err == nil && u.Scheme == "http" && !config.LoopbackHost(u.Hostname()) {
-			logger.Warn("codec endpoint is plain HTTP: decoded payloads and any authorization header travel unencrypted unless something else, such as a service mesh, encrypts the traffic", "codec", name)
-		}
 		if h := cfg.Codecs[name].AuthorizationHeader; h != nil {
 			read, err := h.Reader()
 			if err != nil {

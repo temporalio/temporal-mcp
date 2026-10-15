@@ -93,7 +93,7 @@ A codec server is an HTTP service that decodes payloads, the same one the Tempor
 - `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
 - `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
 
-An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA on macOS, add it to the keychain and mark it trusted. On Linux, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These can replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too.
+An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These can replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too. On macOS, adding the CA to the keychain and marking it trusted also works, and keeps the public CAs.
 
 ## `audit_log_file` and `error_log_file`
 

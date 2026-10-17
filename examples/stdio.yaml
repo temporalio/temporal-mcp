@@ -1,5 +1,6 @@
-# A developer's config for --stdio: the MCP client launches operator-mcp and
-# passes PAYMENTS_STAGING_API_KEY in its environment. See docs/config.md.
+# A developer's config for --stdio: the MCP client launches
+# temporal-operator-mcp and passes PAYMENTS_STAGING_API_KEY in its
+# environment. See docs/config.md.
 targets:
   - name: payments-staging
     aliases: [staging]

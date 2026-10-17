@@ -39,9 +39,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/fixture"
-	"github.com/temporalio/operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
+	"github.com/temporalio/temporal-operator-mcp/internal/payload"
 )
 
 func describeWithSearchAttributes(fields map[string]*commonpb.Payload) *workflowservice.DescribeWorkflowExecutionResponse {

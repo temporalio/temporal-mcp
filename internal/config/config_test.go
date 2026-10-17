@@ -166,7 +166,7 @@ func TestParseAPIKey(t *testing.T) {
 }
 
 func TestSecretReader(t *testing.T) {
-	t.Setenv("OPERATOR_MCP_TEST_SECRET", " env-secret\n")
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
 	reader := func(s *Secret) func() (string, error) {
 		read, err := s.Reader()
@@ -175,8 +175,8 @@ func TestSecretReader(t *testing.T) {
 		}
 		return read
 	}
-	env, file := reader(&Secret{Env: "OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
-	t.Setenv("OPERATOR_MCP_TEST_SECRET", "changed")
+	env, file := reader(&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
 	for _, tt := range []struct {
 		read        func() (string, error)
 		write, want string
@@ -285,7 +285,7 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "listen_tls without key_file",
-			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/operator-mcp/tls.crt}\n" + validTargets,
+			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/temporal-operator-mcp/tls.crt}\n" + validTargets,
 			want: []string{"listen_tls: cert_file and key_file are both required"},
 		},
 		{

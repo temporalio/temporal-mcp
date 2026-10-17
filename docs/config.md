@@ -1,6 +1,6 @@
 # Config reference
 
-`operator-mcp` reads its configuration from one YAML file, passed with `--config`, and rejects any key it does not know. In HTTP mode, the default, the server serves MCP over HTTP or HTTPS to many users and can authenticate them. In `--stdio` mode it serves the one agent (the AI application, an MCP client) that launches it, over stdin and stdout. [`examples/`](../examples) has a working config for each mode.
+`temporal-operator-mcp` reads its configuration from one YAML file, passed with `--config`, and rejects any key it does not know. In HTTP mode, the default, the server serves MCP over HTTP or HTTPS to many users and can authenticate them. In `--stdio` mode it serves the one agent (the AI application, an MCP client) that launches it, over stdin and stdout. [`examples/`](../examples) has a working config for each mode.
 
 ## Config file layout
 
@@ -91,7 +91,7 @@ A codec server is an HTTP service that decodes payloads, the same one the Tempor
 
 - `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address (or for any host with `allow_plain_http: true`), with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header. The server does not follow redirects, so the endpoint must be the codec server's final URL.
 - `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
-- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
+- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `temporal-operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
 
 An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These can replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too. On macOS, adding the CA to the keychain and marking it trusted also works, and keeps the public CAs.
 

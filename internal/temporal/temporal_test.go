@@ -20,8 +20,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/identity"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/identity"
 )
 
 func closedAddress(t *testing.T) string {
@@ -66,19 +66,19 @@ func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 }
 
 func TestNewClientsAPIKeyFromEnv(t *testing.T) {
-	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.Secret{Env: "OPERATOR_MCP_TEST_API_KEY"}}}
+	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_API_KEY"}}}
 
 	for _, value := range []string{"", "  \n"} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
-			t.Setenv("OPERATOR_MCP_TEST_API_KEY", value)
+			t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", value)
 			_, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
-			if want := "targets[0]: api_key: environment variable OPERATOR_MCP_TEST_API_KEY is unset or empty"; err == nil || !strings.Contains(err.Error(), want) {
+			if want := "targets[0]: api_key: environment variable TEMPORAL_OPERATOR_MCP_TEST_API_KEY is unset or empty"; err == nil || !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to contain %q", err, want)
 			}
 		})
 	}
 
-	t.Setenv("OPERATOR_MCP_TEST_API_KEY", "key")
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
 	if _, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler)); err != nil {
 		t.Error(err)
 	}
@@ -92,13 +92,13 @@ func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
 }
 
 func TestAPIKeyTargetsUseTLS(t *testing.T) {
-	t.Setenv("OPERATOR_MCP_TEST_API_KEY", "key")
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
 	tests := []struct {
 		name   string
 		apiKey *config.Secret
 		want   byte
 	}{
-		{"api key", &config.Secret{Env: "OPERATOR_MCP_TEST_API_KEY"}, 0x16},
+		{"api key", &config.Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_API_KEY"}, 0x16},
 		{"no api key", nil, 'P'},
 	}
 	for _, tt := range tests {
@@ -187,7 +187,7 @@ func serve(t *testing.T, svc workflowservice.WorkflowServiceServer) string {
 
 func newClient(t *testing.T, target config.Target) client.Client {
 	t.Helper()
-	clients, err := NewClients([]config.Target{target}, "operator-mcp", "1.2.3", slog.New(slog.DiscardHandler))
+	clients, err := NewClients([]config.Target{target}, "temporal-operator-mcp", "1.2.3", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,14 +223,14 @@ func TestClientIdentityHeaders(t *testing.T) {
 	var methods []string
 	for _, c := range fake.calls {
 		methods = append(methods, c.method)
-		if got, want := c.md.Get("client-name"), []string{"operator-mcp"}; !slices.Equal(got, want) {
+		if got, want := c.md.Get("client-name"), []string{"temporal-operator-mcp"}; !slices.Equal(got, want) {
 			t.Errorf("%s client-name = %v, want %v", c.method, got, want)
 		}
 		if got, want := c.md.Get("client-version"), []string{"1.2.3"}; !slices.Equal(got, want) {
 			t.Errorf("%s client-version = %v, want %v", c.method, got, want)
 		}
-		if ua := c.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "operator-mcp/1.2.3") {
-			t.Errorf("%s user-agent = %v, want prefix operator-mcp/1.2.3", c.method, ua)
+		if ua := c.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "temporal-operator-mcp/1.2.3") {
+			t.Errorf("%s user-agent = %v, want prefix temporal-operator-mcp/1.2.3", c.method, ua)
 		}
 	}
 	slices.Sort(methods)

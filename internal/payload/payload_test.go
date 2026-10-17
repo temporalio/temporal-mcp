@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -104,7 +105,7 @@ func TestRenderDecodes(t *testing.T) {
 			`{"handling":"decoded","value":null},` +
 			`{"handling":"decoded","value":{"seconds":"5"}},` +
 			`{"handling":"decoded","encoding":"binary/plain","data":"cmF3"},` +
-			`{"handling":"omitted","reason":"decode_failed"}]`
+			`{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed"}]`
 		if got != want {
 			t.Errorf("fields = %s\nwant %s", got, want)
 		}
@@ -125,12 +126,126 @@ func TestRenderDecodes(t *testing.T) {
 			t.Errorf("sent payloads %v, want %v", req.payloads, sent)
 		}
 	}
-	if !strings.Contains(logs.String(), "but its data is not JSON") {
+	if !strings.Contains(logs.String(), "but its data is not valid UTF-8 JSON") {
 		t.Errorf("log %q does not give the cause of the payload that is not JSON", logs.String())
 	}
 
 	if got, err := render(t, t.Context(), r.Batch("t")); err != nil || got != "[]" || len(take()) != 0 {
 		t.Errorf("empty batch: fields %s, err %v; want [], no error and no codec request", got, err)
+	}
+}
+
+func TestRenderPassesThrough(t *testing.T) {
+	r, err := NewRenderer(&config.Config{
+		Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}},
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := render(t, t.Context(), r.Batch("t"),
+		payload("json/plain", `{"order_id": 9007199254740993}`),
+		payload("binary/null", ""),
+		payload("json/protobuf", `{"seconds":"5"}`),
+		payload("binary/plain", "raw"),
+		payload("json/plain", `{"truncated":`),
+		payload("binary/encrypted", "secret"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"handling":"passthrough","value":{"order_id":9007199254740993}},` +
+		`{"handling":"passthrough","value":null},` +
+		`{"handling":"passthrough","value":{"seconds":"5"}},` +
+		`{"handling":"passthrough","encoding":"binary/plain","data":"cmF3"},` +
+		`{"handling":"passthrough","encoding":"json/plain","data":"eyJ0cnVuY2F0ZWQiOg=="},` +
+		`{"handling":"passthrough","encoding":"binary/encrypted","data":"c2VjcmV0"}]`
+	if got != want {
+		t.Errorf("fields = %s\nwant %s", got, want)
+	}
+}
+
+func TestRenderOmits(t *testing.T) {
+	r, err := NewRenderer(&config.Config{
+		Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadOmit}},
+	}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := render(t, t.Context(), r.Batch("t"),
+		payload("json/plain", `{"order_id": 9007199254740993}`),
+		payload("binary/null", ""),
+		payload("binary/encrypted", "secret"),
+		payload("json/plain", ""),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"handling":"omitted","encoding":"json/plain","size_bytes":30,"reason":"payload_handling"},` +
+		`{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"payload_handling"},` +
+		`{"handling":"omitted","encoding":"binary/encrypted","size_bytes":6,"reason":"payload_handling"},` +
+		`{"handling":"omitted","encoding":"json/plain","size_bytes":0,"reason":"payload_handling"}]`
+	if got != want {
+		t.Errorf("fields = %s\nwant %s", got, want)
+	}
+}
+
+func TestRenderJSONUTF8(t *testing.T) {
+	// The codec returns the payloads unchanged, including their original bytes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(w, r.Body)
+	}))
+	t.Cleanup(srv.Close)
+	var logs bytes.Buffer
+	r, err := NewRenderer(&config.Config{
+		Codecs: map[string]config.Codec{"c": {Endpoint: srv.URL}},
+		Targets: []config.Target{
+			{Name: "passthrough", PayloadHandling: config.PayloadPassthrough},
+			{Name: "decode", PayloadHandling: config.PayloadDecode, Codec: "c"},
+		},
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, data, base64 string
+	}{
+		{"invalid byte", "\"\xff\"", "Iv8i"},
+		{"truncated sequence", "\"\xc3\"", "IsMi"},
+		{"valid Unicode", `"café 🌍"`, ""},
+	}
+	for _, handling := range []string{"passthrough", "decode"} {
+		for _, encoding := range []string{"json/plain", "json/protobuf"} {
+			for _, tt := range tests {
+				t.Run(handling+"/"+encoding+"/"+tt.name, func(t *testing.T) {
+					logs.Reset()
+					got, err := render(t, t.Context(), r.Batch(handling), payload(encoding, tt.data))
+					if err != nil {
+						t.Fatal(err)
+					}
+					shownHandling := "passthrough"
+					if handling == "decode" {
+						shownHandling = "decoded"
+					}
+					want := `[{"handling":"` + shownHandling + `","value":` + tt.data + `}]`
+					if tt.base64 != "" {
+						want = `[{"handling":"passthrough","encoding":"` + encoding + `","data":"` + tt.base64 + `"}]`
+						if handling == "decode" {
+							want = fmt.Sprintf(`[{"handling":"omitted","encoding":%q,"size_bytes":%d,"reason":"decode_failed"}]`, encoding, len(tt.data))
+						}
+					}
+					if got != want {
+						t.Errorf("fields = %q\nwant %q", got, want)
+					}
+					if handling == "decode" && tt.base64 != "" {
+						if !strings.Contains(logs.String(), "but its data is not valid UTF-8 JSON") {
+							t.Errorf("log %q does not explain the invalid UTF-8", logs.String())
+						}
+					} else if logs.Len() != 0 {
+						t.Errorf("unexpected log: %q", logs.String())
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -166,6 +281,13 @@ func TestRenderFailsClosed(t *testing.T) {
 	}))
 	t.Cleanup(cut.Close)
 
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the codec client followed the codec server's redirect")
+	}))
+	t.Cleanup(redirectTarget.Close)
+	redirect := httptest.NewServer(http.RedirectHandler(redirectTarget.URL, http.StatusTemporaryRedirect))
+	t.Cleanup(redirect.Close)
+
 	const customerData = "customer data"
 	malformed := respond(http.StatusOK, `{"payloads":[{"data":"`+customerData+`"}]}`)
 
@@ -177,6 +299,8 @@ func TestRenderFailsClosed(t *testing.T) {
 		timeout  time.Duration
 	}{
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized", 0},
+		{"redirect", redirect.URL, nil, "the codec server responded HTTP 307 Temporary Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
+		{"permanent redirect", respond(http.StatusPermanentRedirect, ""), nil, "the codec server responded HTTP 308 Permanent Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
 		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads", 0},
 		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent", 0},
 		{"unreachable", closed, nil, "the request to the codec server failed", 0},
@@ -204,8 +328,8 @@ func TestRenderFailsClosed(t *testing.T) {
 
 	var logs bytes.Buffer
 	r := newRenderer(t, malformed, nil, &logs)
-	want := `[{"handling":"omitted","reason":"decode_failed"}]`
-	if got, err := render(t, t.Context(), r.Batch("t"), payload("binary/encrypted", "a")); got != want || err != nil {
+	want := `[{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed"},{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"decode_failed"}]`
+	if got, err := render(t, t.Context(), r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", "")); got != want || err != nil {
 		t.Errorf("fields = %s, err %v; want %s and no error", got, err, want)
 	}
 	if log := logs.String(); !strings.Contains(log, "the codec server's response is not a list of payloads") || strings.Contains(log, customerData) {
@@ -214,7 +338,7 @@ func TestRenderFailsClosed(t *testing.T) {
 	logs.Reset()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if got, err := render(t, ctx, r.Batch("t"), payload("binary/encrypted", "a")); got != want || !errors.Is(err, context.Canceled) || logs.Len() != 0 {
+	if got, err := render(t, ctx, r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", "")); got != want || !errors.Is(err, context.Canceled) || logs.Len() != 0 {
 		t.Errorf("caller gone: fields = %s, err %v, log %q; want %s, the context's error and no log", got, err, logs.String(), want)
 	}
 }

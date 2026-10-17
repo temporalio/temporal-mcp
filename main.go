@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/temporalio/operator-mcp/internal/config"
 	"github.com/temporalio/operator-mcp/internal/payload"
@@ -28,16 +31,17 @@ const (
 var version = "dev"
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string, stdout, stderr io.Writer) error {
+func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Writer) error {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
+	stdio := flags.Bool("stdio", false, "serve MCP over stdin and stdout, for an MCP client that launches the server, rather than over HTTP")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -51,12 +55,29 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("unexpected arguments %q", flags.Args())
 	}
 
-	cfg, err := config.Load(*configPath)
+	load := config.Load
+	if *stdio {
+		load = config.LoadStdio
+	}
+	cfg, err := load(*configPath)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	// Over stdio, stdout carries only MCP messages, so the audit records default to stderr.
+	var records io.Writer = stdout
+	if *stdio {
+		records = stderr
+	}
+	records, err = openLog(cfg.AuditLogFile, records)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: audit_log_file: %w", *configPath, err)
+	}
+	logs, err := openLog(cfg.ErrorLogFile, stderr)
+	if err != nil {
+		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
+	}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
 	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
@@ -67,24 +88,26 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
-	handler, err := server.NewMux(serverName, version, cfg, clients, payloads, stdout, logger)
+	s, err := server.NewServer(serverName, version, cfg, clients, payloads, records, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
+	if *stdio {
+		return s.Run(context.Background(), &mcp.IOTransport{Reader: stdin, Writer: stdout})
+	}
 
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
+	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
 	scheme := "http"
 	if cfg.ListenTLS != nil {
-		if _, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile); err != nil {
+		if err := cfg.ListenTLS.Check(logger); err != nil {
 			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
 		}
 		srv.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			cert, err := tls.LoadX509KeyPair(cfg.ListenTLS.CertFile, cfg.ListenTLS.KeyFile)
+			cert, err := cfg.ListenTLS.Load()
 			if err != nil {
 				logger.Error("cannot load listen_tls certificate", "error", err.Error())
-				return nil, err
 			}
-			return &cert, nil
+			return cert, err
 		}}
 		scheme = "https"
 	}
@@ -99,4 +122,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return srv.ServeTLS(ln, "", "")
 	}
 	return srv.Serve(ln)
+}
+
+func openLog(path string, fallback io.Writer) (io.Writer, error) {
+	if path == "" {
+		return fallback, nil
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }

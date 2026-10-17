@@ -249,7 +249,7 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 	c, err := lazyClient(target, "test", "0", func(_ context.Context, caller *identity.Caller, target *config.Target) (string, error) {
 		calls <- seen{caller, target}
 		return "", errors.New("no credential")
-	}, slog.New(slog.DiscardHandler))
+	}, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -75,9 +75,11 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the codec server in `codecs` that decodes the target's payloads. When set, it must be a key of `codecs`. It is ignored unless `payload_handling` is `decode`.
 
-With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
+With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
-With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection. The Temporal server's own certificate must chain to a CA in the system trust store, as Temporal Cloud's does.
+The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use.
+
+With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection.
 
 ## Payloads and `codecs`
 
@@ -93,7 +95,7 @@ A codec server is an HTTP service that decodes payloads, the same one the Tempor
 - `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
 - `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `temporal-operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
 
-An `https` codec server's certificate must chain to a CA the machine trusts. To add a private CA, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. These can replace the trusted CAs for every connection the server makes, including to Temporal Cloud and identity providers, so they must include the public CAs too. On macOS, adding the CA to the keychain and marking it trusted also works, and keeps the public CAs.
+An `https` codec server's certificate must chain to a [trusted CA](#trusted-cas).
 
 ## `audit_log_file` and `error_log_file`
 
@@ -118,6 +120,8 @@ The server does not start if it cannot load the certificate and key, and starts 
 ## `auth`
 
 Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from one of the `issuers`, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
+
+An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, carrying this server's `audience` in their `aud` claim. The agent also needs a client ID the provider accepts, either a URL from which the provider reads the agent's details (a client ID metadata document) or one the agent registers for itself (dynamic client registration), if the provider and the agent both support it. Otherwise, register a client with the provider and have users enter its client ID in their agent.
 
 - `resource` (url, required): The URL at which agents reach this server's MCP endpoint, such as `https://temporal-mcp.example.com/mcp`.
 - `issuers` (list, required): The identity providers whose access tokens the server accepts, at least one.
@@ -147,7 +151,11 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give every file path in the config as an absolute path.
+
+## Trusted CAs
+
+The server checks that the certificate of everything it connects to over TLS, whether a target, a codec server, the Temporal Cloud Ops API or an identity provider, chains to a CA (certificate authority) the machine trusts. To add a private CA, such as one that signs a self-hosted Temporal server's certificate, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. Either one can replace the machine's trusted CAs for all of those connections, so it must include the public CAs too. On macOS, adding the CA to the keychain and marking it trusted also works and keeps the public CAs, but only while neither variable is set.
 
 ## Types
 
@@ -155,7 +163,7 @@ In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log
 - `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
-- `<filename>`: The path of a file on the machine the server runs on.
+- `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding the secret. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.

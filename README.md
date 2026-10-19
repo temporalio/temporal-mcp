@@ -1,6 +1,6 @@
 # temporal-operator-mcp ([Pre-release])
 
-`temporal-operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. It identifies itself to agents as `temporal-operator`.
+`temporal-operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can read and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, and search and count workflow runs with Visibility queries.
 
 > [!NOTE]
 >
@@ -54,6 +54,8 @@ With `--stdio`, `temporal-operator-mcp` serves MCP over stdin and stdout to the 
   }
 }
 ```
+
+Other MCP clients take the same command, args and env in their own config format, with their own syntax for reading an environment variable.
 
 ## Audit records and logs
 

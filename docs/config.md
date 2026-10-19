@@ -123,13 +123,7 @@ Optional, HTTP mode only. With this section, every request to `/mcp` must carry 
 
 An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, and carrying this server's `audience` in their `aud` claim.
 
-When the agent signs the user in, it asks for the scopes in `scopes_supported` and sends the `resource` URL as the OAuth `resource` parameter. Providers treat that parameter in one of three ways:
-
-- If the provider sets `aud` from it, set `audience` to `resource`.
-- If the provider ignores it, make the provider issue tokens for this server by default, or list in `scopes_supported` a scope that makes it do so.
-- If the provider rejects a `resource` that does not match the API of the requested scope, as Entra ID does (AADSTS9010010), set that API's identifier URI to exactly `resource` and list its scope in `scopes_supported`.
-
-Otherwise the agent cannot sign in, or gets an opaque token or a token for another API, and every request is rejected.
+When the agent signs the user in, it asks for the scopes in `scopes_supported` and sends the `resource` URL as the OAuth `resource` parameter. Register this server as an API with the provider, with `resource` as its identifier where the provider allows it, list that API's scope in `scopes_supported`, and copy `audience` from a decoded access token.
 
 The agent also needs a client ID the provider accepts, either a URL from which the provider reads the agent's details (a client ID metadata document) or one the agent registers for itself (dynamic client registration), if the provider and the agent both support it. Otherwise, register a public client (one with no secret) with the provider that uses PKCE, and have users enter its client ID in their agent. Its redirect URI is usually a loopback URL on a port the agent picks at random, so the provider must accept any port there.
 
@@ -161,11 +155,11 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 
-The server checks that the certificate of everything it connects to over TLS, whether a target, a codec server, the Temporal Cloud Ops API or an identity provider, chains to a CA (certificate authority) the machine trusts. To add a private CA, such as one that signs a self-hosted Temporal server's certificate, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. In `--stdio` mode, set it in the MCP client's `env` for the server to the file's absolute path, such as `"SSL_CERT_FILE": "/etc/temporal/ca-bundle.pem"`. A client started outside a shell does not see variables exported in one, so `${SSL_CERT_FILE}` can be empty there, and a path to a file that does not exist can leave the server trusting no CA, with no error at startup. Either variable can replace the machine's trusted CAs for all of those connections, so it must include the public CAs too. On macOS, `security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain` prints Apple's built-in CAs in PEM, ready to add to it. It leaves out CAs added to the machine, such as by IT for a proxy, so add those too, and the file is a copy that does not follow later changes to Apple's CAs. Adding the CA to the keychain and marking it trusted also works and keeps the public CAs, but only while neither variable is set.
+The server checks that the certificate of everything it connects to over TLS, whether a target, a codec server, the Temporal Cloud Ops API or an identity provider, chains to a CA (certificate authority) the machine trusts. To add a private CA, such as one that signs a self-hosted Temporal server's certificate, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. Either one can replace the machine's trusted CAs for all of those connections, so it must include the public CAs too. A path to a file that does not exist can leave the server trusting no CA, with no error at startup. On macOS, adding the CA to the keychain and marking it trusted also works and keeps the public CAs, but only while neither variable is set.
 
 ## Types
 

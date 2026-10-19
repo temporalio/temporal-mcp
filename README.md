@@ -55,7 +55,7 @@ With `--stdio`, `temporal-operator-mcp` serves MCP over stdin and stdout to the 
 }
 ```
 
-Other MCP clients take the same command, args and env in their own config format, with their own syntax for reading an environment variable.
+Other MCP clients take the same command, args and env in their own config format, each with its own syntax for reading an environment variable, if it has one. For a client that has none, have the target read its key from a file with `api_key: {file: /path/to/key}` instead: a `${...}` that the client does not expand reaches the server as the key itself, and every call fails.
 
 ## Audit records and logs
 

@@ -20,10 +20,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/identity"
-	"github.com/temporalio/operator-mcp/internal/payload"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/identity"
+	"github.com/temporalio/temporal-operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 // connect writes the server's logs and audit records to out.

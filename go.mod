@@ -1,4 +1,4 @@
-module github.com/temporalio/operator-mcp
+module github.com/temporalio/temporal-operator-mcp
 
 go 1.27.2
 

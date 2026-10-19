@@ -1,6 +1,6 @@
-# operator-mcp ([Pre-release])
+# temporal-operator-mcp ([Pre-release])
 
-`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. It identifies itself to agents as `temporal-operator`.
+`temporal-operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. It identifies itself to agents as `temporal-operator`.
 
 > [!NOTE]
 >
@@ -11,12 +11,12 @@
 
 ## Install
 
-Each [release](https://github.com/temporalio/operator-mcp/releases) has archives for Linux (`linux`) and macOS (`darwin`) on amd64 and arm64. Download the one for your platform, check that GitHub Actions built it from this repository, and extract `operator-mcp`. For Linux on amd64:
+Each [release](https://github.com/temporalio/temporal-operator-mcp/releases) has archives for Linux (`linux`) and macOS (`darwin`) on amd64 and arm64. Download the one for your platform, check that GitHub Actions built it from this repository, and extract `temporal-operator-mcp`. For Linux on amd64:
 
 ```sh
-gh release download --repo temporalio/operator-mcp --pattern '*_linux_amd64.tar.gz'
-gh attestation verify operator-mcp_*_linux_amd64.tar.gz --repo temporalio/operator-mcp
-tar -xzf operator-mcp_*_linux_amd64.tar.gz operator-mcp
+gh release download --repo temporalio/temporal-operator-mcp --pattern '*_linux_amd64.tar.gz'
+gh attestation verify temporal-operator-mcp_*_linux_amd64.tar.gz --repo temporalio/temporal-operator-mcp
+tar -xzf temporal-operator-mcp_*_linux_amd64.tar.gz temporal-operator-mcp
 ```
 
 ## Build from source
@@ -27,27 +27,27 @@ With Go 1.27.2 or later:
 go build -o bin/ .
 ```
 
-This writes `bin/operator-mcp`.
+This writes `bin/temporal-operator-mcp`.
 
 ## Configure
 
-`operator-mcp` reads one YAML config, passed with `--config`. [docs/config.md](docs/config.md) documents every field, and [examples/](examples) has working configs to start from.
+`temporal-operator-mcp` reads one YAML config, passed with `--config`. [docs/config.md](docs/config.md) documents every field, and [examples/](examples) has working configs to start from.
 
 ## Run
 
 Over HTTP, MCP is served at `/mcp` on the config's `listen` address:
 
 ```sh
-bin/operator-mcp --config examples/http.yaml
+bin/temporal-operator-mcp --config examples/http.yaml
 ```
 
-With `--stdio`, `operator-mcp` serves MCP over stdin and stdout to the MCP client that launches it, such as Claude Code with this `.mcp.json`, which passes the API key that [examples/stdio.yaml](examples/stdio.yaml) reads from `PAYMENTS_STAGING_API_KEY`:
+With `--stdio`, `temporal-operator-mcp` serves MCP over stdin and stdout to the MCP client that launches it, such as Claude Code with this `.mcp.json`, which passes the API key that [examples/stdio.yaml](examples/stdio.yaml) reads from `PAYMENTS_STAGING_API_KEY`:
 
 ```json
 {
   "mcpServers": {
     "temporal-operator": {
-      "command": "/path/to/operator-mcp",
+      "command": "/path/to/temporal-operator-mcp",
       "args": ["--stdio", "--config", "/path/to/config.yaml"],
       "env": {"PAYMENTS_STAGING_API_KEY": "${PAYMENTS_STAGING_API_KEY}"}
     }
@@ -57,7 +57,7 @@ With `--stdio`, `operator-mcp` serves MCP over stdin and stdout to the MCP clien
 
 ## Audit records and logs
 
-`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
+`temporal-operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
 
 ## Lint
 
@@ -79,7 +79,7 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `temporal-operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...

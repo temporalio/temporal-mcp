@@ -21,8 +21,8 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/grpc"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 const maxContinuation = 4096

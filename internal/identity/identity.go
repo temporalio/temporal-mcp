@@ -28,7 +28,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
-	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
 )
 
 var signingAlgorithms = []jose.SignatureAlgorithm{

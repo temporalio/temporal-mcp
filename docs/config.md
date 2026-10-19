@@ -123,9 +123,9 @@ Optional, HTTP mode only. With this section, every request to `/mcp` must carry 
 
 An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, and carrying this server's `audience` in their `aud` claim.
 
-When the agent signs the user in, it asks for the scopes in `scopes_supported`, and an agent that follows the MCP authorization spec of 2025-06-18 or later also sends the `resource` URL as the OAuth `resource` parameter. Providers treat that parameter in one of three ways:
+When the agent signs the user in, it asks for the scopes in `scopes_supported` and sends the `resource` URL as the OAuth `resource` parameter. Providers treat that parameter in one of three ways:
 
-- If the provider sets `aud` from it, set `audience` to `resource`. Agents on the older 2025-03-26 spec do not send it, so for them also use one of the next two ways.
+- If the provider sets `aud` from it, set `audience` to `resource`.
 - If the provider ignores it, make the provider issue tokens for this server by default, or list in `scopes_supported` a scope that makes it do so.
 - If the provider rejects a `resource` that does not match the API of the requested scope, as Entra ID does (AADSTS9010010), set that API's identifier URI to exactly `resource` and list its scope in `scopes_supported`.
 

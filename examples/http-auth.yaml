@@ -17,10 +17,10 @@ auth:
 authorization:
   profiles:
     oncall:
-      tools: [list_available_targets, check_connection, get_workflow, get_workflow_history, get_task_queue, search_workflows, count_workflows, list_search_attributes]
+      tools: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_task_queues, search_workflows, count_workflows, list_search_attributes]
       targets: [payments-prod, payments-staging, orders-prod]
     payments-dev:
-      tools: [list_available_targets, get_workflow, get_workflow_history]
+      tools: [list_available_targets, get_workflows, get_workflow_history]
       targets: [payments-staging]
   rules:
     - {claim_name: groups, claim_value: temporal-oncall, profile: oncall}

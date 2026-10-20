@@ -35,7 +35,8 @@ import (
 const maxHistoryPages = 10
 
 type getWorkflowHistoryInput struct {
-	getWorkflowInput
+	Target string `json:"target" jsonschema:"the name or an alias of a target"`
+	workflowRef
 	EventTypes   []string    `json:"event_types,omitempty" jsonschema:"the event types to return, named as in event_type (such as ActivityTaskFailed), or the category failures (every event type ending in Failed or TimedOut); every event type if omitted"`
 	EventRange   *eventRange `json:"event_range,omitempty" jsonschema:"the event IDs to return, inclusive"`
 	Order        string      `json:"order,omitempty" jsonschema:"oldest_first or newest_first"`
@@ -248,7 +249,7 @@ func toHistoryEvent(e *historypb.HistoryEvent, batch *payload.Batch) (historyEve
 	return event, nil
 }
 
-// protoFields returns the fields set in m by their proto names, with payloads, failures and search attributes as get_workflow gives them.
+// protoFields returns the fields set in m by their proto names, with payloads, failures and search attributes as get_workflows gives them.
 func protoFields(m protoreflect.Message, batch *payload.Batch) (map[string]any, error) {
 	out := map[string]any{}
 	var err error
@@ -284,7 +285,7 @@ func protoField(fd protoreflect.FieldDescriptor, v protoreflect.Value, batch *pa
 func protoValue(fd protoreflect.FieldDescriptor, v protoreflect.Value, batch *payload.Batch) (any, error) {
 	switch fd.Kind() {
 	case protoreflect.EnumKind:
-		// The registered Go enum type gives the short name that get_workflow uses, such as Failed.
+		// The registered Go enum type gives the short name that get_workflows uses, such as Failed.
 		if typ, err := protoregistry.GlobalTypes.FindEnumByName(fd.Enum().FullName()); err == nil {
 			return fmt.Sprint(typ.New(v.Enum())), nil
 		}

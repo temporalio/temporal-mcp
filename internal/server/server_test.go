@@ -169,9 +169,9 @@ func TestToolCalls(t *testing.T) {
 		protocolError bool
 	}{
 		{"check_connection", `{"target":"nope"}`, "not_found", `unknown target "nope"`, false},
-		{"get_workflow", `{"target":"production","workflow_id":"wf","extra":"x"}`, "invalid_argument", "", false},
+		{"get_workflows", `{"target":"production","workflows":[{"workflow_id":"wf"}],"extra":"x"}`, "invalid_argument", "", false},
 		{"check_connection", `{"target":"nope","TARGET":"other"}`, "invalid_argument", "", false},
-		{"get_workflow", `["dev"]`, "invalid_argument", "arguments must be a JSON object", false},
+		{"get_workflows", `["dev"]`, "invalid_argument", "arguments must be a JSON object", false},
 		{"fail", ``, "internal", "internal error", false},
 		{"wrapped", ``, "not_found", "no such thing", false},
 		{"boom", ``, "internal", "internal error", false},

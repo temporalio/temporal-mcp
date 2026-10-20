@@ -79,7 +79,7 @@ codecs:
 const validAuthorization = `
 authorization:
   profiles:
-    oncall: {tools: [get_workflow], targets: [prod]}
+    oncall: {tools: [get_workflows], targets: [prod]}
   rules:
     - {claim_name: "cognito:groups", claim_value: oncall, profile: oncall}
 `
@@ -529,7 +529,7 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n" + `authorization:
   profiles:
     empty: {}
-    bad-targets: {tools: [get_workflow], targets: [production, staging]}
+    bad-targets: {tools: [get_workflows], targets: [production, staging]}
   rules:
     - {claim_name: groups, profile: empty}
     - {claim_name: " ", claim_value: a, profile: empty}

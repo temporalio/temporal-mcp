@@ -34,6 +34,10 @@ import (
 
 const maxHistoryPages = 10
 
+// get_workflow_history stops reading pages historyReserve before its call's deadline, leaving time for the call's one
+// codec request (up to the codec timeout) and for encoding the response.
+var historyReserve = 12 * time.Second
+
 type getWorkflowHistoryInput struct {
 	getWorkflowInput
 	EventTypes   []string    `json:"event_types,omitempty" jsonschema:"the event types to return, named as in event_type (such as ActivityTaskFailed), or the category failures (every event type ending in Failed or TimedOut); every event type if omitted"`
@@ -133,14 +137,17 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 			// 0 asks for the server's largest page.
 			pageSize = 0
 		}
+		deadline, _ := ctx.Deadline()
+		readCtx, cancel := context.WithDeadline(ctx, deadline.Add(-historyReserve))
+		defer cancel()
 		read := func(token []byte) ([]*historypb.HistoryEvent, []byte, error) {
 			if forward {
-				resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
+				resp, err := callTemporal(readCtx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
 					return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
 				})
 				return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
 			}
-			resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryReverseResponse, error) {
+			resp, err := callTemporal(readCtx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryReverseResponse, error) {
 				return svc.GetWorkflowExecutionHistoryReverse(ctx, &workflowservice.GetWorkflowExecutionHistoryReverseRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
 			})
 			return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
@@ -152,6 +159,13 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 	pages:
 		for pages := 1; ; pages++ {
 			events, next, err := read(token)
+			if err != nil && deadlinePassed(readCtx) {
+				if pages == 1 {
+					return nil, none, toolCallTimeoutError()
+				}
+				more = true
+				break
+			}
 			if err != nil {
 				if pages == 1 && in.Continuation != "" {
 					err = continuationError(err, "get_workflow_history")

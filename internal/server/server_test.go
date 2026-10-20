@@ -147,6 +147,8 @@ func TestListAvailableTargets(t *testing.T) {
 }
 
 func TestToolCalls(t *testing.T) {
+	defer func(n int) { maxResponseBytes = n }(maxResponseBytes)
+	maxResponseBytes = 100
 	testTool := func(name string, err error) func(*toolServer) {
 		return func(s *toolServer) {
 			addTool(s, &mcp.Tool{Name: name}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
@@ -160,7 +162,12 @@ func TestToolCalls(t *testing.T) {
 	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output(),
 		testTool("fail", errors.New("dial tcp 10.0.0.1:7233: connection refused")),
 		testTool("wrapped", fmt.Errorf("lookup: %w", &toolError{Code: "not_found", Message: "no such thing"})),
-		testTool("boom", nil))
+		testTool("boom", nil),
+		func(s *toolServer) {
+			addTool(s, &mcp.Tool{Name: "big"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, string, error) {
+				return nil, strings.Repeat("x", 101), nil
+			})
+		})
 
 	calls := []struct {
 		name, args    string
@@ -175,6 +182,7 @@ func TestToolCalls(t *testing.T) {
 		{"fail", ``, "internal", "internal error", false},
 		{"wrapped", ``, "not_found", "no such thing", false},
 		{"boom", ``, "internal", "internal error", false},
+		{"big", ``, "response_too_large", "the response is 103 bytes, more than the limit of 100 bytes", false},
 		{"no_such_tool", `{"target":"nope"}`, "", "", true},
 		{"no_such_tool", `"dev"`, "", "", true},
 	}

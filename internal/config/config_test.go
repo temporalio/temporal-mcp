@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validTargets = `
@@ -19,7 +20,7 @@ targets:
 
 func TestLoadValid(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\n"+validTargets+`
+	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n"+validTargets+`
   - {name: staging, description: Staging., address: "staging:7233", namespace: staging, payload_handling: decode, codec: payments}
   - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
 codecs:
@@ -40,7 +41,8 @@ codecs:
 		t.Fatal(err)
 	}
 	want := &Config{
-		Listen: "127.0.0.1:8080",
+		Listen:          "127.0.0.1:8080",
+		ShutdownTimeout: 25 * time.Second,
 		Targets: []Target{{
 			Name:        "prod",
 			Aliases:     []string{"production"},
@@ -79,7 +81,7 @@ codecs:
 const validAuthorization = `
 authorization:
   profiles:
-    oncall: {tools: [get_workflow], targets: [prod]}
+    oncall: {tools: [get_workflows], targets: [prod]}
   rules:
     - {claim_name: "cognito:groups", claim_value: oncall, profile: oncall}
 `
@@ -262,6 +264,16 @@ func TestParseInvalid(t *testing.T) {
 			name: "missing listen",
 			yaml: validTargets,
 			want: []string{"listen is required"},
+		},
+		{
+			name: "negative shutdown timeout",
+			yaml: "listen: 127.0.0.1:8080\nshutdown_timeout: -1s\n" + validTargets,
+			want: []string{"shutdown_timeout: -1s is negative"},
+		},
+		{
+			name: "shutdown timeout without a unit",
+			yaml: "listen: 127.0.0.1:8080\nshutdown_timeout: 8\n" + validTargets,
+			want: []string{"cannot unmarshal !!int `8` into time.Duration"},
 		},
 		{
 			name: "listen on all interfaces",
@@ -529,7 +541,7 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n" + `authorization:
   profiles:
     empty: {}
-    bad-targets: {tools: [get_workflow], targets: [production, staging]}
+    bad-targets: {tools: [get_workflows], targets: [production, staging]}
   rules:
     - {claim_name: groups, profile: empty}
     - {claim_name: " ", claim_value: a, profile: empty}

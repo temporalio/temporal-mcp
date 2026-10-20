@@ -86,8 +86,8 @@ auth:
 authorization:
   profiles:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
-    dev: {tools: [list_available_targets, get_workflow, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
-    orders: {tools: [get_workflow], targets: [orders-prod]}
+    dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
+    orders: {tools: [get_workflows], targets: [orders-prod]}
     search: {tools: [search_workflows], targets: [payments-staging]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
@@ -110,7 +110,7 @@ authorization:
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, err := NewServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
+	s, err := NewServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,19 +171,19 @@ authorization:
 		{
 			name:    "two profiles",
 			token:   signA(map[string]any{"cognito:groups": []any{"other", "temporal-oncall"}, "https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"check_connection", "count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
+			tools:   []string{"check_connection", "count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-prod", "payments-staging"},
 		},
 		{
 			name:    "one profile",
 			token:   signB(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev"}}),
-			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
+			tools:   []string{"count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "target granted only through another tool",
 			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev", "Temporal.Orders"}}),
-			tools:   []string{"count_workflows", "get_workflow", "list_available_targets", "list_search_attributes", "search_workflows"},
+			tools:   []string{"count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging", "orders-prod"},
 		},
 		{
@@ -210,7 +210,7 @@ authorization:
 		{
 			name:  "tools without list_available_targets",
 			token: signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Orders"}}),
-			tools: []string{"get_workflow"},
+			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "value differing only in case",
@@ -225,12 +225,12 @@ authorization:
 		{
 			name:  "scope string holding several scopes",
 			token: signA(map[string]any{"scope": "openid temporal.orders email"}),
-			tools: []string{"get_workflow"},
+			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "scp string holding several scopes",
 			token: signA(map[string]any{"scp": "openid temporal.orders email"}),
-			tools: []string{"get_workflow"},
+			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "space-separated string in a claim other than scope",
@@ -278,8 +278,8 @@ authorization:
 			t.Errorf("check_connection on pp = %+v, want a connection check", res)
 		}
 		notFound(t, session, "check_connection", map[string]any{"target": "payments-staging"})
-		notFound(t, session, "get_workflow", map[string]any{"target": "payments-prod", "workflow_id": "wf"})
-		notFound(t, session, "get_workflow", map[string]any{"target": "orders-prod", "workflow_id": "wf"})
+		notFound(t, session, "get_workflows", map[string]any{"target": "payments-prod", "workflows": []any{map[string]any{"workflow_id": "wf"}}})
+		notFound(t, session, "get_workflows", map[string]any{"target": "orders-prod", "workflows": []any{map[string]any{"workflow_id": "wf"}}})
 		notFound(t, session, "search_workflows", map[string]any{"target": "payments-prod", "query": ""})
 		notFound(t, session, "count_workflows", map[string]any{"target": "payments-prod", "query": ""})
 		notFound(t, session, "list_search_attributes", map[string]any{"target": "payments-prod"})
@@ -330,14 +330,14 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "count_workflows", "get_task_queue", "get_workflow", "get_workflow_history", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }
 
 func TestNewServerRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
-	if _, err := NewServer("temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := NewServer(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("NewServer with auth and no authorization succeeded, want an error")
 	}
 }
@@ -366,7 +366,7 @@ func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
 			cfg := &config.Config{
 				Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: tc.issuers},
 				Authorization: &config.Authorization{
-					Profiles: map[string]config.Profile{"p": {Tools: []string{"get_workflow"}, Targets: []string{"t"}}},
+					Profiles: map[string]config.Profile{"p": {Tools: []string{"get_workflows"}, Targets: []string{"t"}}},
 					Rules: []config.Rule{
 						{ClaimName: "sub", ClaimValue: "alice", Issuer: "https://a.example.com", Profile: "p"},
 						{ClaimName: "sub", ClaimValue: "bob", Issuer: tc.issuer, Profile: "p"},
@@ -375,7 +375,7 @@ func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
 				},
 			}
 			var logs strings.Builder
-			if _, err := NewServer("temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
+			if _, err := NewServer(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
 				t.Fatal(err)
 			}
 			if got := logs.String(); got != tc.want {
@@ -409,7 +409,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, _ := newServer("temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	calls := map[string]struct {
 		rpc  string
 		call func(context.Context) error

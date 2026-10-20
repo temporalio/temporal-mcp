@@ -6,8 +6,8 @@
 >
 > **Pre-release:** This project is under active development and evolving quickly. It is not ready for production use.
 > Open a GitHub issue if you have questions or want to follow along.
-> If you're evaluating this project for your organization, please reach out to your Temporal representative for
-> guidance and to share feedback.
+> If you're evaluating this project for your organization, read the [request for comment](REQUEST_FOR_COMMENT.md) and
+> reach out to your Temporal representative for guidance and to share feedback.
 
 ## Get started
 
@@ -77,6 +77,20 @@ go build -o bin/ .
 ```
 
 This writes `bin/temporal-operator-mcp`.
+
+## Shutdown
+
+In HTTP mode, on SIGINT or SIGTERM, `temporal-operator-mcp` stops accepting connections and waits up to `shutdown_timeout` for the tool calls in progress to finish:
+
+```yaml
+shutdown_timeout: 25s # 8s if unset
+```
+
+It then cancels the calls still running, which get audit records with outcome `cancelled`, and exits within another second. Set `shutdown_timeout` at least a second shorter than the time your platform allows between SIGTERM and SIGKILL.
+
+Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
+
+A second signal stops `temporal-operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
 
 ## Lint
 

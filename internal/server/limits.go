@@ -60,9 +60,9 @@ func (l *limits) acquire(ctx context.Context, call *mcp.CallToolRequest) (releas
 		}
 	}
 	for _, s := range slots {
-		if s.Acquire(ctx, 1) != nil {
+		if err := s.Acquire(ctx, 1); err != nil {
 			release()
-			return nil, &toolError{Code: "rate_limited", Message: "this server is busy with other calls; retry later", Retryable: true}
+			return nil, &toolError{Code: "rate_limited", Message: "this server is busy with other calls; retry later", Retryable: true, cause: err}
 		}
 		held = append(held, s)
 	}

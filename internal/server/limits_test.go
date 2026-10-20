@@ -203,6 +203,32 @@ func TestConcurrentCallsPerReplica(t *testing.T) {
 	}
 }
 
+func TestShutdownWhileWaitingForSlot(t *testing.T) {
+	defer func(n int) { maxToolCallsPerReplica = n }(maxToolCallsPerReplica)
+	maxToolCallsPerReplica = 1
+	l := newLimits(&config.Config{})
+	call := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "test"}}
+	release, err := l.acquire(t.Context(), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	stop, shutdown := context.WithCancel(t.Context())
+	handler := cancelWith(stop)(normalizeToolCalls(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		shutdown()
+		_, err := l.acquire(ctx, call)
+		return errorResult(err), nil
+	}))
+	res, err := handler(t.Context(), "tools/call", call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"code": "server_shutting_down", "message": "the server is shutting down", "retryable": true}
+	if got := errorContent(t, res.(*mcp.CallToolResult)); !reflect.DeepEqual(got, want) {
+		t.Errorf("call waiting for a slot at shutdown: error = %v, want %v", got, want)
+	}
+}
+
 func TestCallerRate(t *testing.T) {
 	defer func(r rate.Limit, b int) { callerRate, callerBurst = r, b }(callerRate, callerBurst)
 	callerRate, callerBurst = rate.Every(time.Minute), 2
@@ -217,7 +243,7 @@ func TestCallerRate(t *testing.T) {
 		},
 	}
 	logger := slog.New(slog.DiscardHandler)
-	s, _ := newServer("temporal-operator", "0", cfg, nil, newRenderer(t, cfg, logger), io.Discard, logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", cfg, nil, newRenderer(t, cfg, logger), io.Discard, logger)
 	srv := httptest.NewServer(NewMux(s.Server, cfg, logger))
 	t.Cleanup(srv.Close)
 	connect := func(token string) *mcp.ClientSession {

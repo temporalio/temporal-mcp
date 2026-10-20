@@ -427,6 +427,14 @@ func TestToolsOnDevServer(t *testing.T) {
 	var records bytes.Buffer
 	session := connect(t, configPath, io.MultiWriter(t.Output(), &records))
 	validateOutput := outputValidator(t, session)
+	temporalCalls := func(t *testing.T) float64 {
+		t.Helper()
+		var rec map[string]any
+		if err := json.Unmarshal(records.Bytes(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		return rec["temporal_calls"].(float64)
+	}
 
 	t.Run("check_connection", func(t *testing.T) {
 		tests := []struct {
@@ -505,10 +513,10 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 	})
 
-	t.Run("get_workflow", func(t *testing.T) {
-		callGetWorkflow := func(t *testing.T, args any) *mcp.CallToolResult {
+	t.Run("get_workflows", func(t *testing.T) {
+		callGetWorkflows := func(t *testing.T, args any) *mcp.CallToolResult {
 			t.Helper()
-			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_workflow", Arguments: args})
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_workflows", Arguments: args})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -520,30 +528,53 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			return res
 		}
-		getWorkflow := func(t *testing.T, args map[string]any) map[string]any {
+		getWorkflows := func(t *testing.T, target string, workflows ...map[string]any) []map[string]any {
 			t.Helper()
-			res := callGetWorkflow(t, args)
+			res := callGetWorkflows(t, map[string]any{"target": target, "workflows": workflows})
 			if res.IsError {
 				t.Fatalf("tool returned an error: %s", res.Content[0].(*mcp.TextContent).Text)
 			}
-			validateOutput(t, "get_workflow", res)
+			validateOutput(t, "get_workflows", res)
 			var fromText any
 			if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &fromText); err != nil || !reflect.DeepEqual(fromText, res.StructuredContent) {
 				t.Errorf("text content does not match structuredContent (%v)", err)
 			}
 			env := res.StructuredContent.(map[string]any)
-			wantTarget := args["target"]
+			wantTarget := target
 			if wantTarget == "local" {
 				wantTarget = "dev"
 			}
 			if env["target"] != wantTarget || env["complete"] != true || env["next_call"] != nil {
 				t.Errorf("envelope = %#v, want target %v, complete true and next_call null", env, wantTarget)
 			}
-			run := env["result"].(map[string]any)
-			if _, err := time.Parse(time.RFC3339, run["observed_at"].(string)); err != nil || !strings.HasSuffix(run["observed_at"].(string), "Z") {
-				t.Errorf("observed_at = %v, want a UTC RFC 3339 time", run["observed_at"])
+			result := env["result"].([]any)
+			if len(result) != len(workflows) {
+				t.Fatalf("result = %#v, want an entry for each of %v", result, workflows)
 			}
-			return run
+			entries := []map[string]any{}
+			for i, e := range result {
+				entry := e.(map[string]any)
+				if entry["workflow_id"] != workflows[i]["workflow_id"] || entry["run_id"] != workflows[i]["run_id"] {
+					t.Errorf("entry %d = %#v, want the workflow_id and run_id of %v", i, entry, workflows[i])
+				}
+				entries = append(entries, entry)
+			}
+			return entries
+		}
+		getRuns := func(t *testing.T, target string, workflows ...map[string]any) []map[string]any {
+			t.Helper()
+			runs := []map[string]any{}
+			for _, entry := range getWorkflows(t, target, workflows...) {
+				run, _ := entry["run"].(map[string]any)
+				if run == nil || entry["error"] != nil {
+					t.Fatalf("entry = %#v, want a run and no error", entry)
+				}
+				if _, err := time.Parse(time.RFC3339, run["observed_at"].(string)); err != nil || !strings.HasSuffix(run["observed_at"].(string), "Z") {
+					t.Errorf("observed_at = %v, want a UTC RFC 3339 time", run["observed_at"])
+				}
+				runs = append(runs, run)
+			}
+			return runs
 		}
 		check := func(t *testing.T, run map[string]any, want map[string]any) {
 			t.Helper()
@@ -556,11 +587,12 @@ func TestToolsOnDevServer(t *testing.T) {
 		empty := []any{}
 
 		t.Run("failed", func(t *testing.T) {
-			for _, args := range []map[string]any{
-				{"target": "local", "workflow_id": "order-88231"},
-				{"target": "dev", "workflow_id": "order-88231", "run_id": failed.GetRunID()},
-			} {
-				run := getWorkflow(t, args)
+			for _, run := range getRuns(t, "local",
+				map[string]any{"workflow_id": "order-88231"},
+				map[string]any{"workflow_id": "order-88231", "run_id": failed.GetRunID()},
+				// A null run_id is an omitted run_id.
+				map[string]any{"workflow_id": "order-88231", "run_id": nil},
+			) {
 				check(t, run, map[string]any{
 					"workflow_id":           "order-88231",
 					"run_id":                failed.GetRunID(),
@@ -603,26 +635,51 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 		})
 
-		t.Run("null run_id is an omitted run_id", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": nil}), map[string]any{
-				"run_id": failed.GetRunID(),
-				"status": "Failed",
-			})
+		t.Run("found, missing and invalid workflows, in the order given", func(t *testing.T) {
+			entries := getWorkflows(t, "dev",
+				map[string]any{"workflow_id": "order-completed"},
+				map[string]any{"workflow_id": "order-0"},
+				map[string]any{"workflow_id": "order-88231", "run_id": latestRunID},
+				map[string]any{"workflow_id": "order-88231", "run_id": "not-a-run-id"},
+				map[string]any{"workflow_id": "continue-once"},
+			)
+			for i, want := range []struct {
+				result        []any
+				code, message string
+			}{
+				{result: []any{decoded(map[string]any{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"})}},
+				{code: "not_found", message: "workflow not found"},
+				{code: "not_found", message: "workflow execution not found for workflow ID "},
+				{code: "invalid_argument", message: "Invalid RunId."},
+				{result: []any{decoded(true)}},
+			} {
+				run, _ := entries[i]["run"].(map[string]any)
+				got, _ := entries[i]["error"].(map[string]any)
+				if want.code == "" {
+					if got != nil || run == nil || !reflect.DeepEqual(run["result"], want.result) {
+						t.Errorf("entry %d = %#v, want a run with result %#v", i, entries[i], want.result)
+					}
+					continue
+				}
+				if msg, _ := got["message"].(string); run != nil || got["code"] != want.code || got["retryable"] != false || !strings.HasPrefix(msg, want.message) || len(got) != 3 {
+					t.Errorf("entry %d = %#v, want no run and error code %s with a message starting %q", i, entries[i], want.code, want.message)
+				}
+			}
 		})
 
 		t.Run("typed search attributes", func(t *testing.T) {
-			res := callGetWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-typed"})
+			res := callGetWorkflows(t, map[string]any{"target": "dev", "workflows": []any{map[string]any{"workflow_id": "order-typed"}}})
 			if res.IsError {
 				t.Fatalf("tool returned an error: %s", res.Content[0].(*mcp.TextContent).Text)
 			}
-			validateOutput(t, "get_workflow", res)
+			validateOutput(t, "get_workflows", res)
 			dec := json.NewDecoder(strings.NewReader(res.Content[0].(*mcp.TextContent).Text))
 			dec.UseNumber()
 			var env map[string]any
 			if err := dec.Decode(&env); err != nil {
 				t.Fatal(err)
 			}
-			got := env["result"].(map[string]any)["search_attributes"].(map[string]any)
+			got := env["result"].([]any)[0].(map[string]any)["run"].(map[string]any)["search_attributes"].(map[string]any)
 			want := map[string]any{
 				"SaInt":         json.Number("9007199254740993"),
 				"SaDouble":      json.Number("1.5"),
@@ -640,7 +697,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("completed", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-completed"}), map[string]any{
+			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-completed"})[0], map[string]any{
 				"run_id":  completed.GetRunID(),
 				"status":  "Completed",
 				"result":  []any{decoded(map[string]any{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"})},
@@ -666,7 +723,7 @@ func TestToolsOnDevServer(t *testing.T) {
 				{"dev-unauthorized", omitted("decode_failed", result), omitted("decode_failed", "gift")},
 			} {
 				t.Run(tt.target, func(t *testing.T) {
-					check(t, getWorkflow(t, map[string]any{"target": tt.target, "workflow_id": "order-completed"}), map[string]any{
+					check(t, getRuns(t, tt.target, map[string]any{"workflow_id": "order-completed"})[0], map[string]any{
 						"run_id":  completed.GetRunID(),
 						"status":  "Completed",
 						"result":  []any{tt.result},
@@ -678,13 +735,14 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("continued as new", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "continue-once", "run_id": firstRunID}), map[string]any{
+			runs := getRuns(t, "dev", map[string]any{"workflow_id": "continue-once", "run_id": firstRunID}, map[string]any{"workflow_id": "continue-once"})
+			check(t, runs[0], map[string]any{
 				"run_id":               firstRunID,
 				"status":               "ContinuedAsNew",
 				"result":               nil,
 				"new_execution_run_id": latestRunID,
 			})
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "continue-once"}), map[string]any{
+			check(t, runs[1], map[string]any{
 				"run_id":               latestRunID,
 				"status":               "Completed",
 				"result":               []any{decoded(true)},
@@ -693,7 +751,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("running", func(t *testing.T) {
-			run := getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-running"})
+			run := getRuns(t, "dev", map[string]any{"workflow_id": "order-running"})[0]
 			check(t, run, map[string]any{
 				"run_id":     running.GetRunID(),
 				"status":     "Running",
@@ -722,7 +780,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("parent and pending child", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-parent"}), map[string]any{
+			runs := getRuns(t, "dev", map[string]any{"workflow_id": "order-parent"}, map[string]any{"workflow_id": "order-child"})
+			check(t, runs[0], map[string]any{
 				"run_id": parent.GetRunID(),
 				"status": "Running",
 				"parent": nil,
@@ -734,7 +793,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"parent_close_policy": "Terminate",
 				}},
 			})
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-child"}), map[string]any{
+			check(t, runs[1], map[string]any{
 				"run_id":           child.GetRunId(),
 				"type":             "waitForSignal",
 				"parent":           map[string]any{"workflow_id": "order-parent", "run_id": parent.GetRunID()},
@@ -743,7 +802,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("heartbeating activity", func(t *testing.T) {
-			run := getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-heartbeating"})
+			run := getRuns(t, "dev", map[string]any{"workflow_id": "order-heartbeating"})[0]
 			check(t, run, map[string]any{"run_id": heartbeating.GetRunID(), "status": "Running"})
 			activities := run["pending_activities"].([]any)
 			if len(activities) != 1 {
@@ -763,7 +822,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("pending workflow task", func(t *testing.T) {
-			run := getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-unpolled"})
+			run := getRuns(t, "dev", map[string]any{"workflow_id": "order-unpolled"})[0]
 			check(t, run, map[string]any{
 				"run_id":         unpolled.GetRunID(),
 				"status":         "Running",
@@ -778,7 +837,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("delayed start", func(t *testing.T) {
-			run := getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-delayed"})
+			run := getRuns(t, "dev", map[string]any{"workflow_id": "order-delayed"})[0]
 			check(t, run, map[string]any{"run_id": delayed.GetRunID(), "status": "Running"})
 			startTime, startErr := time.Parse(time.RFC3339Nano, fmt.Sprint(run["start_time"]))
 			executionTime, executionErr := time.Parse(time.RFC3339Nano, fmt.Sprint(run["execution_time"]))
@@ -788,7 +847,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("application failure details", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-rejected"}), map[string]any{
+			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-rejected"})[0], map[string]any{
 				"run_id": rejected.GetRunID(),
 				"status": "Failed",
 				"failure": map[string]any{
@@ -805,7 +864,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("terminated", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-terminated"}), map[string]any{
+			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-terminated"})[0], map[string]any{
 				"status": "Terminated",
 				"failure": map[string]any{
 					"message":                "stopped by test",
@@ -821,7 +880,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("canceled", func(t *testing.T) {
-			check(t, getWorkflow(t, map[string]any{"target": "dev", "workflow_id": "order-canceled"}), map[string]any{
+			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-canceled"})[0], map[string]any{
 				"status": "Canceled",
 				"failure": map[string]any{
 					"message":                "",
@@ -836,27 +895,30 @@ func TestToolsOnDevServer(t *testing.T) {
 			})
 		})
 
+		found := map[string]any{"workflow_id": "order-88231"}
 		errorTests := []struct {
 			name          string
 			args          any
 			code          string
 			messagePrefix string
 			retryable     bool
+			calls         float64
 		}{
-			{"unknown target", map[string]any{"target": "nope", "workflow_id": "order-88231"}, "not_found", `unknown target "nope"`, false},
-			{"unknown workflow", map[string]any{"target": "dev", "workflow_id": "order-0"}, "not_found", "workflow not found", false},
-			{"unknown run", map[string]any{"target": "dev", "workflow_id": "order-88231", "run_id": latestRunID}, "not_found", "workflow execution not found for workflow ID ", false},
-			{"array arguments", []any{"dev", "order-88231"}, "invalid_argument", "", false},
-			{"empty workflow_id", map[string]any{"target": "dev", "workflow_id": ""}, "invalid_argument", "workflow_id is required", false},
-			{"unknown namespace", map[string]any{"target": "misconfigured", "workflow_id": "order-88231"}, "temporal_unavailable", "Namespace nosuchns is not found.", false},
-			{"unreachable target", map[string]any{"target": "down", "workflow_id": "order-88231"}, "temporal_unavailable", "could not connect to the Temporal server", true},
+			{"unknown target", map[string]any{"target": "nope", "workflows": []any{found}}, "not_found", `unknown target "nope"`, false, 0},
+			{"array arguments", []any{"dev", "order-88231"}, "invalid_argument", "", false, 0},
+			// A server error stops the reading at the first workflow, so temporal_calls counts only that call's attempts.
+			{"unknown namespace", map[string]any{"target": "misconfigured", "workflows": []any{found, found}}, "temporal_unavailable", "workflows[0]: Namespace nosuchns is not found.", false, 1},
+			{"unreachable target", map[string]any{"target": "down", "workflows": []any{found, found}}, "temporal_unavailable", "workflows[0]: could not connect to the Temporal server", true, float64(1 + len(retryDelays))},
 		}
 		for _, tt := range errorTests {
 			t.Run(tt.name, func(t *testing.T) {
-				res := callGetWorkflow(t, tt.args)
-				got := errorContent(t, res)
+				records.Reset()
+				got := errorContent(t, callGetWorkflows(t, tt.args))
 				if msg, _ := got["message"].(string); got["code"] != tt.code || got["retryable"] != tt.retryable || !strings.HasPrefix(msg, tt.messagePrefix) || len(got) != 3 {
 					t.Errorf("error = %#v, want code %s, retryable %v and a message starting %q", got, tt.code, tt.retryable, tt.messagePrefix)
+				}
+				if calls := temporalCalls(t); calls != tt.calls {
+					t.Errorf("temporal_calls = %v, want %v", calls, tt.calls)
 				}
 			})
 		}
@@ -936,7 +998,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			got := env["result"].(map[string]any)["workflows"].([]any)[0].(map[string]any)
 			delete(got, "workflow_id")
 			delete(got, "run_id")
-			// SQLite Visibility rounds SaInt's 9007199254740993 to 2^53, so expect what Visibility returns; get_workflow's test covers full precision.
+			// SQLite Visibility rounds SaInt's 9007199254740993 to 2^53, so expect what Visibility returns; get_workflows' test covers full precision.
 			listed, err := c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{Query: "WorkflowId = 'order-typed'"})
 			if err != nil || len(listed.GetExecutions()) != 1 {
 				t.Fatalf("ListWorkflow: %v, %d executions", err, len(listed.GetExecutions()))
@@ -1099,11 +1161,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var rec map[string]any
-			if err := json.Unmarshal(records.Bytes(), &rec); err != nil {
-				t.Fatal(err)
-			}
-			return res, rec["temporal_calls"].(float64)
+			return res, temporalCalls(t)
 		}
 		// misconfigured's search attributes cannot be listed, so a core attribute passes without trying, and another
 		// attribute runs the search unchecked after the failed listing.
@@ -1157,11 +1215,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		t.Helper()
 		records.Reset()
 		env := callTool(t, name, args)
-		var rec map[string]any
-		if err := json.Unmarshal(records.Bytes(), &rec); err != nil {
-			t.Fatal(err)
-		}
-		return env, rec["temporal_calls"].(float64)
+		return env, temporalCalls(t)
 	}
 	historyEvents := func(env map[string]any) []map[string]any {
 		events := []map[string]any{}
@@ -1208,8 +1262,15 @@ func TestToolsOnDevServer(t *testing.T) {
 			return resp.GetStats().GetApproximateBacklogCount() == n
 		})
 	}
-	section := func(env map[string]any, typ string) map[string]any {
-		s, _ := env["result"].(map[string]any)[typ].(map[string]any)
+	taskQueues := func(env map[string]any) []map[string]any {
+		queues := []map[string]any{}
+		for _, q := range env["result"].([]any) {
+			queues = append(queues, q.(map[string]any))
+		}
+		return queues
+	}
+	section := func(q map[string]any, typ string) map[string]any {
+		s, _ := q[typ].(map[string]any)
 		return s
 	}
 	identities := func(s map[string]any) []string {
@@ -1434,36 +1495,53 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 	})
 
-	t.Run("get_task_queue", func(t *testing.T) {
-		env, calls := callCounted(t, "get_task_queue", map[string]any{"target": "local", "task_queue": fixture.TaskQueue})
-		if env["target"] != "dev" || env["complete"] != true || env["next_call"] != nil || calls != 3 {
-			t.Errorf("envelope = %#v, temporal_calls = %v; want target dev, complete, no next_call and a call for each type", env, calls)
+	t.Run("get_task_queues", func(t *testing.T) {
+		tooLong := strings.Repeat("q", 1001)
+		env, calls := callCounted(t, "get_task_queues", map[string]any{"target": "local", "task_queues": []any{fixture.TaskQueue, tooLong, "never-used"}})
+		queues := taskQueues(env)
+		if env["target"] != "dev" || env["complete"] != true || env["next_call"] != nil || len(queues) != 3 || calls != 7 {
+			t.Fatalf("envelope = %#v, temporal_calls = %v; want target dev, complete, no next_call, three task queues and seven calls", env, calls)
 		}
+		polled, invalid, unused := queues[0], queues[1], queues[2]
 		for _, typ := range []string{"workflow", "activity", "nexus"} {
-			s := section(env, typ)
+			s := section(polled, typ)
 			if observed, _ := s["observed_at"].(string); !strings.HasSuffix(observed, "Z") || s["backlog_count"] == nil || s["add_rate"] == nil || s["dispatch_rate"] == nil || s["poller_count"] != float64(len(s["pollers"].([]any))) {
 				t.Errorf("%s section = %#v, want observed_at in UTC, a backlog_count, an add_rate, a dispatch_rate and every poller", typ, s)
 			}
 			if wantPollers := typ != "nexus"; (len(identities(s)) > 0) != wantPollers {
 				t.Errorf("%s pollers = %v, want some: %v", typ, identities(s), wantPollers)
 			}
-		}
-
-		env, calls = callCounted(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.TaskQueue, "types": []any{"activity"}})
-		if section(env, "activity") == nil || section(env, "workflow") != nil || section(env, "nexus") != nil || calls != 1 {
-			t.Errorf("result = %#v, temporal_calls = %v; want only the activity section, from one call", env["result"], calls)
-		}
-
-		env = callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": "never-used"})
-		for _, typ := range []string{"workflow", "activity", "nexus"} {
-			if s := section(env, typ); len(identities(s)) != 0 || s["backlog_count"] != 0.0 {
+			if s := section(unused, typ); len(identities(s)) != 0 || s["backlog_count"] != 0.0 {
 				t.Errorf("%s section of an unused task queue = %#v, want no pollers and no backlog", typ, s)
 			}
 		}
+		if polled["task_queue"] != fixture.TaskQueue || polled["error"] != nil || unused["task_queue"] != "never-used" || unused["error"] != nil {
+			t.Errorf("task queues = %v and %v, want %s and never-used with no error", polled["task_queue"], unused["task_queue"], fixture.TaskQueue)
+		}
+		got, _ := invalid["error"].(map[string]any)
+		if invalid["task_queue"] != tooLong || invalid["workflow"] != nil || invalid["activity"] != nil || invalid["nexus"] != nil || got["code"] != "invalid_argument" || got["retryable"] != false || got["message"] == "" {
+			t.Errorf("entry for a name that is too long = %#v, want no sections and an invalid_argument error", invalid)
+		}
 
-		t.Run("empty task_queue", func(t *testing.T) {
-			if got := callToolError(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": ""}); got["code"] != "invalid_argument" {
-				t.Errorf("error = %#v, want invalid_argument", got)
+		env, calls = callCounted(t, "get_task_queues", map[string]any{"target": "dev", "task_queues": []any{fixture.TaskQueue, fixture.TaskQueue}, "types": []any{"activity"}})
+		queues = taskQueues(env)
+		for _, q := range queues {
+			if q["task_queue"] != fixture.TaskQueue || section(q, "activity") == nil || section(q, "workflow") != nil || section(q, "nexus") != nil {
+				t.Errorf("entry = %#v, want only the activity section of %s", q, fixture.TaskQueue)
+			}
+		}
+		if len(queues) != 2 || calls != 2 {
+			t.Errorf("%d entries, temporal_calls = %v; want an entry for each name given, from a call each", len(queues), calls)
+		}
+
+		t.Run("unreachable target", func(t *testing.T) {
+			records.Reset()
+			if got := callToolError(t, "get_task_queues", map[string]any{"target": "down", "task_queues": []any{fixture.TaskQueue, fixture.TaskQueue}}); got["code"] != "temporal_unavailable" || got["retryable"] != true || got["message"] != "task_queues[0]: could not connect to the Temporal server" {
+				t.Errorf("error = %#v, want a retryable temporal_unavailable error naming task_queues[0]", got)
+			}
+			// Reading stops at the first task queue's first type, so temporal_calls counts only that call's attempts.
+			if calls := temporalCalls(t); calls != float64(1+len(retryDelays)) {
+				t.Errorf("temporal_calls = %v, want %d", calls, 1+len(retryDelays))
 			}
 		})
 	})
@@ -1540,20 +1618,20 @@ func TestToolsOnDevServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForBacklog(t, fixture.LedgerTaskQueue, enumspb.TASK_QUEUE_TYPE_ACTIVITY, fixture.StuckLedgerActivities)
-		env := callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.LedgerTaskQueue})
-		if got := identities(section(env, "workflow")); !slices.Contains(got, fixture.StuckWorkerIdentity) {
+		ledger := taskQueues(callTool(t, "get_task_queues", map[string]any{"target": "dev", "task_queues": []any{fixture.LedgerTaskQueue}}))[0]
+		if got := identities(section(ledger, "workflow")); !slices.Contains(got, fixture.StuckWorkerIdentity) {
 			t.Errorf("workflow pollers = %v, want %s among them", got, fixture.StuckWorkerIdentity)
 		}
-		activities := section(env, "activity")
+		activities := section(ledger, "activity")
 		age, err := strconv.ParseFloat(strings.TrimSuffix(fmt.Sprint(activities["backlog_age"]), "s"), 64)
 		if len(identities(activities)) != 0 || activities["backlog_count"] != float64(fixture.StuckLedgerActivities) || err != nil || age <= 0 {
 			t.Errorf("activity section = %#v, want no pollers and a backlog of %d with an age", activities, fixture.StuckLedgerActivities)
 		}
-		if got := identities(section(env, "nexus")); len(got) != 0 {
+		if got := identities(section(ledger, "nexus")); len(got) != 0 {
 			t.Errorf("nexus pollers = %v, want none", got)
 		}
 
-		env = callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": fixture.StuckLedgerWorkflowID, "order": "newest_first", "limit": 3})
+		env := callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": fixture.StuckLedgerWorkflowID, "order": "newest_first", "limit": 3})
 		events := historyEvents(env)
 		if got := typesOf(events); !slices.Equal(got, []string{"ActivityTaskScheduled", "ActivityTaskScheduled", "ActivityTaskScheduled"}) || env["next_call"] == nil {
 			t.Fatalf("newest events = %v, next_call = %v; want three ActivityTaskScheduled and a next_call", got, env["next_call"])
@@ -1588,7 +1666,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		waitForBacklog(t, fixture.PaymentsTaskQueue, enumspb.TASK_QUEUE_TYPE_ACTIVITY, 3)
 
 		payments := func() map[string]any {
-			return section(callTool(t, "get_task_queue", map[string]any{"target": "dev", "task_queue": fixture.PaymentsTaskQueue, "types": []any{"activity"}}), "activity")
+			return section(taskQueues(callTool(t, "get_task_queues", map[string]any{"target": "dev", "task_queues": []any{fixture.PaymentsTaskQueue}, "types": []any{"activity"}}))[0], "activity")
 		}
 		if s := payments(); len(identities(s)) != 0 || s["backlog_count"] != 3.0 {
 			t.Errorf("payments activity section during the incident = %#v, want no pollers and a backlog of 3", s)

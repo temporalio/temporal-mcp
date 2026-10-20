@@ -24,8 +24,6 @@ gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio
 tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
 ```
 
-To download a release that is still a draft, put its tag after `download`.
-
 On macOS, download with `gh` as above. A browser marks what it downloads with the `com.apple.quarantine` flag, and macOS won't run a binary with that flag unless it's notarized, which this one isn't. To run a binary from a browser download, remove the flag:
 
 ```sh

@@ -42,6 +42,12 @@ Add `temporal-operator-mcp` to your agent with `--stdio`, your config and the na
 claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
 ```
 
+For Codex:
+
+```sh
+codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+```
+
 Other agents take the same command, arguments and environment variables in their own config format.
 
 ### Check

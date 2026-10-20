@@ -79,7 +79,10 @@ func (t *stdioTransport) drain() {
 		close(t.drained)
 	}
 	t.mu.Unlock()
-	<-t.drained
+	select {
+	case <-t.drained:
+	case <-t.closed:
+	}
 }
 
 func (t *stdioTransport) Close() error {

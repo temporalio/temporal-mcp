@@ -64,6 +64,8 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 
 	load := config.Load
 	if *stdio {
+		// Broken client pipes must not stop calls before they are audited.
+		signal.Ignore(syscall.SIGPIPE)
 		load = config.LoadStdio
 	}
 	cfg, err := load(*configPath)
@@ -98,7 +100,9 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	// Cancelling calls cancels the tool calls in progress.
 	calls, cancelCalls := context.WithCancel(context.Background())
 	defer cancelCalls()
-	s, err := server.NewServer(calls, serverName, version, cfg, clients, payloads, records, logger)
+	subscriptions, cancelSubscriptions := context.WithCancel(context.Background())
+	defer cancelSubscriptions()
+	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -124,6 +128,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		}
 		// A second signal stops the process at once, including after stdin closes.
 		stop()
+		cancelSubscriptions()
 		go func() {
 			transport.drain()
 			_ = session.Close()
@@ -175,6 +180,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	}
 	// A second signal stops the process at once.
 	stop()
+	cancelSubscriptions()
 	return shutdown(srv.Shutdown, timeout, cancelCalls, stderr, logger)
 }
 

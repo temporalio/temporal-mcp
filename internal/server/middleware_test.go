@@ -38,7 +38,7 @@ func TestShutdownCancellationResult(t *testing.T) {
 			client, cancelClient := context.WithCancel(t.Context())
 			defer cancelClient()
 			success := &mcp.CallToolResult{}
-			handler := cancelWith(stop)(normalizeToolCalls(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+			handler := cancelWith(stop, stop)(normalizeToolCalls(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
 				if tt.clientCancels {
 					cancelClient()
 				}

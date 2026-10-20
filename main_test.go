@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -49,7 +50,7 @@ func startServer(t *testing.T, bin, configPath string, stdout io.Writer) string 
 	t.Helper()
 	cmd := exec.Command(bin, "--config", configPath)
 	cmd.Stdout = stdout
-	stderr := start(t, cmd)
+	stderr, _ := start(t, cmd)
 	url := listening(t, stderr)
 	go func() {
 		for range stderr {
@@ -58,8 +59,8 @@ func startServer(t *testing.T, bin, configPath string, stdout io.Writer) string 
 	return url
 }
 
-// start runs cmd and returns its stderr lines, which the caller must read to the end.
-func start(t *testing.T, cmd *exec.Cmd) <-chan string {
+// start runs cmd and returns its stderr lines and pipe. Read the lines to the end, or close the pipe.
+func start(t *testing.T, cmd *exec.Cmd) (<-chan string, io.ReadCloser) {
 	t.Helper()
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -80,7 +81,7 @@ func start(t *testing.T, cmd *exec.Cmd) <-chan string {
 		}
 		close(lines)
 	}()
-	return lines
+	return lines, stderr
 }
 
 func listening(t *testing.T, lines <-chan string) string {
@@ -540,29 +541,34 @@ func TestShutdownDuringToolCall(t *testing.T) {
 		release bool
 		outcome string
 		// tool defaults to check_connection, whose cancellation returns a raw context error.
-		tool  string
-		stdio bool
-		calls int
+		tool       string
+		stdio      bool
+		calls      int
+		disconnect bool
 	}{
-		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", false, 1},
-		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", "", false, 1},
-		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1},
-		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok", "", false, 1},
-		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1},
-		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok", "", false, 1},
-		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1},
-		{"count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1},
-		{"2025-11-25 count call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1},
-		{"count call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1},
-		{"stdio call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", true, 1},
-		{"stdio call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", "", true, 1},
-		{"stdio call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "", true, 1},
-		{"stdio count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", true, 1},
-		{"stdio call finishes after EOF", "2026-07-28", nil, "", true, "ok", "", true, 1},
-		{"stdio call outlasts the shutdown timeout after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "", true, 1},
-		{"stdio count call outlasts the shutdown timeout after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "count_workflows", true, 1},
-		{"stdio concurrent calls finish", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", true, 2},
-		{"stdio concurrent calls time out after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "", true, 2},
+		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", false, 1, false},
+		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", "", false, 1, false},
+		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1, false},
+		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok", "", false, 1, false},
+		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1, false},
+		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok", "", false, 1, false},
+		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "", false, 1, false},
+		{"count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1, false},
+		{"2025-11-25 count call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1, false},
+		{"count call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", false, 1, false},
+		{"stdio call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", true, 1, false},
+		{"stdio call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", "", true, 1, false},
+		{"stdio call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "", true, 1, false},
+		{"stdio count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows", true, 1, false},
+		{"stdio call finishes after EOF", "2026-07-28", nil, "", true, "ok", "", true, 1, false},
+		{"stdio call outlasts the shutdown timeout after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "", true, 1, false},
+		{"stdio count call outlasts the shutdown timeout after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "count_workflows", true, 1, false},
+		{"stdio concurrent calls finish", "2026-07-28", syscall.SIGTERM, "", true, "ok", "", true, 2, false},
+		{"stdio concurrent calls time out after EOF", "2026-07-28", nil, "500ms", false, "cancelled", "", true, 2, false},
+		{"stdio client closes all pipes", "2026-07-28", nil, "500ms", false, "cancelled", "", true, 2, true},
+		{"idle HTTP subscription", "2026-07-28", syscall.SIGTERM, "1s", false, "", "", false, 0, false},
+		{"idle stdio subscription", "2026-07-28", syscall.SIGTERM, "1s", false, "", "", true, 0, false},
+		{"idle stdio subscription after EOF", "2026-07-28", nil, "1s", false, "", "", true, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -577,7 +583,8 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			workflowservice.RegisterWorkflowServiceServer(gs, temporal)
 			go gs.Serve(ln)
 			t.Cleanup(gs.Stop)
-			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			dir := t.TempDir()
+			configPath, auditPath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.log")
 			config := fmt.Sprintf("targets:\n  - {name: a, description: x, address: %q, namespace: default}\n", ln.Addr())
 			if !tt.stdio {
 				config = "listen: 127.0.0.1:0\n" + config
@@ -585,10 +592,13 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			if tt.shutdownTimeout != "" {
 				config += "shutdown_timeout: " + tt.shutdownTimeout + "\n"
 			}
+			if tt.disconnect {
+				config += fmt.Sprintf("audit_log_file: %q\n", auditPath)
+			}
 			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(bin, "--config", configPath)
+			cmd := exec.CommandContext(ctx, bin, "--config", configPath)
 			var records bytes.Buffer
 			var stdin io.WriteCloser
 			var stdout io.ReadCloser
@@ -605,7 +615,7 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			} else {
 				cmd.Stdout = &records
 			}
-			stderr := start(t, cmd)
+			stderr, stderrPipe := start(t, cmd)
 			var url string
 			if !tt.stdio {
 				url = listening(t, stderr)
@@ -619,6 +629,9 @@ func TestShutdownDuringToolCall(t *testing.T) {
 							return false
 						}
 						t.Log(line)
+						if tt.calls == 0 && strings.Contains(line, "cancelling the requests still in progress") {
+							t.Error("an idle subscription waited for the shutdown timeout")
+						}
 						if tt.stdio && strings.HasPrefix(line, "{") {
 							records.WriteString(line + "\n")
 						}
@@ -639,17 +652,38 @@ func TestShutdownDuringToolCall(t *testing.T) {
 				err    error
 			}
 			var session *mcp.ClientSession
-			if tt.stdio {
-				session, err = mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.IOTransport{Reader: stdout, Writer: stdin}, nil)
+			if tt.stdio || tt.protocol == "2026-07-28" {
+				var transport mcp.Transport = &mcp.StreamableClientTransport{Endpoint: url}
+				if tt.stdio {
+					transport = &mcp.IOTransport{Reader: stdout, Writer: stdin}
+				}
+				client := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, &mcp.ClientOptions{
+					ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {},
+				})
+				acked := make(chan struct{})
+				client.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+					return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+						if method == "notifications/subscriptions/acknowledged" {
+							close(acked)
+						}
+						return next(ctx, method, req)
+					}
+				})
+				session, err = client.Connect(ctx, transport, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer session.Close()
+				select {
+				case <-acked:
+				case <-ctx.Done():
+					t.Fatal("subscription was not acknowledged")
+				}
 			}
 			called := make(chan callResponse, tt.calls)
 			for range tt.calls {
 				go func() {
-					if tt.stdio {
+					if session != nil {
 						res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"target": "a"}})
 						called <- callResponse{res, err}
 						return
@@ -668,14 +702,22 @@ func TestShutdownDuringToolCall(t *testing.T) {
 				}
 			}
 
+			if tt.disconnect {
+				if err := stderrPipe.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := stdout.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tt.signal == nil {
-				if err := stdin.Close(); err != nil {
+				if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 					t.Fatal(err)
 				}
 			} else if err := cmd.Process.Signal(tt.signal); err != nil {
 				t.Fatal(err)
 			}
-			if !logUntil(name + ": shutting down") {
+			if !tt.disconnect && !logUntil(name+": shutting down") {
 				t.Errorf("the server exited on %v without shutting down", tt.signal)
 			}
 			if tt.release {
@@ -684,6 +726,12 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			for range tt.calls {
 				select {
 				case response := <-called:
+					if tt.disconnect {
+						if response.err == nil {
+							t.Error("call succeeded after the client closed its pipes")
+						}
+						continue
+					}
 					if response.err != nil {
 						t.Fatalf("%s: %v", tool, response.err)
 					}
@@ -718,7 +766,17 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			}
 			logUntil("")
 			if err := cmd.Wait(); err != nil {
-				t.Errorf("server exited with %v, want exit status 0", err)
+				// A broken pipe may return an error, but must not kill the server with SIGPIPE.
+				if !tt.disconnect || cmd.ProcessState.ExitCode() != 1 {
+					t.Errorf("server exited with %v", err)
+				}
+			}
+			if tt.disconnect {
+				data, err := os.ReadFile(auditPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				records.Write(data)
 			}
 
 			var got []string

@@ -26,12 +26,10 @@ targets:
 
 [ audit_log_file: <filename> ]
 [ error_log_file: <filename> ]
+[ shutdown_timeout: <duration> | default = 8s ]
 
 # HTTP mode only.
 listen: <host:port>
-
-# Used in HTTP mode.
-[ shutdown_timeout: <duration> | default = 8s ]
 
 # HTTP mode only.
 [ listen_tls:
@@ -122,7 +120,7 @@ The server does not start if it cannot load the certificate and key, and starts 
 
 ## `shutdown_timeout`
 
-Optional duration, default `8s`; zero uses the default and negative values are rejected in HTTP mode. After SIGINT or SIGTERM, the HTTP server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. It has no effect with `--stdio`. See [Shutdown](../README.md#shutdown).
+Optional in both modes, default `8s`; zero uses the default and negative values are rejected. After SIGINT or SIGTERM, or stdin closing in `--stdio` mode, the server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. See [Shutdown](../README.md#shutdown).
 
 ## `auth`
 
@@ -162,7 +160,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 

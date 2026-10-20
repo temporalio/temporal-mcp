@@ -102,8 +102,40 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
+	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	timeout := cmp.Or(cfg.ShutdownTimeout, config.DefaultShutdownTimeout)
 	if *stdio {
-		return s.Run(context.Background(), &mcp.IOTransport{Reader: stdin, Writer: stdout})
+		transport := &stdioTransport{
+			IOTransport: mcp.IOTransport{Reader: stdin, Writer: stdout},
+			eof:         make(chan struct{}), drained: make(chan struct{}), closed: make(chan struct{}),
+		}
+		session, err := s.Connect(context.Background(), transport, nil)
+		if err != nil {
+			return err
+		}
+		done := make(chan error, 1)
+		go func() { done <- session.Wait() }()
+		select {
+		case err := <-done:
+			return err
+		case <-signals.Done():
+		case <-transport.eof:
+		}
+		// A second signal stops the process at once, including after stdin closes.
+		stop()
+		go func() {
+			transport.drain()
+			_ = session.Close()
+		}()
+		return shutdown(func(ctx context.Context) error {
+			select {
+			case err := <-done:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}, timeout, cancelCalls, stderr, logger)
 	}
 
 	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
@@ -122,8 +154,6 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		scheme = "https"
 	}
 
-	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
@@ -145,24 +175,23 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	}
 	// A second signal stops the process at once.
 	stop()
-	return shutdown(srv, cmp.Or(cfg.ShutdownTimeout, config.DefaultShutdownTimeout), cancelCalls, stderr, logger)
+	return shutdown(srv.Shutdown, timeout, cancelCalls, stderr, logger)
 }
 
-// shutdown stops srv accepting connections and waits up to timeout for the
-// requests in progress to end. It then cancels those still running, which ends
-// their tool calls as cancelled, and waits up to cancelGrace for them to end.
-func shutdown(srv *http.Server, timeout time.Duration, cancelCalls context.CancelFunc, stderr io.Writer, logger *slog.Logger) error {
+// shutdown waits up to timeout for requests to drain, then cancels those still
+// running and waits up to cancelGrace for them to end and write their audit records.
+func shutdown(drain func(context.Context) error, timeout time.Duration, cancelCalls context.CancelFunc, stderr io.Writer, logger *slog.Logger) error {
 	fmt.Fprintf(stderr, "%s: shutting down\n", name)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := srv.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := drain(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	logger.Warn("cancelling the requests still in progress at the shutdown timeout", "shutdown_timeout", timeout)
 	cancelCalls()
 	ctx, cancel = context.WithTimeout(context.Background(), cancelGrace)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := drain(ctx); err != nil {
 		return fmt.Errorf("requests still in progress %s after they were cancelled", cancelGrace)
 	}
 	return nil

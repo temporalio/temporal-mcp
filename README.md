@@ -6,8 +6,8 @@
 >
 > **Pre-release:** This project is under active development and evolving quickly. It is not ready for production use.
 > Open a GitHub issue if you have questions or want to follow along.
-> If you're evaluating this project for your organization, please reach out to your Temporal representative for
-> guidance and to share feedback.
+> If you're evaluating this project for your organization, read the [request for comment](REQUEST_FOR_COMMENT.md) and
+> reach out to your Temporal representative for guidance and to share feedback.
 
 ## Get started
 

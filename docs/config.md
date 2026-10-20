@@ -30,6 +30,9 @@ targets:
 # HTTP mode only.
 listen: <host:port>
 
+# Used in HTTP mode.
+[ shutdown_timeout: <duration> | default = 8s ]
+
 # HTTP mode only.
 [ listen_tls:
     cert_file: <filename>
@@ -116,6 +119,10 @@ These say where and how the server serves MCP in HTTP mode, and are not allowed 
   - `key_file` (filename, required): Path of the certificate's PEM private key.
 
 The server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
+
+## `shutdown_timeout`
+
+Optional duration, default `8s`; zero uses the default and negative values are rejected in HTTP mode. After SIGINT or SIGTERM, the HTTP server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. It has no effect with `--stdio`. See [Shutdown](../README.md#shutdown).
 
 ## `auth`
 

@@ -1,6 +1,6 @@
-// Middleware for MCP requests: one turns a panic in any request into an internal error, and
-// one drops null tool arguments and turns every tool error, including a handler panic, into a
-// toolError.
+// Middleware for MCP requests: one turns a panic in any request into an internal error, one
+// cancels every request once the server shuts down, and one drops null tool arguments and turns
+// every tool error, including a handler panic, into a toolError.
 
 package server
 
@@ -16,6 +16,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/api/serviceerror"
+	"google.golang.org/grpc/codes"
 )
 
 // recoverPanics answers a request that panics with an internal error: the SDK does not recover, so the panic would end the process.
@@ -28,6 +30,21 @@ func recoverPanics(logger *slog.Logger) mcp.Middleware {
 					res, err = nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
 				}
 			}()
+			return next(ctx, method, req)
+		}
+	}
+}
+
+var errServerShutdown = errors.New("the server is shutting down")
+
+// cancelWith cancels each request with errServerShutdown once stop is done. The SDK cancels a request only when its
+// HTTP request ends, and only for MCP 2026-07-28 and later.
+func cancelWith(stop context.Context) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			ctx, cancel := context.WithCancelCause(ctx)
+			defer cancel(nil)
+			defer context.AfterFunc(stop, func() { cancel(errServerShutdown) })()
 			return next(ctx, method, req)
 		}
 	}
@@ -61,7 +78,17 @@ func normalizeToolCalls(next mcp.MethodHandler) mcp.MethodHandler {
 		if !ok || err != nil || !r.IsError {
 			return res, err
 		}
-		if te := (*toolError)(nil); errors.As(r.GetError(), &te) {
+		var te *toolError
+		cause := r.GetError()
+		if errors.As(cause, &te) {
+			cause = te.cause
+		}
+		// Only cancellation caused by shutdown is retryable. A successful call,
+		// client cancellation or unrelated failure keeps its original result.
+		if errors.Is(context.Cause(ctx), errServerShutdown) && serviceerror.ToStatus(cause).Code() == codes.Canceled {
+			return errorResult(&toolError{Code: "server_shutting_down", Message: errServerShutdown.Error(), Retryable: true}), nil
+		}
+		if te != nil {
 			return errorResult(te), nil
 		}
 		if msg, found := strings.CutPrefix(fmt.Sprint(r.GetError()), `validating "arguments": `); found {

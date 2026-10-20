@@ -20,13 +20,19 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// DefaultShutdownTimeout is the ShutdownTimeout of a config that does not set one.
+const DefaultShutdownTimeout = 8 * time.Second
+
 // Config is the server configuration.
 type Config struct {
 	// Listen is the host:port the HTTP server binds to. Without Auth, the host must be a loopback IP.
 	Listen string `yaml:"listen"`
 	// ListenTLS, when set, makes the server serve HTTPS on Listen rather than plain HTTP.
 	ListenTLS *Certificate `yaml:"listen_tls"`
-	Targets   []Target     `yaml:"targets"`
+	// ShutdownTimeout is how long the server waits for the tool calls in progress
+	// after SIGINT or SIGTERM before it cancels them. Zero means DefaultShutdownTimeout.
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	Targets         []Target      `yaml:"targets"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
@@ -329,6 +335,9 @@ func (c *Config) validateHTTP() error {
 	}
 	if err := validateCertificate("listen_tls", c.ListenTLS); err != nil {
 		errs = append(errs, err)
+	}
+	if c.ShutdownTimeout < 0 {
+		errs = append(errs, fmt.Errorf("shutdown_timeout: %s is negative", c.ShutdownTimeout))
 	}
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)

@@ -159,13 +159,16 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // whose record cannot be written fails. logger gets the cause of each internal
 // error. When auth has more than one issuer, it also gets a warning for each
 // rule without an issuer.
+// Once ctx is done, the server cancels each request in progress and each
+// request it gets, whatever its MCP protocol version, so tool calls end with
+// outcome cancelled.
 // It fails if cfg has an auth section but no authorization, or if an
 // authorization profile names a tool the server does not have.
-func NewServer(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
+func NewServer(ctx context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")
 	}
-	s, tools := newServer(name, version, cfg, clients, payloads, records, logger)
+	s, tools := newServer(ctx, name, version, cfg, clients, payloads, records, logger)
 	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
 		return nil, err
 	}
@@ -210,10 +213,10 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true, DisableLocalhostProtection: cfg.Auth != nil})
 }
 
-// newServer returns the MCP server and the names of its tools.
-func newServer(name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
+// newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
+func newServer(ctx context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
 	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
-	s.AddReceivingMiddleware(recoverPanics(logger), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
+	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
 	return s, addTools(s, cfg, clients, payloads)
 }
 

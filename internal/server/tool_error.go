@@ -48,7 +48,7 @@ func lookupTarget(ctx context.Context, cfg *config.Config, name string) (*config
 }
 
 func temporalError(err error, t *config.Target, p *peer.Peer, server string) error {
-	e := &toolError{Code: "temporal_unavailable", Message: rpcErrorMessage(err, t, p, server)}
+	e := &toolError{Code: "temporal_unavailable", Message: rpcErrorMessage(err, t, p, server), cause: err}
 	switch serviceerror.ToStatus(err).Code() {
 	case codes.NotFound:
 		if !errors.As(err, new(*serviceerror.NamespaceNotFound)) {

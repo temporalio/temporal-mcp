@@ -21,8 +21,8 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/grpc"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 const maxContinuation = 4096
@@ -148,20 +148,21 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 }
 
 // checkFields returns an invalid_argument error naming, in the order given, each name in fields that is not
-// workflow_id, run_id or a search attribute on t. Names in coreSearchAttributes, names already listed for t and, on
-// Temporal Cloud, names with Temporal's reserved prefix (which may be built-ins newer than this server's sadefs) need
-// no call; otherwise t's search attributes are listed once, and if that fails, every name passes unchecked.
+// workflow_id, run_id or a search attribute on t. Names in coreSearchAttributes, names already listed for t and, on a
+// Temporal Cloud target with an API key, names with Temporal's reserved prefix (which may be built-ins newer than this
+// server's sadefs) need no call; otherwise t's search attributes are listed once, and if the listing fails or is
+// incomplete, every name passes unchecked.
 func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
-	cloud := clients.CloudOps(t.Name) != nil
+	hasCloudOps := clients.CloudOps(t.Name) != nil
 	passes := func(f string) bool {
 		_, core := coreSearchAttributes[f]
-		return core || names.has(t.Name, f) || cloud && strings.HasPrefix(f, sadefs.ReservedPrefix)
+		return core || names.has(t.Name, f) || hasCloudOps && strings.HasPrefix(f, sadefs.ReservedPrefix)
 	}
 	if !slices.ContainsFunc(fields, func(f string) bool { return !passes(f) }) {
 		return nil
 	}
 	// fetchSearchAttributes stores t's names, so passes now checks fields against this listing.
-	if _, _, err := fetchSearchAttributes(ctx, clients, names, t); err != nil {
+	if _, _, complete, err := fetchSearchAttributes(ctx, clients, names, t); err != nil || !complete {
 		return nil
 	}
 	var bad []string

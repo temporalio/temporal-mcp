@@ -1,7 +1,7 @@
 // Acceptance runs one of the four acceptance sessions, in which a Codex agent investigates a Temporal problem
-// through operator-mcp. It builds operator-mcp from this module, starts a Temporal dev server, seeds the
-// session's workflows, runs the agent command with the session's scenario, and then stops the workers and the
-// dev server. With --noisy, it seeds the workflows of all four sessions, not only the chosen one. With
+// through temporal-operator-mcp. It builds temporal-operator-mcp from this module, starts a Temporal dev server,
+// seeds the session's workflows, runs the agent command with the session's scenario, and then stops the workers
+// and the dev server. With --noisy, it seeds the workflows of all four sessions, not only the chosen one. With
 // --scenario, it renders the template at that path in place of the session's scenario. Like the templates in the
 // scenarios directory, the template gets the server's binary, config file and repository root as .Server, .Config
 // and .Root, and .Deployed once Session 3 is seeded and .IncidentStart and .IncidentEnd once Session 4 is.
@@ -42,7 +42,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/temporalio/operator-mcp/internal/fixture"
+	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
 )
 
 //go:embed scenarios
@@ -84,7 +84,7 @@ func run(session int, noisy bool, scenarioTemplate string, command []string) (in
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
-	dir, err := os.MkdirTemp("", "operator-mcp-acceptance-")
+	dir, err := os.MkdirTemp("", "temporal-operator-mcp-acceptance-")
 	if err != nil {
 		return 0, err
 	}
@@ -164,7 +164,7 @@ func buildServer(ctx context.Context, dir string) (root, bin string, err error) 
 	if err != nil {
 		return "", "", fmt.Errorf("go list: %w", err)
 	}
-	root, bin = strings.TrimSpace(string(out)), filepath.Join(dir, "operator-mcp")
+	root, bin = strings.TrimSpace(string(out)), filepath.Join(dir, "temporal-operator-mcp")
 	build := exec.CommandContext(ctx, "go", "build", "-o", bin, ".")
 	build.Dir, build.Stderr = root, os.Stderr
 	if err := build.Run(); err != nil {

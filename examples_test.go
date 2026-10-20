@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/server"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/server"
 )
 
 // TestExamplesLoad loads each config in examples/, those named stdio*.yaml as

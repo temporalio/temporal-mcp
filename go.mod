@@ -1,19 +1,19 @@
-module github.com/temporalio/operator-mcp
+module github.com/temporalio/temporal-operator-mcp
 
 go 1.27.2
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.1-0.20260914075210-e40f35d137b7
-	go.temporal.io/api v1.63.5
+	go.temporal.io/api v1.63.6
 	go.temporal.io/cloud-sdk v0.20.0
 	go.temporal.io/sdk v1.49.0
 	go.temporal.io/server v1.32.0
 	go.yaml.in/yaml/v3 v3.0.5
 	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 )
 
 require (

@@ -22,6 +22,9 @@ import (
 // codecTimeout bounds a codec request: a tool call's own context ends only when its client goes away.
 var codecTimeout = 10 * time.Second
 
+// codecClient does not follow redirects, which could carry the authorization header to plain HTTP.
+var codecClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
 // maxCodecResponse bounds the codec response read into memory, at the Temporal client's limit on a Temporal response.
 const maxCodecResponse = 128 << 20
 
@@ -71,13 +74,17 @@ func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb
 		}
 		req.Header.Set("Authorization", v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := codecClient.Do(req)
 	if err != nil {
 		return nil, &codecError{requestFailure(err), err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &codecError{fmt.Sprintf("the codec server responded HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode)), nil}
+		reason := fmt.Sprintf("the codec server responded HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		if resp.StatusCode/100 == 3 {
+			reason += "; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode"
+		}
+		return nil, &codecError{reason, nil}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCodecResponse+1))
 	if err != nil {

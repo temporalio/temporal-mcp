@@ -1,6 +1,6 @@
 // The list_search_attributes tool, which lists the search attributes a target's Visibility
 // queries can use. Temporal Cloud refuses OperatorService calls from customer credentials,
-// so on Cloud the custom attributes come from the Cloud Ops API.
+// so on Cloud the custom attributes come from the Cloud Ops API, which takes only API keys.
 
 package server
 
@@ -19,8 +19,8 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/grpc"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 type listSearchAttributesInput struct {
@@ -77,7 +77,7 @@ func listSearchAttributes(cfg *config.Config, clients *temporal.Clients, names *
 		if err != nil {
 			return nil, envelope[searchAttributeList]{}, err
 		}
-		custom, system, err := fetchSearchAttributes(ctx, clients, names, t)
+		custom, system, complete, err := fetchSearchAttributes(ctx, clients, names, t)
 		if err != nil {
 			return nil, envelope[searchAttributeList]{}, err
 		}
@@ -90,34 +90,37 @@ func listSearchAttributes(cfg *config.Config, clients *temporal.Clients, names *
 		slices.SortFunc(list.SearchAttributes, func(a, b searchAttributeInfo) int {
 			return cmp.Or(strings.Compare(a.Category, b.Category), strings.Compare(a.Name, b.Name))
 		})
-		return nil, envelope[searchAttributeList]{Target: &t.Name, Result: list, Complete: true}, nil
+		return nil, envelope[searchAttributeList]{Target: &t.Name, Result: list, Complete: complete}, nil
 	}
 }
 
-// fetchSearchAttributes returns t's custom and system search attributes, and stores their names in names.
-func fetchSearchAttributes(ctx context.Context, clients *temporal.Clients, names *searchAttributeNames, t *config.Target) (custom, system map[string]enumspb.IndexedValueType, err error) {
+// fetchSearchAttributes returns t's custom and system search attributes and whether that is all of them, and stores
+// their names in names only when it is.
+func fetchSearchAttributes(ctx context.Context, clients *temporal.Clients, names *searchAttributeNames, t *config.Target) (custom, system map[string]enumspb.IndexedValueType, complete bool, err error) {
 	switch ops := clients.CloudOps(t.Name); {
 	case ops != nil:
 		resp, err := callServer(ctx, t, cloudOpsAPI, func(ctx context.Context, opts ...grpc.CallOption) (*cloudservice.GetNamespaceResponse, error) {
 			return ops.GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: t.Namespace}, opts...)
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		custom, system = map[string]enumspb.IndexedValueType{}, cloudSystemSearchAttributes
 		for name, typ := range resp.GetNamespace().GetSpec().GetSearchAttributes() {
 			// The Cloud Ops API's type names are the IndexedValueType names with another prefix.
 			custom[name] = enumspb.IndexedValueType(enumspb.IndexedValueType_value["INDEXED_VALUE_TYPE_"+strings.TrimPrefix(typ.String(), "SEARCH_ATTRIBUTE_TYPE_")])
 		}
+	case temporal.IsCloud(t.Address):
+		return map[string]enumspb.IndexedValueType{}, cloudSystemSearchAttributes, false, nil
 	default:
 		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*operatorservice.ListSearchAttributesResponse, error) {
 			return clients.Client(t.Name).OperatorService().ListSearchAttributes(ctx, &operatorservice.ListSearchAttributesRequest{Namespace: t.Namespace}, opts...)
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		custom, system = resp.GetCustomAttributes(), resp.GetSystemAttributes()
 	}
 	names.store(t.Name, custom, system)
-	return custom, system, nil
+	return custom, system, true, nil
 }

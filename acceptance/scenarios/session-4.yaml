@@ -1,5 +1,5 @@
 version: 1
-name: operator-mcp-session-4
+name: temporal-operator-mcp-session-4
 session:
   provider: codex
   sandbox: read-only

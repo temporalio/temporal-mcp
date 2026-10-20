@@ -23,7 +23,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
 )
 
 func newRenderer(t *testing.T, endpoint string, auth *config.Secret, logs io.Writer) *Renderer {
@@ -281,6 +281,13 @@ func TestRenderFailsClosed(t *testing.T) {
 	}))
 	t.Cleanup(cut.Close)
 
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the codec client followed the codec server's redirect")
+	}))
+	t.Cleanup(redirectTarget.Close)
+	redirect := httptest.NewServer(http.RedirectHandler(redirectTarget.URL, http.StatusTemporaryRedirect))
+	t.Cleanup(redirect.Close)
+
 	const customerData = "customer data"
 	malformed := respond(http.StatusOK, `{"payloads":[{"data":"`+customerData+`"}]}`)
 
@@ -292,6 +299,8 @@ func TestRenderFailsClosed(t *testing.T) {
 		timeout  time.Duration
 	}{
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized", 0},
+		{"redirect", redirect.URL, nil, "the codec server responded HTTP 307 Temporary Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
+		{"permanent redirect", respond(http.StatusPermanentRedirect, ""), nil, "the codec server responded HTTP 308 Permanent Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
 		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads", 0},
 		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent", 0},
 		{"unreachable", closed, nil, "the request to the codec server failed", 0},

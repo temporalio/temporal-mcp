@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 type fakeCloudService struct {
@@ -70,8 +70,13 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("key-1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dir := t.TempDir()
+	certificate := &config.Certificate{CertFile: filepath.Join(dir, "tls.crt"), KeyFile: filepath.Join(dir, "tls.key")}
+	_, cert, key := newCertificate(t, "client")
+	writeCertificate(t, certificate, cert, key)
 	cfg := &config.Config{Targets: []config.Target{
 		{Name: "cloud", Description: "x", Address: "us-east-1.aws.api.temporal.io:7233", Namespace: "orders.acct1", APIKey: &config.Secret{File: keyPath}},
+		{Name: "cloud-mtls", Description: "x", Address: "orders.acct1.tmprl.cloud:7233", Namespace: "orders.acct1", TLS: certificate},
 	}}
 	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
 	if err != nil {
@@ -135,6 +140,24 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		defer fake.mu.Unlock()
 		if want := []string{"orders.acct1 Bearer key-1", "orders.acct1 Bearer key-2"}; !reflect.DeepEqual(fake.calls, want) {
 			t.Errorf("Cloud Ops API calls = %q, want %q", fake.calls, want)
+		}
+	})
+
+	t.Run("without API key", func(t *testing.T) {
+		fake.mu.Lock()
+		fake.calls = nil
+		fake.mu.Unlock()
+		env, custom, system, calls := list(t, "cloud-mtls")
+		if env["complete"] != false || len(custom) != 0 || !reflect.DeepEqual(system, wantSystem) || calls != 0 {
+			t.Errorf("complete = %v, custom = %v, system = %v, temporal_calls = %v; want false, none, %v and 0", env["complete"], custom, system, calls, wantSystem)
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if len(fake.calls) != 0 {
+			t.Errorf("Cloud Ops API calls = %q, want none", fake.calls)
+		}
+		if err := checkFields(t.Context(), nil, cfg, clients, &searchAttributeNames{}, &cfg.Targets[1], []string{"OrderId"}); err != nil {
+			t.Errorf("checkFields = %v, want a field it cannot check to pass", err)
 		}
 	})
 

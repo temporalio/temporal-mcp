@@ -1,6 +1,6 @@
 # Config reference
 
-`operator-mcp` reads its configuration from one YAML file, passed with `--config`, and rejects any key it does not know. In HTTP mode, the default, the server serves MCP over HTTP or HTTPS to many users and can authenticate them. In `--stdio` mode it serves the one agent (the AI application, an MCP client) that launches it, over stdin and stdout. [`examples/`](../examples) has a working config for each mode.
+`temporal-operator-mcp` reads its configuration from one YAML file, passed with `--config`, and rejects any key it does not know. In HTTP mode, the default, the server serves MCP over HTTP or HTTPS to many users and can authenticate them. In `--stdio` mode it serves the one agent (the AI application, an MCP client) that launches it, over stdin and stdout. [`examples/`](../examples) has a working config for each mode.
 
 ## Config file layout
 
@@ -12,13 +12,20 @@ targets:
     address: <host:port>
     namespace: <string>
     [ api_key: <secret> ]
+    [ tls:
+        cert_file: <filename>
+        key_file: <filename> ]
     [ payload_handling: <string> | default = omit ]
     [ codec: <string> ]
 
 [ codecs:
     <string>:
       endpoint: <url>
+      [ allow_plain_http: <boolean> | default = false ]
       [ authorization_header: <secret> ] ]
+
+[ audit_log_file: <filename> ]
+[ error_log_file: <filename> ]
 
 # HTTP mode only.
 listen: <host:port>
@@ -61,11 +68,18 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `description` (string, required): What the target is, shown to agents so they can pick the right one.
 - `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`.
 - `namespace` (string, required): The Temporal namespace, such as `my-namespace.a1b2c` or `default`.
-- `api_key` (secret, optional): Where to read the API key the server connects with.
+- `api_key` (secret, optional): Where to read the API key the server connects with. `api_key:` with no value is an error.
+- `tls` (optional): A client certificate the server presents to the target instead of an API key, as Temporal Cloud namespaces that use mTLS require. It is not allowed with `api_key`, and `tls:` with no value is an error.
+  - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
+  - `key_file` (filename, required): Path of the certificate's PEM private key.
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the codec server in `codecs` that decodes the target's payloads. When set, it must be a key of `codecs`. It is ignored unless `payload_handling` is `decode`.
 
-With an `api_key`, the server connects to the target over TLS and sends the key with each call. Without one, it connects in plaintext with no credentials, as for a local dev server. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use.
+With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
+
+The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use. On Temporal Cloud, a namespace that accepts only client certificates has no read-only option until you turn on API keys for it.
+
+With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection.
 
 ## Payloads and `codecs`
 
@@ -77,8 +91,20 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
-- `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `http` or `https` URL with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header.
-- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
+- `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address (or for any host with `allow_plain_http: true`), with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header. The server does not follow redirects, so the endpoint must be the codec server's final URL.
+- `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
+- `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `temporal-operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
+
+An `https` codec server's certificate must chain to a [trusted CA](#trusted-cas).
+
+## `audit_log_file` and `error_log_file`
+
+Optional in both modes. These send the server's audit records and logs to files.
+
+- `audit_log_file` (filename, optional): The file the server appends its audit records to, one line of JSON for each tool call that passes the token check. Without it, the records go to stdout in HTTP mode and to stderr in `--stdio` mode.
+- `error_log_file` (filename, optional): The file the server appends its logs to. Without it, the logs go to stderr in both modes. The `listening on` line and any error that stops the server still go to stderr.
+
+The server creates each file with mode 0600 if it does not exist, and does not start if it cannot open one of them. It opens each file once, at startup, and never reopens it, so rotate the files with logrotate's `copytruncate` or restart the server after rotating them. Otherwise, after a rotation that renames a file, the server keeps writing to the renamed file, and its records are lost once that file is deleted.
 
 ## `listen` and `listen_tls`
 
@@ -89,18 +115,24 @@ These say where and how the server serves MCP in HTTP mode, and are not allowed 
   - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
   - `key_file` (filename, required): Path of the certificate's PEM private key.
 
-The server does not start if it cannot load the certificate and key. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
+The server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
 
 ## `auth`
 
 Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from one of the `issuers`, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
+
+An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, and carrying this server's `audience` in their `aud` claim.
+
+When the agent signs the user in, it asks for the scopes in `scopes_supported` and sends the `resource` URL as the OAuth `resource` parameter. Register this server as an API with the provider, with `resource` as its identifier where the provider allows it, list that API's scope in `scopes_supported`, and copy `audience` from a decoded access token.
+
+The agent also needs a client ID the provider accepts, either a URL from which the provider reads the agent's details (a client ID metadata document) or one the agent registers for itself (dynamic client registration), if the provider and the agent both support it. Otherwise, register a public client (one with no secret) with the provider that uses PKCE, and have users enter its client ID in their agent. Its redirect URI is usually a loopback URL on a port the agent picks at random, so the provider must accept any port there.
 
 - `resource` (url, required): The URL at which agents reach this server's MCP endpoint, such as `https://temporal-mcp.example.com/mcp`.
 - `issuers` (list, required): The identity providers whose access tokens the server accepts, at least one.
   - `issuer` (url, required): The exact `iss` claim of the provider's tokens, including any trailing slash. Each must be unique. When the server first verifies a token from an issuer, it fetches the `issuer` URL, without any trailing slash, followed by `/.well-known/openid-configuration`, and the `issuer` in that document must equal this value exactly.
   - `audience` (string, required): A value the `aud` claim of a token for this server must contain. It must identify this server as an API, such as its resource URL or API identifier, and never the client app users sign in with, because ID tokens issued to that app carry the same `aud` and would pass as access tokens. Copy it from the `aud` claim of a decoded access token for this server.
 - `authorization_servers` (list of urls, default each `issuer`): Where agents are told to get tokens. Set it only if that differs from the `issuer` URLs.
-- `scopes_supported` (list of strings, optional): The scopes advertised to agents, in the metadata and in the `WWW-Authenticate` challenge. They do not grant or deny access. Each must be non-empty and contain only printable ASCII characters other than space, `"` and `\`.
+- `scopes_supported` (list of strings, optional): The scopes advertised to agents, in the metadata and in the `WWW-Authenticate` challenge. The server does not use them to grant or deny access, but with some providers they decide the token's `aud`, as described above. Each must be non-empty and contain only printable ASCII characters other than space, `"` and `\`.
 
 `resource`, each `issuer` and each `authorization_servers` entry must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address, with a host and no user info, query or fragment.
 
@@ -123,16 +155,21 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has only `targets` and, optionally, `codecs`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. There is no authorization: the targets' API keys decide what the developer can read.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file` and `error_log_file`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+
+## Trusted CAs
+
+The server checks that the certificate of everything it connects to over TLS, whether a target, a codec server, the Temporal Cloud Ops API or an identity provider, chains to a CA (certificate authority) the machine trusts. To add a private CA, such as one that signs a self-hosted Temporal server's certificate, set the `SSL_CERT_FILE` or `SSL_CERT_DIR` environment variable. Either one can replace the machine's trusted CAs for all of those connections, so it must include the public CAs too. A path to a file that does not exist can leave the server trusting no CA, with no error at startup. On macOS, adding the CA to the keychain and marking it trusted also works and keeps the public CAs, but only while neither variable is set.
 
 ## Types
 
 - `<string>`: A YAML string.
+- `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
-- `<filename>`: The path of a file on the machine the server runs on.
+- `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding the secret. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.
 
-  A secret field with no value, such as `api_key:` on its own line, is the same as leaving the field out.
+  A secret field with no value, such as `authorization_header:` on its own line, is an error.

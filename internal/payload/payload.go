@@ -24,7 +24,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/converter"
 
-	"github.com/temporalio/operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
 )
 
 // Field is a payload in a tool response. Batch.Render fills it in.

@@ -20,10 +20,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/identity"
-	"github.com/temporalio/operator-mcp/internal/payload"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/identity"
+	"github.com/temporalio/temporal-operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 // connect writes the server's logs and audit records to out.
@@ -37,6 +37,13 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveTools(t, cfg, clients, out, extra...)
+}
+
+// serveTools serves cfg's tools over clients, writing the server's logs and audit records to out, and returns a session
+// connected to it.
+func serveTools(t *testing.T, cfg *config.Config, clients *temporal.Clients, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(out, nil))
 	s, _ := newServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), out, logger)
 	for _, add := range extra {
@@ -116,16 +123,18 @@ func TestListAvailableTargets(t *testing.T) {
 		"result": map[string]any{
 			"targets": []any{
 				map[string]any{
-					"name":        "prod",
-					"aliases":     []any{"production", "prod-us"},
-					"namespace":   "payments.abc12",
-					"description": "Production payments namespace.",
+					"name":             "prod",
+					"aliases":          []any{"production", "prod-us"},
+					"namespace":        "payments.abc12",
+					"description":      "Production payments namespace.",
+					"payload_handling": "omit",
 				},
 				map[string]any{
-					"name":        "staging",
-					"aliases":     []any{},
-					"namespace":   "default",
-					"description": "Staging namespace on a local dev server.",
+					"name":             "staging",
+					"aliases":          []any{},
+					"namespace":        "default",
+					"description":      "Staging namespace on a local dev server.",
+					"payload_handling": "passthrough",
 				},
 			},
 		},
@@ -196,11 +205,12 @@ func TestToolCalls(t *testing.T) {
 }
 
 func TestToolErrorHasResultType(t *testing.T) {
-	h, err := NewMux(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), slog.New(slog.DiscardHandler))
+	logger := slog.New(slog.DiscardHandler)
+	s, err := NewServer(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(NewMux(s, &config.Config{}, logger))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if err != nil {
@@ -257,17 +267,17 @@ func TestNewMux(t *testing.T) {
 		callers <- identity.CallerFrom(ctx)
 		return nil, struct{}{}, nil
 	})
-	withAuth := httptest.NewServer(newMux(s.Server, authCfg, logger))
+	withAuth := httptest.NewServer(NewMux(s.Server, authCfg, logger))
 	t.Cleanup(withAuth.Close)
 	noSlashCfg := *authCfg
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
-	noSlash := httptest.NewServer(newMux(s.Server, &noSlashCfg, logger))
+	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	h, err := NewMux(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	plain, err := NewServer(t.Context(), "temporal-operator", "0", &config.Config{}, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutAuth := httptest.NewServer(h)
+	withoutAuth := httptest.NewServer(NewMux(plain, &config.Config{}, logger))
 	t.Cleanup(withoutAuth.Close)
 
 	tests := []struct {

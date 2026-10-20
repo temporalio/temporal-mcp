@@ -27,9 +27,9 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/payload"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 const maxHistoryPages = 10
@@ -68,8 +68,7 @@ func getWorkflowHistoryInputSchema() *jsonschema.Schema {
 	}
 	order := schema.Properties["order"]
 	order.Enum, order.Default = []any{"oldest_first", "newest_first"}, json.RawMessage(`"oldest_first"`)
-	limit := schema.Properties["limit"]
-	limit.Minimum, limit.Maximum, limit.Default = new(1.0), new(100.0), json.RawMessage("25")
+	boundPageSize(schema.Properties["limit"])
 	for _, id := range schema.Properties["event_range"].Properties {
 		id.Minimum = new(1.0)
 	}

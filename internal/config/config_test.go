@@ -25,8 +25,14 @@ func TestLoadValid(t *testing.T) {
   - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
 codecs:
   payments:
-    endpoint: http://codec.internal/{namespace}
+    endpoint: http://{namespace}.codec.internal
+    allow_plain_http: true
     authorization_header: {env: CODEC_AUTHORIZATION}
+  local:
+    endpoint: http://localhost:8081/{namespace}
+  secure:
+    endpoint: https://codec.example.com/{namespace}
+    allow_plain_http: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -57,10 +63,15 @@ codecs:
 			Namespace:   "dev",
 			Codec:       "payments",
 		}},
-		Codecs: map[string]Codec{"payments": {
-			Endpoint:            "http://codec.internal/{namespace}",
-			AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
-		}},
+		Codecs: map[string]Codec{
+			"payments": {
+				Endpoint:            "http://{namespace}.codec.internal",
+				AllowPlainHTTP:      true,
+				AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
+			},
+			"local":  {Endpoint: "http://localhost:8081/{namespace}"},
+			"secure": {Endpoint: "https://codec.example.com/{namespace}", AllowPlainHTTP: true},
+		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
@@ -92,6 +103,48 @@ func TestParseAuth(t *testing.T) {
 	}
 }
 
+func TestParseStdio(t *testing.T) {
+	const auth = "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n"
+	for _, tt := range []struct {
+		name, yaml string
+		want       []string
+	}{
+		{"targets only", validTargets, nil},
+		{"listen", "listen: 127.0.0.1:8080\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"empty listen", "listen: \"\"\n" + validTargets, []string{"listen: not allowed with --stdio"}},
+		{"listen_tls", "listen_tls: {cert_file: a.crt, key_file: a.key}\n" + validTargets, []string{"listen_tls: not allowed with --stdio"}},
+		{"auth", auth + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"empty auth", "auth:\n" + validTargets, []string{"auth: not allowed with --stdio"}},
+		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
+		{"codec authorization header with no value", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n", []string{`codecs: "c": authorization_header: exactly one of env or file is required`}},
+		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
+			"listen, listen_tls, auth, authorization: not allowed with --stdio",
+			"targets[0]: address is required",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseStdio([]byte(tt.yaml))
+			if tt.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !strings.HasPrefix(err.Error(), tt.want[0]) {
+				t.Errorf("error %q does not start with %q", err, tt.want[0])
+			}
+			for _, want := range tt.want[1:] {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
@@ -115,7 +168,7 @@ func TestParseAPIKey(t *testing.T) {
 }
 
 func TestSecretReader(t *testing.T) {
-	t.Setenv("OPERATOR_MCP_TEST_SECRET", " env-secret\n")
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
 	reader := func(s *Secret) func() (string, error) {
 		read, err := s.Reader()
@@ -124,8 +177,8 @@ func TestSecretReader(t *testing.T) {
 		}
 		return read
 	}
-	env, file := reader(&Secret{Env: "OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
-	t.Setenv("OPERATOR_MCP_TEST_SECRET", "changed")
+	env, file := reader(&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
 	for _, tt := range []struct {
 		read        func() (string, error)
 		write, want string
@@ -204,8 +257,8 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "unknown target field",
-			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    address: a:7233\n    namespace: a\n    tls: true\n",
-			want: []string{"field tls not found"},
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    address: a:7233\n    namespace: a\n    bogus: true\n",
+			want: []string{"field bogus not found"},
 		},
 		{
 			name: "missing listen",
@@ -244,7 +297,7 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "listen_tls without key_file",
-			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/operator-mcp/tls.crt}\n" + validTargets,
+			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/temporal-operator-mcp/tls.crt}\n" + validTargets,
 			want: []string{"listen_tls: cert_file and key_file are both required"},
 		},
 		{
@@ -346,6 +399,28 @@ func TestParseInvalid(t *testing.T) {
 			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
 		},
 		{
+			name: "api key with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    api_key:\n",
+			want: []string{"targets[0]: api_key: exactly one of env or file is required"},
+		},
+		{
+			name: "tls with no value",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    tls:\n",
+			want: []string{"targets[0]: tls: cert_file and key_file are both required"},
+		},
+		{
+			name: "tls without key_file",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, tls: {cert_file: /certs/a.crt}}\n",
+			want: []string{"targets[0]: tls: cert_file and key_file are both required"},
+		},
+		{
+			name: "api key and tls",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}, tls: {cert_file: /certs/a.crt, key_file: /certs/a.key}}\n",
+			want: []string{"targets[0]: at most one of api_key or tls is allowed"},
+		},
+		{
 			name: "inline api key",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: secret}\n",
@@ -369,13 +444,25 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `codecs:
   none: {}
   grpc: {endpoint: "grpc://{namespace}.codec.example.com"}
+  plain: {endpoint: "http://{namespace}.codec.example.com"}
   neither: {endpoint: https://codec.example.com, authorization_header: {}}
 `,
 			want: []string{
 				`codecs: "none": endpoint is required`,
-				`codecs: "grpc": endpoint: "grpc://{namespace}.codec.example.com" must be an http or https URL with a host and no user info, query or fragment`,
+				`codecs: "grpc": endpoint: "grpc://{namespace}.codec.example.com" must be an https URL (http only for a loopback host, or for any host with allow_plain_http: true) with a host and no user info, query or fragment`,
+				`codecs: "plain": endpoint: "http://{namespace}.codec.example.com" must be an https URL (http only for a loopback host, or for any host with allow_plain_http: true) with a host and no user info, query or fragment`,
 				`codecs: "neither": authorization_header: exactly one of env or file is required`,
 			},
+		},
+		{
+			name: "codec authorization header with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n",
+			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
+		},
+		{
+			name: "codec authorization header with its lines commented out",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n      # env: CODEC_AUTH\n      # file: /keys/codec\n",
+			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
 		},
 		{
 			name: "auth with no value",

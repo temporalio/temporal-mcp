@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -40,9 +39,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/fixture"
-	"github.com/temporalio/operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
+	"github.com/temporalio/temporal-operator-mcp/internal/payload"
 )
 
 func describeWithSearchAttributes(fields map[string]*commonpb.Payload) *workflowservice.DescribeWorkflowExecutionResponse {
@@ -118,7 +117,7 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 	}
 	cfg := &config.Config{Targets: []config.Target{{Name: "t", PayloadHandling: config.PayloadPassthrough}}}
 	payloads := newRenderer(t, cfg, slog.New(slog.DiscardHandler))
-	beat := `[{"handling":"passthrough","encoding":"json/plain","data":"ImJlYXQi"}]`
+	beat := `[{"handling":"passthrough","value":"beat"}]`
 
 	// want is [encoded_attributes, last_heartbeat_details].
 	tests := []struct {
@@ -132,7 +131,7 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 				EncodedAttributes: encoded,
 				FailureInfo:       &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: &failurepb.ApplicationFailureInfo{Type: "T"}},
 			},
-			want: `[{"handling":"passthrough","encoding":"json/plain","data":"InNlY3JldCI="},[]]`,
+			want: `[{"handling":"passthrough","value":"secret"},[]]`,
 		},
 		{
 			name: "timeout",
@@ -238,9 +237,17 @@ func TestToolsOnDevServer(t *testing.T) {
 	if err := os.WriteFile(codecAuthorization, []byte("Bearer codec-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	exe, _ := exec.LookPath("temporal")
 	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ExistingPath: exe, ClientOptions: encoded, ExtraArgs: []string{
+	// encode returns value as the test's clients and workers store it.
+	encode := func(t *testing.T, value any) *commonpb.Payload {
+		t.Helper()
+		p, err := encoded.DataConverter.ToPayload(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ClientOptions: encoded, ExtraArgs: []string{
 		"--search-attribute", "OrderId=Keyword",
 		"--search-attribute", "SaInt=Int",
 		"--search-attribute", "SaDouble=Double",
@@ -641,25 +648,19 @@ func TestToolsOnDevServer(t *testing.T) {
 
 		t.Run("payload handling", func(t *testing.T) {
 			stored := func(value any) map[string]any {
-				p, err := converter.GetDefaultDataConverter().ToPayload(value)
-				if err != nil {
-					t.Fatal(err)
-				}
-				ps, err := zlib.Encode([]*commonpb.Payload{p})
-				if err != nil {
-					t.Fatal(err)
-				}
-				return map[string]any{"handling": "passthrough", "encoding": "binary/zlib", "data": base64.StdEncoding.EncodeToString(ps[0].GetData())}
+				return map[string]any{"handling": "passthrough", "encoding": "binary/zlib", "data": base64.StdEncoding.EncodeToString(encode(t, value).GetData())}
 			}
-			omitted := map[string]any{"handling": "omitted", "reason": "payload_handling"}
-			undecoded := map[string]any{"handling": "omitted", "reason": "decode_failed"}
+			omitted := func(reason string, value any) map[string]any {
+				return map[string]any{"handling": "omitted", "reason": reason, "encoding": "binary/zlib", "size_bytes": float64(len(encode(t, value).GetData()))}
+			}
+			result := map[string]string{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"}
 			for _, tt := range []struct {
 				target       string
 				result, memo map[string]any
 			}{
-				{"dev-passthrough", stored(map[string]string{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"}), stored("gift")},
-				{"dev-omit", omitted, omitted},
-				{"dev-unauthorized", undecoded, undecoded},
+				{"dev-passthrough", stored(result), stored("gift")},
+				{"dev-omit", omitted("payload_handling", result), omitted("payload_handling", "gift")},
+				{"dev-unauthorized", omitted("decode_failed", result), omitted("decode_failed", "gift")},
 			} {
 				t.Run(tt.target, func(t *testing.T) {
 					check(t, getWorkflow(t, map[string]any{"target": tt.target, "workflow_id": "order-completed"}), map[string]any{
@@ -1281,8 +1282,10 @@ func TestToolsOnDevServer(t *testing.T) {
 
 		t.Run("payload handling", func(t *testing.T) {
 			a := attributes(historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev-omit", "workflow_id": "order-88231", "limit": 1}))[0])
-			if omitted := map[string]any{"handling": "omitted", "reason": "payload_handling"}; !reflect.DeepEqual(a["input"], []any{omitted}) || !reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
-				t.Errorf("first event's input = %#v, search_attributes = %#v; want the input omitted and the search attributes decoded", a["input"], a["search_attributes"])
+			stored := encode(t, fixture.OrderInput{OrderID: "88231", CatalogShouldFail: true, RetryIntervalSeconds: 1})
+			omitted := map[string]any{"handling": "omitted", "reason": "payload_handling", "encoding": "binary/zlib", "size_bytes": float64(len(stored.GetData()))}
+			if !reflect.DeepEqual(a["input"], []any{omitted}) || !reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
+				t.Errorf("first event's input = %#v, search_attributes = %#v; want the input omitted with its encoding and size, and the search attributes decoded", a["input"], a["search_attributes"])
 			}
 		})
 

@@ -1,4 +1,5 @@
 /bin/
-/operator-mcp
+/temporal-operator-mcp
 .claude/
 .env
+/dist/

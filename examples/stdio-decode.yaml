@@ -1,0 +1,22 @@
+# --stdio with payloads decoded by a codec server, so tool responses show
+# workflow inputs and results. See docs/config.md.
+codecs:
+  payments:
+    # {namespace} is replaced with each target's namespace.
+    endpoint: https://codec.example.com/{namespace}
+    # The whole Authorization header value, such as "Bearer abc".
+    authorization_header: {env: PAYMENTS_CODEC_AUTHORIZATION}
+targets:
+  - name: payments-staging
+    description: Staging namespace of the payments service, on Temporal Cloud.
+    address: payments-staging.a1b2c.tmprl.cloud:7233
+    namespace: payments-staging.a1b2c
+    api_key: {env: PAYMENTS_STAGING_API_KEY}
+    payload_handling: decode
+    codec: payments
+  # Payloads in base64, as Temporal stores them.
+  - name: local
+    description: Local Temporal dev server.
+    address: localhost:7233
+    namespace: default
+    payload_handling: passthrough

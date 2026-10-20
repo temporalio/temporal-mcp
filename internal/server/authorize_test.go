@@ -32,8 +32,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"github.com/temporalio/operator-mcp/internal/config"
-	"github.com/temporalio/operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
 )
 
 func newTestIssuer(t *testing.T) (string, func(claims map[string]any) string) {
@@ -110,11 +110,11 @@ authorization:
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	h, err := NewMux(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
+	s, err := NewServer(t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(NewMux(s, cfg, logger))
 	t.Cleanup(srv.Close)
 	connectAs := func(t *testing.T, token string) *mcp.ClientSession {
 		t.Helper()
@@ -335,10 +335,10 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	}
 }
 
-func TestNewMuxRequiresAuthorizationWithAuth(t *testing.T) {
+func TestNewServerRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
-	if _, err := NewMux(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
-		t.Error("NewMux with auth and no authorization succeeded, want an error")
+	if _, err := NewServer(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
+		t.Error("NewServer with auth and no authorization succeeded, want an error")
 	}
 }
 
@@ -375,7 +375,7 @@ func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
 				},
 			}
 			var logs strings.Builder
-			if _, err := NewMux(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
+			if _, err := NewServer(t.Context(), "temporal-operator", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
 				t.Fatal(err)
 			}
 			if got := logs.String(); got != tc.want {
@@ -436,7 +436,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 			return nil, struct{}{}, nil
 		})
 	}
-	srv := httptest.NewServer(newMux(s.Server, cfg, logger))
+	srv := httptest.NewServer(NewMux(s.Server, cfg, logger))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: bearer(sign(map[string]any{}))}}, nil)
 	if err != nil {

@@ -1,99 +1,86 @@
-# operator-mcp
+# temporal-operator-mcp ([Pre-release])
 
-`operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP. It identifies itself to agents as `temporal-operator`.
+`temporal-operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can read and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, and search and count workflow runs with Visibility queries.
 
-Temporal Cloud targets with an API key also connect to the Cloud Ops API at `saas-api.tmprl.cloud:443` for `list_search_attributes` and `search_workflows`.
+> [!NOTE]
+>
+> **Pre-release:** This project is under active development and evolving quickly. It is not ready for production use.
+> Open a GitHub issue if you have questions or want to follow along.
+> If you're evaluating this project for your organization, read the [request for comment](REQUEST_FOR_COMMENT.md) and
+> reach out to your Temporal representative for guidance and to share feedback.
 
-## Prerequisites
+## Get started
 
-- Go 1.27 or later (see `go.mod`).
-- Optional: the `temporal` CLI on your `PATH`, which the end-to-end tests in `internal/server` use to start a Temporal dev server. Without it, the first test run downloads the CLI.
+These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio.
 
-## Build
+### Download
+
+Each [release](https://github.com/temporalio/temporal-operator-mcp/releases) has an archive for each platform: `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs, and `linux_amd64` and `linux_arm64`. Its "Source code" links are a copy of this repository, not the server. Set `platform` to yours, then download the archive, check that GitHub Actions built it from this repository, and extract `temporal-operator-mcp`:
+
+```sh
+platform=darwin_arm64
+gh release download --repo temporalio/temporal-operator-mcp --pattern "*_$platform.tar.gz"
+gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio/temporal-operator-mcp
+tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
+```
+
+On macOS, download with `gh` as above. A browser marks what it downloads with the `com.apple.quarantine` flag, and macOS won't run a binary with that flag unless it's notarized, which this one isn't. To run a binary from a browser download, remove the flag:
+
+```sh
+xattr -d com.apple.quarantine temporal-operator-mcp
+```
+
+### Configure
+
+`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
+
+### Connect
+
+Add `temporal-operator-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
+
+```sh
+claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+```
+
+For Codex:
+
+```sh
+codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+```
+
+Other agents take the same command, arguments and environment variables in their own config format.
+
+### Check
+
+Ask the agent to check its connection to Temporal. It calls `check_connection`.
+
+## Run a shared server
+
+For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+
+Without `--stdio`, `temporal-operator-mcp` serves MCP at `/mcp` on the config's `listen` address:
+
+```sh
+./temporal-operator-mcp --config config.yaml
+```
+
+## Audit records and logs
+
+`temporal-operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
+
+## Build from source
+
+With Go 1.27.2 or later:
 
 ```sh
 go build -o bin/ .
 ```
 
-This writes `bin/operator-mcp`.
-
-## HTTPS
-
-With a `listen_tls` section, `operator-mcp` serves HTTPS on `listen`. Without one, it serves plain HTTP, for running behind a reverse proxy or load balancer that terminates TLS.
-
-```yaml
-listen_tls:
-  cert_file: /etc/operator-mcp/tls.crt   # PEM certificate chain, leaf first
-  key_file: /etc/operator-mcp/tls.key    # PEM private key
-```
-
-A renewed certificate takes effect for new connections without a restart.
-
-## Auth
-
-Each issuer's `audience` must identify this server as an API, such as its resource URL or API identifier, never the client app users sign in with. ID tokens issued to that app have the same `aud`, so they would pass as access tokens. With Microsoft Entra ID v2, the audience is the client ID of the API's app registration, which must be a different registration from the one the MCP client signs in with.
-
-## Authorization
-
-A config with an `auth` section must also have an `authorization` section, which decides which tools each caller may use on which targets:
-
-```yaml
-authorization:
-  profiles:
-    oncall:
-      tools: [list_available_targets, check_connection, get_workflow]
-      targets: [payments-prod, payments-staging, orders-prod]
-    payments-dev:
-      tools: [list_available_targets, get_workflow]
-      targets: [payments-staging]
-  rules:
-    - {claim_name: groups, claim_value: temporal-oncall, profile: oncall}
-    - {claim_name: roles, claim_value: Temporal.PaymentsDev, profile: payments-dev}
-```
-
-- A profile lets a caller use each of its `tools` on each of its `targets`. Targets are named by `name`, not by alias.
-- A rule gives its `profile` to callers whose access token has the top-level claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry; a `scope` or `scp` string counts as a list separated by spaces. A scope records what the client was granted, not who the user is, so prefer groups or roles. Matching is exact and case-sensitive. A missing claim, or a claim of another type, does not match.
-- Copy rules from a decoded access token: `claim_name` is the claim's name exactly as it appears there, so names such as `cognito:groups` or `https://acme.example/roles` work as written, and `claim_value` is its value or one entry of its list.
-- Match only claims that neither the user nor the client can set, such as groups or roles your identity provider assigns, and configure only issuers that issue tokens to your users alone. A rule on a claim the user or client can choose, such as `email`, lets them choose their own profile, and on an issuer that issues tokens to anyone, such as a CI provider's OIDC endpoint, it lets anyone get that profile.
-- A rule with `issuer` matches only tokens from that issuer, which must be the `issuer` URL of one of the `auth.issuers` entries.
-- A caller gets every profile whose rule it matches. Profiles combine per target: a profile that gives `get_workflow` on one target and another that gives `check_connection` on a second do not give `get_workflow` on the second.
-- `tools/list` shows a caller only the tools it may use on some target. `list_available_targets` lists every target the caller may use some tool on.
-- A caller that matches no rule may use no tool and sees no target. Its token is still accepted.
-
-Without an `auth` section, an `authorization` section is not allowed, and every caller may use every tool on every target.
-
-With Microsoft Entra ID, match [app roles](https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps) in the `roles` claim rather than groups: the `groups` claim holds group object IDs by default, not names, and is left out of tokens for users in more than 200 groups. Use the app role's Value as `claim_value`, not its Display name.
-
-## Payloads
-
-Payloads are your application's data in Temporal: workflow inputs and results, memos, heartbeat details and failure details. Each target's `payload_handling` says how tool responses show them:
-
-- `omit`, the default, leaves payloads out. It hides only payloads: failure messages, stack traces, termination reasons and search attribute values are still shown.
-- `passthrough` returns them as Temporal stores them, in base64, which the model can read unless your codec encrypts them.
-- `decode` has the target's `codec` server decode them. If decoding fails, every payload in that response is left out, and the cause goes to the log.
-
-```yaml
-codecs:
-  payments:
-    endpoint: https://codec.payments.example.com
-    authorization_header: {env: PAYMENTS_CODEC_AUTHORIZATION}
-targets:
-  - name: payments-prod
-    # ...
-    payload_handling: decode
-    codec: payments
-```
-
-- `endpoint` is the same value as the CLI's `--codec-endpoint`, including its `{namespace}` placeholder.
-- `authorization_header`, which is optional, holds the whole `Authorization` header value, such as `Bearer abc`, like `--codec-auth`. Its `env` is read at startup and its `file` on every request. The codec server must accept this header from `operator-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does.
-
-## Audit
-
-`operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr.
+This writes `bin/temporal-operator-mcp`.
 
 ## Shutdown
 
-On SIGINT or SIGTERM, `operator-mcp` stops accepting connections and waits up to `shutdown_timeout` for the tool calls in progress to finish:
+In HTTP mode, on SIGINT or SIGTERM, `temporal-operator-mcp` stops accepting connections and waits up to `shutdown_timeout` for the tool calls in progress to finish:
 
 ```yaml
 shutdown_timeout: 25s # 8s if unset
@@ -103,7 +90,7 @@ It then cancels the calls still running, which get audit records with outcome `c
 
 Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
 
-A second signal stops `operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
+A second signal stops `temporal-operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
 
 ## Lint
 
@@ -125,8 +112,10 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-CI runs the tests with the race detector, which does not cover the `operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `temporal-operator-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...
 ```
+
+[Pre-release]: https://docs.temporal.io/evaluate/development-production-features/release-stages

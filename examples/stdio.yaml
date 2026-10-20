@@ -1,0 +1,15 @@
+# A developer's config for --stdio: the MCP client launches
+# temporal-operator-mcp and passes PAYMENTS_STAGING_API_KEY in its
+# environment. See docs/config.md.
+targets:
+  - name: payments-staging
+    aliases: [staging]
+    description: Staging namespace of the payments service, on Temporal Cloud.
+    address: payments-staging.a1b2c.tmprl.cloud:7233
+    namespace: payments-staging.a1b2c
+    api_key: {env: PAYMENTS_STAGING_API_KEY}
+  # A local dev server (temporal server start-dev): no API key, plaintext.
+  - name: local
+    description: Local Temporal dev server.
+    address: localhost:7233
+    namespace: default

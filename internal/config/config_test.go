@@ -110,6 +110,8 @@ func TestParseStdio(t *testing.T) {
 		want       []string
 	}{
 		{"targets only", validTargets, nil},
+		{"shutdown timeout", "shutdown_timeout: 500ms\n" + validTargets, nil},
+		{"negative shutdown timeout", "shutdown_timeout: -1s\n" + validTargets, []string{"shutdown_timeout: -1s is negative"}},
 		{"listen", "listen: 127.0.0.1:8080\n" + validTargets, []string{"listen: not allowed with --stdio"}},
 		{"empty listen", "listen: \"\"\n" + validTargets, []string{"listen: not allowed with --stdio"}},
 		{"listen_tls", "listen_tls: {cert_file: a.crt, key_file: a.key}\n" + validTargets, []string{"listen_tls: not allowed with --stdio"}},

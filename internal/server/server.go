@@ -49,6 +49,16 @@ func boundPageSize(p *jsonschema.Schema) {
 	p.Description += fmt.Sprintf(", from 1 to %d", maxPageSize)
 }
 
+// maxListItems is the most items a list argument, such as get_workflows' workflows, may have.
+const maxListItems = 50
+
+// boundList limits p, a list property, to 1 to maxListItems items, and key, the schema of each item's key, to a
+// nonempty string, and appends the range of items to p's description.
+func boundList(p, key *jsonschema.Schema) {
+	p.MinItems, p.MaxItems, key.MinLength = new(1), new(maxListItems), new(1)
+	p.Description += fmt.Sprintf(", from 1 to %d", maxListItems)
+}
+
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
 // A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it.
@@ -103,14 +113,15 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
 	}, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
-		Name:         "get_workflow",
-		Description:  "Get the current state of a workflow run. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut.",
+		Name:         "get_workflows",
+		Description:  fmt.Sprintf("Get the current state of up to %d workflow runs: for each item of workflows, the run its run_id names, or the workflow's latest run if run_id is omitted. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut. result has an entry for each item of workflows, in the order given. An item that the Temporal server reports not found or invalid, such as an unknown workflow or a malformed run_id, gets an error in its entry and no run, while the other entries are unaffected. Any other error reading an item fails the whole call, and its message starts with the item's path, such as workflows[3].", maxListItems),
 		Annotations:  readOnlyAnnotations,
-		OutputSchema: getWorkflowOutputSchema(),
+		InputSchema:  getWorkflowsInputSchema(),
+		OutputSchema: getWorkflowsOutputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
-	}, getWorkflow(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, getWorkflows(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:        "get_workflow_history",
 		Description: "Get the events of a workflow run's history, oldest first unless order is newest_first, each with its event_id, event_time, event_type and attributes; run_id in the result is the run read. event_types (event types, or the category failures: every event type that ends in Failed or TimedOut) and event_range filter the events, and combine. A call can return fewer than limit events, even none, while more events still match: until complete is true, call next_call's tool with its arguments unchanged for the rest.",
 		Annotations: readOnlyAnnotations,
@@ -120,13 +131,13 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
 	}, getWorkflowHistory(cfg, clients, payloads)), addTool(s, &mcp.Tool{
-		Name:        "get_task_queue",
-		Description: "Get a task queue's pollers and backlog, in one section for each task queue type asked for: up to 100 of its pollers, most recently polled first, and poller_count, the number of pollers (complete is false when the list is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error.",
+		Name:        "get_task_queues",
+		Description: fmt.Sprintf("Get the pollers and backlog of up to %d task queues, with a section in each for every task queue type asked for: up to %d of the type's pollers, most recently polled first, and poller_count, the number of pollers (complete is false when any section's list of pollers is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error. result has an entry for each name in task_queues, in the order given. A name that the Temporal server rejects as invalid, such as one that is too long, gets an error in its entry and no sections, while the other entries are unaffected. Any other error reading a task queue fails the whole call, and its message starts with the task queue's path, such as task_queues[3].", maxListItems, maxPollers),
 		Annotations: readOnlyAnnotations,
-		InputSchema: getTaskQueueInputSchema(),
+		InputSchema: getTaskQueuesInputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_DescribeTaskQueue_FullMethodName,
-	}, getTaskQueue(cfg, clients)), addTool(s, &mcp.Tool{
+	}, getTaskQueues(cfg, clients)), addTool(s, &mcp.Tool{
 		Name:        "search_workflows",
 		Description: "Search a target's workflow runs with a Visibility query (every run without one) and return a page of them. Each run has workflow_id, run_id and the search attributes asked for in fields, which uses the same names as query (see list_search_attributes); one the run lacks is null (HistoryLength, HistorySizeBytes, StateTransitionCount and ExecutionDuration are null until the run closes). For the next page, call next_call's tool with its arguments unchanged.",
 		Annotations: readOnlyAnnotations,

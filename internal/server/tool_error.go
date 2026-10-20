@@ -1,5 +1,6 @@
-// toolError, the structured error a tool returns, and the helpers that build one for a
-// target that is unknown or not authorized, or for a failed Temporal call.
+// toolError, the structured error a tool returns, the helpers that build one for a target
+// that is unknown or not authorized or for a failed Temporal call, and itemError, which
+// decides whether an error reading one item of a list fails the whole call.
 
 package server
 
@@ -64,4 +65,19 @@ func temporalError(err error, t *config.Target, p *peer.Peer, server string) err
 		e.Retryable = true
 	}
 	return e
+}
+
+// itemError returns err, from reading item i of the list argument named list, as that item's error if it is a
+// not_found or invalid_argument toolError, and otherwise as the error that fails the whole call, prefixing a
+// toolError's message with the item's path, such as workflows[3].
+func itemError(err error, list string, i int) (*toolError, error) {
+	var te *toolError
+	if !errors.As(err, &te) {
+		return nil, err
+	}
+	if te.Code == "not_found" || te.Code == "invalid_argument" {
+		return te, nil
+	}
+	te.Message = fmt.Sprintf("%s[%d]: %s", list, i, te.Message)
+	return nil, err
 }

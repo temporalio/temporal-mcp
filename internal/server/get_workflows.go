@@ -1,5 +1,5 @@
-// The get_workflow tool, which returns the current state of a workflow run and, for a
-// closed run, its result or failure.
+// The get_workflows tool, which returns the current state of each workflow run in a list
+// and, for a closed run, its result or failure.
 
 package server
 
@@ -35,10 +35,20 @@ const callTimeout = 10 * time.Second
 // The waits before each retry of an unavailable server: 1.4s in all, which spans the first reconnect attempts of the Temporal and Cloud Ops clients and still reports a server that stays down well inside callTimeout.
 var retryDelays = []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
-type getWorkflowInput struct {
-	Target     string `json:"target" jsonschema:"the name or an alias of a target"`
+type getWorkflowsInput struct {
+	Target    string        `json:"target" jsonschema:"the name or an alias of a target"`
+	Workflows []workflowRef `json:"workflows" jsonschema:"the workflow runs to get"`
+}
+
+type workflowRef struct {
 	WorkflowID string `json:"workflow_id" jsonschema:"the workflow ID"`
 	RunID      string `json:"run_id,omitempty" jsonschema:"the run ID; the latest run of the workflow if omitted"`
+}
+
+type workflowEntry struct {
+	workflowRef
+	Run   *workflowRun `json:"run"`
+	Error *toolError   `json:"error"`
 }
 
 type workflowRun struct {
@@ -110,18 +120,31 @@ type failure struct {
 // failureFields builds failure's $defs entry; jsonschema.For[failure] would return the $ref override.
 type failureFields failure
 
-func getWorkflowOutputSchema() *jsonschema.Schema {
+func getWorkflowsInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[getWorkflowsInput](nil)
+	if err != nil {
+		panic(fmt.Errorf("get_workflows: input schema: %w", err))
+	}
+	workflows := schema.Properties["workflows"]
+	boundList(workflows, workflows.Items.Properties["workflow_id"])
+	// Null-valued arguments are dropped only at the top level, so a null run_id in an item is allowed here.
+	runID := workflows.Items.Properties["run_id"]
+	runID.Type, runID.Types = "", []string{"null", "string"}
+	return schema
+}
+
+func getWorkflowsOutputSchema() *jsonschema.Schema {
 	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[failure](): {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
 	}}
 	def, err := jsonschema.For[failureFields](opts)
 	if err != nil {
-		panic(fmt.Errorf("get_workflow: failure schema: %w", err))
+		panic(fmt.Errorf("get_workflows: failure schema: %w", err))
 	}
 	def.Type, def.Types = "", []string{"null", "object"}
-	schema, err := jsonschema.For[envelope[workflowRun]](opts)
+	schema, err := jsonschema.For[envelope[[]workflowEntry]](opts)
 	if err != nil {
-		panic(fmt.Errorf("get_workflow: output schema: %w", err))
+		panic(fmt.Errorf("get_workflows: output schema: %w", err))
 	}
 	schema.Defs = map[string]*jsonschema.Schema{"failure": def}
 	return schema
@@ -132,53 +155,64 @@ type applicationFailure struct {
 	NonRetryable bool   `json:"non_retryable"`
 }
 
-func getWorkflow(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[getWorkflowInput, envelope[workflowRun]] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in getWorkflowInput) (*mcp.CallToolResult, envelope[workflowRun], error) {
+func getWorkflows(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[getWorkflowsInput, envelope[[]workflowEntry]] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in getWorkflowsInput) (*mcp.CallToolResult, envelope[[]workflowEntry], error) {
+		var none envelope[[]workflowEntry]
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
-			return nil, envelope[workflowRun]{}, err
-		}
-		if in.WorkflowID == "" {
-			return nil, envelope[workflowRun]{}, &toolError{Code: "invalid_argument", Message: "workflow_id is required"}
+			return nil, none, err
 		}
 		svc := clients.Client(t.Name).WorkflowService()
-		desc, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
-			return svc.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
-				Namespace: t.Namespace,
-				Execution: &commonpb.WorkflowExecution{WorkflowId: in.WorkflowID, RunId: in.RunID},
+		batch := payloads.Batch(t.Name)
+		entries := []workflowEntry{}
+		for i, w := range in.Workflows {
+			e := workflowEntry{workflowRef: w}
+			e.Run, err = readRun(ctx, t, svc, w, batch)
+			if e.Error, err = itemError(err, "workflows", i); err != nil {
+				return nil, none, err
+			}
+			entries = append(entries, e)
+		}
+		if err := batch.Render(ctx); err != nil {
+			return nil, none, err
+		}
+		return nil, envelope[[]workflowEntry]{Target: &t.Name, Result: entries, Complete: true}, nil
+	}
+}
+
+func readRun(ctx context.Context, t *config.Target, svc workflowservice.WorkflowServiceClient, w workflowRef, batch *payload.Batch) (*workflowRun, error) {
+	desc, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+		return svc.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
+			Namespace: t.Namespace,
+			Execution: &commonpb.WorkflowExecution{WorkflowId: w.WorkflowID, RunId: w.RunID},
+		}, opts...)
+	})
+	if err != nil {
+		return nil, err
+	}
+	run, err := describedRun(desc, batch)
+	if err != nil {
+		return nil, err
+	}
+	// Check the close time, not the status: a Paused run, for one, is open.
+	if desc.GetWorkflowExecutionInfo().GetCloseTime() != nil {
+		hist, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
+			return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{
+				Namespace:              t.Namespace,
+				Execution:              desc.GetWorkflowExecutionInfo().GetExecution(),
+				HistoryEventFilterType: enumspb.HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT,
 			}, opts...)
 		})
 		if err != nil {
-			return nil, envelope[workflowRun]{}, err
+			return nil, err
 		}
-		batch := payloads.Batch(t.Name)
-		run, err := describedRun(desc, batch)
-		if err != nil {
-			return nil, envelope[workflowRun]{}, err
+		events := hist.GetHistory().GetEvents()
+		if len(events) == 0 {
+			return nil, &toolError{Code: "temporal_unavailable", Message: "the Temporal server returned no close event for the closed run"}
 		}
-		// Check the close time, not the status: a Paused run, for one, is open.
-		if desc.GetWorkflowExecutionInfo().GetCloseTime() != nil {
-			hist, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
-				return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{
-					Namespace:              t.Namespace,
-					Execution:              desc.GetWorkflowExecutionInfo().GetExecution(),
-					HistoryEventFilterType: enumspb.HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT,
-				}, opts...)
-			})
-			if err != nil {
-				return nil, envelope[workflowRun]{}, err
-			}
-			events := hist.GetHistory().GetEvents()
-			if len(events) == 0 {
-				return nil, envelope[workflowRun]{}, &toolError{Code: "temporal_unavailable", Message: "the Temporal server returned no close event for the closed run"}
-			}
-			addCloseEvent(&run, events[0], batch)
-		}
-		if err := batch.Render(ctx); err != nil {
-			return nil, envelope[workflowRun]{}, err
-		}
-		return nil, envelope[workflowRun]{Target: &t.Name, Result: run, Complete: true}, nil
+		addCloseEvent(&run, events[0], batch)
 	}
+	return &run, nil
 }
 
 func callTemporal[Resp any](ctx context.Context, t *config.Target, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {

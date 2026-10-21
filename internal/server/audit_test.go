@@ -92,7 +92,7 @@ func TestAudit(t *testing.T) {
 		return session
 	}
 
-	s, _ := newServer("temporal-operator", "0", authCfg, clients, newRenderer(t, authCfg, logger), records, logger)
+	s, _ := newServer(t.Context(), "temporal-operator", "0", authCfg, clients, newRenderer(t, authCfg, logger), records, logger)
 	addTool(s, &mcp.Tool{Name: "fail"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 		return nil, struct{}{}, errors.New("dial tcp 10.0.0.1:7233: connection refused")
 	})
@@ -117,7 +117,7 @@ func TestAudit(t *testing.T) {
 	callToken.Store(&token)
 	authed := connectTo(NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
 	openCfg := &config.Config{Targets: targets}
-	open, _ := newServer("temporal-operator", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
+	open, _ := newServer(t.Context(), "temporal-operator", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
 	unauthed := connectTo(NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {
 		t.Fatal(err)
@@ -145,8 +145,8 @@ func TestAudit(t *testing.T) {
 	}{
 		{name: "ok", session: authed, tool: "check_connection", args: `{"target":"g","unused":null}`,
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "unused": nil}, "outcome": "ok", "temporal_calls": 1.0})},
-		{name: "denied tool", session: authed, tool: "get_workflow", args: `{"target":"g","workflow_id":"w"}`, callErr: `unknown tool "get_workflow"`,
-			record: alice(map[string]any{"tool": "get_workflow", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "workflow_id": "w"}, "outcome": "denied", "temporal_calls": 0.0})},
+		{name: "denied tool", session: authed, tool: "get_workflows", args: `{"target":"g","workflows":[{"workflow_id":"w"}]}`, callErr: `unknown tool "get_workflows"`,
+			record: alice(map[string]any{"tool": "get_workflows", "access": "read", "target": "granted", "arguments": map[string]any{"target": "g", "workflows": []any{map[string]any{"workflow_id": "w"}}}, "outcome": "denied", "temporal_calls": 0.0})},
 		{name: "denied target", session: authed, tool: "check_connection", args: `{"target":"u"}`,
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "ungranted", "arguments": map[string]any{"target": "u"}, "outcome": "denied", "temporal_calls": 0.0})},
 		{name: "unknown target", session: authed, tool: "check_connection", args: `{"target":"nope"}`,
@@ -168,8 +168,8 @@ func TestAudit(t *testing.T) {
 			log:    `level=ERROR msg="tool call failed" tool=deadline error="context deadline exceeded"`},
 		{name: "cancelled check_connection", session: unauthed, tool: "check_connection", args: `{"target":"hanging"}`, callErr: "context canceled",
 			record: map[string]any{"issuer": nil, "subject": nil, "tool": "check_connection", "access": "read", "target": "hanging", "arguments": map[string]any{"target": "hanging"}, "outcome": "cancelled", "temporal_calls": 1.0}},
-		{name: "cancelled get_workflow", session: unauthed, tool: "get_workflow", args: `{"target":"hanging","workflow_id":"w"}`, callErr: "context canceled",
-			record: map[string]any{"issuer": nil, "subject": nil, "tool": "get_workflow", "access": "read", "target": "hanging", "arguments": map[string]any{"target": "hanging", "workflow_id": "w"}, "outcome": "cancelled", "temporal_calls": 1.0}},
+		{name: "cancelled get_workflows", session: unauthed, tool: "get_workflows", args: `{"target":"hanging","workflows":[{"workflow_id":"w"}]}`, callErr: "context canceled",
+			record: map[string]any{"issuer": nil, "subject": nil, "tool": "get_workflows", "access": "read", "target": "hanging", "arguments": map[string]any{"target": "hanging", "workflows": []any{map[string]any{"workflow_id": "w"}}}, "outcome": "cancelled", "temporal_calls": 1.0}},
 		{name: "cancelled call that panics", session: authed, tool: "cancel_and_panic", args: `{}`, callErr: "context canceled",
 			record: alice(map[string]any{"tool": "cancel_and_panic", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
 			log:    `level=ERROR msg="tool call failed" tool=cancel_and_panic error="panic: boom-value\ngoroutine `},

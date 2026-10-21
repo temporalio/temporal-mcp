@@ -12,7 +12,7 @@ session:
       "command": {{json .Server}},
       "args": ["--stdio", "--config", {{json .Config}}],
       "cwd": {{json .Root}},
-      "expectedTools": ["list_available_targets", "search_workflows", "get_workflow", "get_workflow_history", "count_workflows", "get_task_queue"]
+      "expectedTools": ["list_available_targets", "search_workflows", "get_workflows", "get_workflow_history", "count_workflows", "get_task_queues"]
     }
 prompts:
   - "In orders prod, why did order 88231 fail?"

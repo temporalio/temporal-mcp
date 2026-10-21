@@ -12,7 +12,7 @@ session:
       "command": {{json .Server}},
       "args": ["--stdio", "--config", {{json .Config}}],
       "cwd": {{json .Root}},
-      "expectedTools": ["list_available_targets", "get_workflow", "get_workflow_history", "get_task_queue"]
+      "expectedTools": ["list_available_targets", "get_workflows", "get_workflow_history", "get_task_queues"]
     }
 prompts:
   - "In orders prod, is payment-reconciliation-main currently stuck? It normally finishes within 15 minutes. Please investigate."

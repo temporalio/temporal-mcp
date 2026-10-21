@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -20,14 +21,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc/oidctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/testsuite"
+	"google.golang.org/grpc"
 )
 
 func buildBinary(t *testing.T, buildArgs ...string) string {
@@ -44,6 +49,18 @@ func startServer(t *testing.T, bin, configPath string, stdout io.Writer) string 
 	t.Helper()
 	cmd := exec.Command(bin, "--config", configPath)
 	cmd.Stdout = stdout
+	url, stderr := start(t, cmd)
+	go func() {
+		for range stderr {
+		}
+	}()
+	return url
+}
+
+// start starts the server that cmd runs and returns the URL it listens on and
+// the lines it writes to stderr after that, which the caller must read to the end.
+func start(t *testing.T, cmd *exec.Cmd) (string, <-chan string) {
+	t.Helper()
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -63,27 +80,21 @@ func startServer(t *testing.T, bin, configPath string, stdout io.Writer) string 
 		}
 		close(lines)
 	}()
-	var url string
 	timeout := time.After(10 * time.Second)
-	for url == "" {
+	for {
 		select {
 		case line, ok := <-lines:
 			if !ok {
 				t.Fatal("server exited before listening")
 			}
 			t.Log(line)
-			if u, found := strings.CutPrefix(line, name+": listening on "); found {
-				url = u
+			if url, found := strings.CutPrefix(line, name+": listening on "); found {
+				return url, lines
 			}
 		case <-timeout:
 			t.Fatal("timed out waiting for server to listen")
 		}
 	}
-	go func() {
-		for range lines {
-		}
-	}()
-	return url
 }
 
 func writeCertificate(t *testing.T, certFile, keyFile string) *x509.CertPool {
@@ -330,7 +341,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	noTargets := writeConfig("listen: 0.0.0.0:0\ntargets: []\n")
 	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n" +
-		"authorization:\n  profiles: {p: {tools: [get_workflow, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
+		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
 		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY}}\n")
@@ -364,7 +375,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"client key does not match certificate", []string{"--config", mismatchedClientKey}, 1, "invalid config " + mismatchedClientKey + ": targets[0]: tls: tls: private key does not match public key"},
 		{"unopenable audit log", []string{"--config", unopenableAuditLog}, 1, "invalid config " + unopenableAuditLog + ": audit_log_file: open " + missingLog},
 		{"unopenable error log", []string{"--config", unopenableErrorLog}, 1, "invalid config " + unopenableErrorLog + ": error_log_file: open " + missingLog},
-		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflow`},
+		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -399,7 +410,7 @@ func TestAuthIssuerDownAtStartup(t *testing.T) {
 	config := fmt.Sprintf("listen: 127.0.0.1:0\n"+
 		"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"+
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: %q, audience: operator}]\n"+
-		"authorization:\n  profiles: {p: {tools: [get_workflow], targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n", issuer)
+		"authorization:\n  profiles: {p: {tools: [get_workflows], targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n", issuer)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -417,5 +428,247 @@ func TestAuthIssuerDownAtStartup(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+}
+
+// A blockingWorkflowService holds each DescribeNamespace or CountWorkflowExecutions call, after sending on
+// started, until release is closed or the call is cancelled.
+type blockingWorkflowService struct {
+	workflowservice.UnimplementedWorkflowServiceServer
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingWorkflowService) GetSystemInfo(context.Context, *workflowservice.GetSystemInfoRequest) (*workflowservice.GetSystemInfoResponse, error) {
+	return &workflowservice.GetSystemInfoResponse{}, nil
+}
+
+func (s *blockingWorkflowService) DescribeNamespace(ctx context.Context, _ *workflowservice.DescribeNamespaceRequest) (*workflowservice.DescribeNamespaceResponse, error) {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+		return &workflowservice.DescribeNamespaceResponse{}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *blockingWorkflowService) CountWorkflowExecutions(ctx context.Context, _ *workflowservice.CountWorkflowExecutionsRequest) (*workflowservice.CountWorkflowExecutionsResponse, error) {
+	_, err := s.DescribeNamespace(ctx, nil)
+	return &workflowservice.CountWorkflowExecutionsResponse{Count: 1}, err
+}
+
+// callShutdownTool calls tool on target a over MCP protocol
+// version protocol and returns its result or a transport error. With version
+// 2026-07-28 it calls through the SDK's client. With an older version, which the
+// SDK's client cannot speak, it posts the call itself, with protocol in the
+// Mcp-Protocol-Version header, or with no header if protocol is "".
+func callShutdownTool(ctx context.Context, url, protocol, tool string) (*mcp.CallToolResult, error) {
+	if protocol == "2026-07-28" {
+		session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer session.Close()
+		if v := session.InitializeResult().ProtocolVersion; v != protocol {
+			return nil, fmt.Errorf("the SDK's client negotiated protocol version %s, want %s", v, protocol)
+		}
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"target": "a"}})
+		return res, err
+	}
+	request, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": map[string]any{"target": "a"}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(request))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if protocol != "" {
+		req.Header.Set("Mcp-Protocol-Version", protocol)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// An event stream carries the JSON-RPC response in its last data line.
+	msg := body
+	for line := range strings.Lines(string(body)) {
+		if data, found := strings.CutPrefix(line, "data:"); found {
+			msg = []byte(data)
+		}
+	}
+	var rpc struct {
+		Result *mcp.CallToolResult `json:"result"`
+	}
+	if err := json.Unmarshal(msg, &rpc); err != nil || rpc.Result == nil {
+		return nil, fmt.Errorf("%s with response %q", resp.Status, body)
+	}
+	return rpc.Result, nil
+}
+
+func TestShutdownDuringToolCall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signals cannot be sent on Windows")
+	}
+	bin := buildBinary(t)
+	tests := []struct {
+		name string
+		// protocol is the MCP protocol version of the call; see callShutdownTool.
+		protocol        string
+		signal          os.Signal
+		shutdownTimeout string
+		// release says whether Temporal answers the call once the server is shutting down.
+		release bool
+		outcome string
+		// tool defaults to check_connection, whose cancellation returns a raw context error.
+		tool string
+	}{
+		{"call finishes", "2026-07-28", syscall.SIGTERM, "", true, "ok", ""},
+		{"call finishes after Ctrl-C", "2026-07-28", os.Interrupt, "", true, "ok", ""},
+		{"call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"2025-11-25 call finishes", "2025-11-25", syscall.SIGTERM, "", true, "ok", ""},
+		{"2025-11-25 call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"call without a protocol version finishes", "", syscall.SIGTERM, "", true, "ok", ""},
+		{"call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", ""},
+		{"count call outlasts the shutdown timeout", "2026-07-28", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
+		{"2025-11-25 count call outlasts the shutdown timeout", "2025-11-25", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
+		{"count call without a protocol version outlasts the shutdown timeout", "", syscall.SIGTERM, "500ms", false, "cancelled", "count_workflows"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			temporal := &blockingWorkflowService{started: make(chan struct{}, 1), release: make(chan struct{})}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gs := grpc.NewServer()
+			workflowservice.RegisterWorkflowServiceServer(gs, temporal)
+			go gs.Serve(ln)
+			t.Cleanup(gs.Stop)
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			config := fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: %q, namespace: default}\n", ln.Addr())
+			if tt.shutdownTimeout != "" {
+				config += "shutdown_timeout: " + tt.shutdownTimeout + "\n"
+			}
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bin, "--config", configPath)
+			var records bytes.Buffer
+			cmd.Stdout = &records
+			url, stderr := start(t, cmd)
+			// logUntil logs stderr until a line equal to want, or to its end if want is "", and reports whether it saw want.
+			logUntil := func(want string) bool {
+				for {
+					select {
+					case line, ok := <-stderr:
+						if !ok {
+							return false
+						}
+						t.Log(line)
+						if want != "" && line == want {
+							return true
+						}
+					case <-ctx.Done():
+						t.Fatal("timed out reading the server's stderr")
+					}
+				}
+			}
+			tool := tt.tool
+			if tool == "" {
+				tool = "check_connection"
+			}
+			type callResponse struct {
+				result *mcp.CallToolResult
+				err    error
+			}
+			called := make(chan callResponse, 1)
+			go func() {
+				res, err := callShutdownTool(ctx, url, tt.protocol, tool)
+				called <- callResponse{res, err}
+			}()
+			select {
+			case <-temporal.started:
+			case response := <-called:
+				t.Fatalf("%s returned before it reached Temporal: %v", tool, response.err)
+			case <-ctx.Done():
+				t.Fatal("check_connection did not reach Temporal")
+			}
+
+			if err := cmd.Process.Signal(tt.signal); err != nil {
+				t.Fatal(err)
+			}
+			if !logUntil(name + ": shutting down") {
+				t.Errorf("the server exited on %v without shutting down", tt.signal)
+			}
+			if tt.release {
+				close(temporal.release)
+			}
+			select {
+			case response := <-called:
+				if response.err != nil {
+					t.Fatalf("%s: %v", tool, response.err)
+				}
+				res := response.result
+				if tt.release {
+					if res.IsError {
+						t.Errorf("%s returned a tool error: %+v", tool, res.Content)
+					}
+				} else {
+					if !res.IsError || len(res.Content) != 1 {
+						t.Fatalf("%s result = %+v, want a shutdown tool error", tool, res)
+					}
+					text, ok := res.Content[0].(*mcp.TextContent)
+					if !ok {
+						t.Fatalf("error content = %T, want text", res.Content[0])
+					}
+					var got struct {
+						Code      string `json:"code"`
+						Message   string `json:"message"`
+						Retryable bool   `json:"retryable"`
+					}
+					if err := json.Unmarshal([]byte(text.Text), &got); err != nil {
+						t.Fatal(err)
+					}
+					if got.Code != "server_shutting_down" || got.Message != "the server is shutting down" || !got.Retryable {
+						t.Errorf("%s error = %s, want a retryable server_shutting_down error", tool, text.Text)
+					}
+				}
+			case <-ctx.Done():
+				t.Fatal("check_connection did not return")
+			}
+			logUntil("")
+			if err := cmd.Wait(); err != nil {
+				t.Errorf("server exited with %v, want exit status 0", err)
+			}
+
+			var got []string
+			for line := range strings.Lines(records.String()) {
+				var rec struct{ Tool, Outcome string }
+				if err := json.Unmarshal([]byte(line), &rec); err != nil {
+					t.Fatalf("audit record %q: %v", line, err)
+				}
+				got = append(got, rec.Tool+" "+rec.Outcome)
+			}
+			if want := []string{tool + " " + tt.outcome}; !slices.Equal(got, want) {
+				t.Errorf("audit records (tool outcome) = %q, want %q", got, want)
+			}
+		})
 	}
 }

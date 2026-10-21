@@ -30,6 +30,9 @@ targets:
 # HTTP mode only.
 listen: <host:port>
 
+# Used in HTTP mode.
+[ shutdown_timeout: <duration> | default = 8s ]
+
 # HTTP mode only.
 [ listen_tls:
     cert_file: <filename>
@@ -117,6 +120,10 @@ These say where and how the server serves MCP in HTTP mode, and are not allowed 
 
 The server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection, so a renewed certificate takes effect without a restart.
 
+## `shutdown_timeout`
+
+Optional duration, default `8s`; zero uses the default and negative values are rejected in HTTP mode. After SIGINT or SIGTERM, the HTTP server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. It has no effect with `--stdio`. See [Shutdown](../README.md#shutdown).
+
 ## `auth`
 
 Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from one of the `issuers`, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
@@ -141,7 +148,7 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth.yaml`](../examples/http-auth.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use each of its `tools` on each of its `targets`.
-  - `tools` (list of strings, required): At least one of `list_available_targets`, `check_connection`, `get_workflow`, `get_workflow_history`, `get_task_queue`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
+  - `tools` (list of strings, required): At least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.
@@ -149,7 +156,7 @@ Decides which tools each caller may use on which targets. It is HTTP mode only, 
   - `issuer` (url, optional): Limits the rule to tokens from this issuer, which must be the `issuer` of an `auth.issuers` entry. When `auth` has more than one issuer, the server logs a warning at startup for each rule without one, since such a rule matches tokens from every issuer.
   - `profile` (string, required): The name of a profile in `profiles`.
 
-A rule matches a caller whose access token has the claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry. Matching is exact and case-sensitive, and a missing claim or a claim of another type does not match. A caller gets the profile of every rule it matches, and profiles combine per target: a profile that gives `get_workflow` on one target and another that gives `check_connection` on a second do not give `get_workflow` on the second. Agents see only the tools the caller may use on some target, and `list_available_targets` lists every target the caller may use some tool on. A caller that matches no rule may use no tool and sees no target, although its token is still accepted.
+A rule matches a caller whose access token has the claim `claim_name` as a string equal to `claim_value`, or as a list with `claim_value` as an entry. Matching is exact and case-sensitive, and a missing claim or a claim of another type does not match. A caller gets the profile of every rule it matches, and profiles combine per target: a profile that gives `get_workflows` on one target and another that gives `check_connection` on a second do not give `get_workflows` on the second. Agents see only the tools the caller may use on some target, and `list_available_targets` lists every target the caller may use some tool on. A caller that matches no rule may use no tool and sees no target, although its token is still accepted.
 
 Rules should match only claims that neither the user nor the client can set, such as the groups or roles your identity provider assigns, from issuers that issue tokens only to your users. A rule on a claim the user or client can choose, such as `email`, lets them choose their own profile, and a rule that accepts an issuer that issues tokens to anyone, such as a CI provider's OIDC endpoint, lets anyone get that profile. A scope records what the client was granted rather than who the user is, so prefer groups or roles to scopes. Copy `claim_name` and `claim_value` from a decoded access token of a real user rather than from the identity provider's console, which may show display names or leave out claims the token does not carry.
 

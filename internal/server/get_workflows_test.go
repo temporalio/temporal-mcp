@@ -35,6 +35,7 @@ import (
 	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
 
@@ -205,6 +206,10 @@ func decoded(value any) map[string]any {
 }
 
 func TestToolsOnDevServer(t *testing.T) {
+	// With sticky execution, a signal right after SeedFulfillment stops version 1 can be routed to version 1's sticky
+	// task queue, which no worker polls any more. Under load it then times out there after 5 seconds and adds a
+	// WorkflowTaskTimedOut event to the histories that "non-determinism population" checks.
+	worker.SetStickyWorkflowCacheSize(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	zlib := converter.NewZlibCodec(converter.ZlibCodecOptions{AlwaysEncode: true})
@@ -244,6 +249,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		"--search-attribute", "Team=Keyword",
 		// Small history pages let a filtered get_workflow_history read reach its page limit on a short history.
 		"--dynamic-config-value", "frontend.historyMaxPageSize=5",
+		// Task queue stats are cached for 5 seconds by default, which would hold up each backlog wait by as much.
+		"--dynamic-config-value", "matching.TaskQueueInfoByBuildIdTTL=0.1",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -263,21 +270,31 @@ func TestToolsOnDevServer(t *testing.T) {
 	}
 	t.Cleanup(w.Stop)
 
+	// seeded logs how long a seed took since the previous one, so a run that times out shows where the time went.
+	seedStart := time.Now()
+	seeded := func(seed string) {
+		t.Logf("%s seed took %v", seed, time.Since(seedStart).Round(time.Millisecond))
+		seedStart = time.Now()
+	}
 	failed, err := fixture.SeedOrders(ctx, c, 1)
+	seeded("orders")
 	if err != nil {
 		t.Fatal(err)
 	}
 	stop, err := fixture.SeedStuckLedger(ctx, c, "default")
+	seeded("stuck ledger")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(stop)
 	deployed, stop, err := fixture.SeedFulfillment(ctx, c)
+	seeded("fulfillment")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(stop)
 	incidentStart, incidentEnd, stop, err := fixture.SeedIncident(ctx, c, 1)
+	seeded("incident")
 	if err != nil {
 		t.Fatal(err)
 	}

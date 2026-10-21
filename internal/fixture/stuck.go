@@ -70,7 +70,7 @@ func SeedStuckLedger(ctx context.Context, c client.Client, namespace string) (st
 			if runs < 540 {
 				batches = 3
 			}
-			if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, p.workflowType, batches); err != nil {
+			if _, err := startWorkflow(ctx, c, client.StartWorkflowOptions{ID: id, TaskQueue: LedgerTaskQueue}, p.workflowType, batches); err != nil {
 				return nil, err
 			}
 			runs, activities = runs+1, activities+batches

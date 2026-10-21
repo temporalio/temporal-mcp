@@ -100,7 +100,7 @@ func SeedIncident(ctx context.Context, c client.Client, failedAttempts int) (sta
 		for i := range p.count {
 			id := fmt.Sprintf("%s-%04d", p.idPrefix, i+1)
 			rejected[id] = len(runs)%16 == 0
-			r, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+			r, err := startWorkflow(ctx, c, client.StartWorkflowOptions{
 				ID:                    id,
 				TaskQueue:             incidentTaskQueue,
 				TypedSearchAttributes: temporal.NewSearchAttributes(team.ValueSet(p.team), domain.ValueSet(p.domain)),

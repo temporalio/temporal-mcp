@@ -116,11 +116,18 @@ func SeedOrders(ctx context.Context, c client.Client, retryIntervalSeconds int) 
 }
 
 func startOrder(ctx context.Context, c client.Client, order OrderInput) (client.WorkflowRun, error) {
-	return c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	return startWorkflow(ctx, c, client.StartWorkflowOptions{
 		ID:                    "order-" + order.OrderID,
 		TaskQueue:             TaskQueue,
 		TypedSearchAttributes: temporal.NewSearchAttributes(orderID.ValueSet(order.OrderID)),
 	}, OrderWorkflow, order)
+}
+
+// startWorkflow starts a seeded workflow with eager start, so that its first workflow task goes straight to the
+// worker polling its task queue on c instead of through the dev server's matching, which keeps large seeds fast.
+func startWorkflow(ctx context.Context, c client.Client, options client.StartWorkflowOptions, workflowType any, args ...any) (client.WorkflowRun, error) {
+	options.EnableEagerStart = true
+	return c.ExecuteWorkflow(ctx, options, workflowType, args...)
 }
 
 func waitUntil(ctx context.Context, done func() (bool, error)) error {

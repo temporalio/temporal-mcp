@@ -62,7 +62,7 @@ func SeedFulfillment(ctx context.Context, c client.Client) (deployed time.Time, 
 	}
 	defer v1.Stop()
 	for i := range runs {
-		if _, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: fulfillmentID(i), TaskQueue: fulfillmentTaskQueue}, "FulfillmentWorkflow", shippingBranch[i]); err != nil {
+		if _, err := startWorkflow(ctx, c, client.StartWorkflowOptions{ID: fulfillmentID(i), TaskQueue: fulfillmentTaskQueue}, "FulfillmentWorkflow", shippingBranch[i]); err != nil {
 			return time.Time{}, nil, err
 		}
 	}

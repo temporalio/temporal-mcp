@@ -19,7 +19,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// codecTimeout bounds a codec request: a tool call's own context ends only when its client goes away.
+// codecTimeout bounds a codec request, so a hung codec server leaves payloads undecoded rather than timing out the call.
 var codecTimeout = 10 * time.Second
 
 // codecClient does not follow redirects, which could carry the authorization header to plain HTTP.

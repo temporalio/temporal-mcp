@@ -61,10 +61,12 @@ func boundList(p, key *jsonschema.Schema) {
 
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
-// A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it.
+// A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it, and enforces
+// the limits on calls to them.
 type toolServer struct {
 	*mcp.Server
 	access map[string]string
+	limits *limits
 }
 
 func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
@@ -81,17 +83,30 @@ func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.Too
 	}
 	// The handler encodes the output itself: the SDK would re-encode it through float64, corrupting integers above 2^53.
 	mcp.AddTool(s.Server, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		ctx, cancel := context.WithTimeout(ctx, toolCallTimeout)
+		defer cancel()
+		release, err := s.limits.acquire(ctx, req)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer release()
 		ctx = temporal.WithTool(ctx, def.Name, rpcs, toolTargets(ctx))
 		if req.Extra != nil && req.Extra.TokenInfo != nil {
 			ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
 		}
 		_, out, err := h(ctx, req, in)
+		if err != nil && deadlinePassed(ctx) {
+			return nil, nil, toolCallTimeoutError()
+		}
 		if err != nil {
 			return nil, nil, err
 		}
 		b, err := json.Marshal(out)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(b) > maxResponseBytes {
+			return nil, nil, &toolError{Code: "response_too_large", Message: fmt.Sprintf("the response is %d bytes, more than the limit of %d bytes", len(b), maxResponseBytes)}
 		}
 		return &mcp.CallToolResult{StructuredContent: json.RawMessage(b), Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil, nil
 	})
@@ -226,7 +241,7 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 
 // newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
 func newServer(ctx context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
-	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
+	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}, newLimits(cfg)}
 	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
 	return s, addTools(s, cfg, clients, payloads)
 }

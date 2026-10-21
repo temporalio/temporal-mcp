@@ -38,6 +38,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
+	"golang.org/x/time/rate"
 
 	"github.com/temporalio/temporal-operator-mcp/internal/config"
 	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
@@ -223,6 +224,8 @@ func decoded(value any) map[string]any {
 func TestToolsOnDevServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	defer func(r rate.Limit) { callerRate = r }(callerRate)
+	callerRate = rate.Inf
 	zlib := converter.NewZlibCodec(converter.ZlibCodecOptions{AlwaysEncode: true})
 	codecHandler := converter.NewPayloadCodecHTTPHandler(zlib)
 	codecServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

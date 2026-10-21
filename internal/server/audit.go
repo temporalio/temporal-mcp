@@ -75,16 +75,7 @@ func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[stri
 				caller := identity.CallerFromTokenInfo(call.Extra.TokenInfo)
 				rec.Issuer, rec.Subject = &caller.Issuer, &caller.Subject
 			}
-			var fields map[string]json.RawMessage
-			if json.Unmarshal(call.Params.Arguments, &fields) == nil {
-				var target *string
-				if json.Unmarshal(fields["target"], &target) == nil && target != nil {
-					if t, ok := cfg.Lookup(*target); ok {
-						target = &t.Name
-					}
-					rec.Target = target
-				}
-			}
+			rec.Target = callTarget(cfg, call)
 			res, err := next(temporal.CountCalls(context.WithValue(ctx, auditKey{}, rec), &rec.calls), method, req)
 			rec.DurationMS, rec.TemporalCalls = time.Since(start).Milliseconds(), rec.calls.Load()
 			var cause error
@@ -121,4 +112,18 @@ func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[stri
 			return res, err
 		}
 	}
+}
+
+// callTarget returns the target that call's arguments name, resolving an alias to the target's name when cfg has
+// it, or nil if they name none.
+func callTarget(cfg *config.Config, call *mcp.CallToolRequest) *string {
+	var fields map[string]json.RawMessage
+	var target *string
+	if json.Unmarshal(call.Params.Arguments, &fields) != nil || json.Unmarshal(fields["target"], &target) != nil || target == nil {
+		return nil
+	}
+	if t, ok := cfg.Lookup(*target); ok {
+		return &t.Name
+	}
+	return target
 }

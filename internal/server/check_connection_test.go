@@ -10,11 +10,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -223,12 +225,26 @@ func writeCertificate(t *testing.T, c *config.Certificate, cert, key []byte) {
 	}
 }
 
-// certificateRecorder is a Temporal server that records the common name of the client certificate on each GetSystemInfo call,
+// certificateRecorder records rejected certificates and the common name of the client certificate on each GetSystemInfo call,
 // or "" if there is none.
 type certificateRecorder struct {
 	workflowservice.UnimplementedWorkflowServiceServer
+	credentials.TransportCredentials
+	rejected  chan *x509.Certificate
 	mu        sync.Mutex
 	presented []string
+}
+
+func (r *certificateRecorder) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	conn, info, err := r.TransportCredentials.ServerHandshake(conn)
+	var untrusted x509.UnknownAuthorityError
+	if errors.As(err, &untrusted) {
+		select {
+		case r.rejected <- untrusted.Cert:
+		default:
+		}
+	}
+	return conn, info, err
 }
 
 func (r *certificateRecorder) GetSystemInfo(ctx context.Context, _ *workflowservice.GetSystemInfoRequest) (*workflowservice.GetSystemInfoResponse, error) {
@@ -260,11 +276,14 @@ func TestClientCertificate(t *testing.T) {
 	renewed, renewedCert, renewedKey := newCertificate(t, "renewed")
 	clientCAs.AddCert(first)
 	clientCAs.AddCert(renewed)
-	recorder := &certificateRecorder{}
+	recorder := &certificateRecorder{
+		// A client with no certificate connects, so a client that falls back to none when it cannot load its own fails the test.
+		TransportCredentials: credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{serverPair}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: clientCAs, MinVersion: tls.VersionTLS13}),
+		rejected:             make(chan *x509.Certificate, 1),
+	}
 	ln := listen(t)
 	serve(t, ln, recorder,
-		// A client with no certificate connects, so a client that falls back to none when it cannot load its own fails the test.
-		grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{serverPair}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: clientCAs})),
+		grpc.Creds(recorder),
 		// Like a Temporal server, which by default replaces each connection after 5 minutes.
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 100 * time.Millisecond}))
 
@@ -272,7 +291,7 @@ func TestClientCertificate(t *testing.T) {
 	files := &config.Certificate{CertFile: filepath.Join(dir, "tls.crt"), KeyFile: filepath.Join(dir, "tls.key")}
 	writeCertificate(t, files, firstCert, firstKey)
 	untrusted := &config.Certificate{CertFile: filepath.Join(dir, "untrusted.crt"), KeyFile: filepath.Join(dir, "untrusted.key")}
-	_, untrustedCert, untrustedKey := newCertificate(t, "untrusted")
+	untrustedRoot, untrustedCert, untrustedKey := newCertificate(t, "untrusted")
 	writeCertificate(t, untrusted, untrustedCert, untrustedKey)
 	cfg := &config.Config{Targets: []config.Target{
 		{Name: "a", Description: "x", Address: ln.Addr().String(), Namespace: "default", TLS: files},
@@ -286,10 +305,14 @@ func TestClientCertificate(t *testing.T) {
 	}
 	session := serveTools(t, cfg, clients, t.Output())
 
-	// waitForServerStage calls check_connection on target until its server stage fails with reason, or succeeds with
-	// presented as the client certificate if reason is "".
-	waitForServerStage := func(t *testing.T, target, reason, presented string) {
+	// waitForServerStage calls check_connection on target until its server stage fails with one of reasons, or succeeds with
+	// presented as the client certificate if presented is not "".
+	waitForServerStage := func(t *testing.T, target, presented string, reasons ...string) {
 		t.Helper()
+		wantStatus := "failed"
+		if presented != "" {
+			wantStatus = "ok"
+		}
 		deadline := time.Now().Add(10 * time.Second)
 		for {
 			res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": target}})
@@ -298,19 +321,30 @@ func TestClientCertificate(t *testing.T) {
 			}
 			serverStage := res.StructuredContent.(map[string]any)["result"].(map[string]any)["stages"].([]any)[0].(map[string]any)
 			got, _ := serverStage["reason"].(string)
-			if got == reason && (reason != "" || recorder.last() == presented) {
+			if serverStage["status"] == wantStatus && slices.Contains(reasons, got) && (presented == "" || recorder.last() == presented) {
 				return
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("server stage = %s %q; want reason %q and certificate %q", serverStage["status"], got, reason, presented)
+				t.Fatalf("server stage = %s %q; want %s with reason in %q and certificate %q", serverStage["status"], got, wantStatus, reasons, presented)
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	waitForServerStage(t, "a", "", "first")
+	waitForServerStage(t, "a", "first", "")
 	writeCertificate(t, files, renewedCert, renewedKey)
-	waitForServerStage(t, "a", "", "renewed")
+	waitForServerStage(t, "a", "renewed", "")
 	writeCertificate(t, files, []byte("not a certificate\n"), renewedKey)
-	waitForServerStage(t, "a", "Unavailable: the TLS handshake or certificate check with the Temporal server failed", "")
-	waitForServerStage(t, "untrusted", "Unavailable: the TLS handshake or certificate check with the Temporal server failed", "")
+	waitForServerStage(t, "a", "", "Unavailable: the TLS handshake or certificate check with the Temporal server failed")
+	// Under TLS 1.3, writing the HTTP/2 preface can fail before gRPC reads the TLS rejection alert.
+	waitForServerStage(t, "untrusted", "",
+		"Unavailable: the TLS handshake or certificate check with the Temporal server failed",
+		"Unavailable: could not connect to the Temporal server")
+	select {
+	case rejected := <-recorder.rejected:
+		if !rejected.Equal(untrustedRoot) {
+			t.Fatalf("rejected certificate = %q, want untrusted", rejected.Subject.CommonName)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not reject the untrusted client certificate")
+	}
 }

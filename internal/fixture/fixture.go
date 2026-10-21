@@ -11,6 +11,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/activity"
@@ -18,6 +19,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
+	"google.golang.org/grpc/codes"
 )
 
 // TaskQueue is the task queue the order workflow runs on.
@@ -123,7 +125,12 @@ func startOrder(ctx context.Context, c client.Client, order OrderInput) (client.
 
 func waitUntil(ctx context.Context, done func() (bool, error)) error {
 	for {
-		if ok, err := done(); ok || err != nil {
+		ok, err := done()
+		// The dev server rejects calls for a moment after a burst of workflow starts.
+		if serviceerror.ToStatus(err).Code() == codes.ResourceExhausted {
+			ok, err = false, nil
+		}
+		if ok || err != nil {
 			return err
 		}
 		select {
@@ -135,7 +142,8 @@ func waitUntil(ctx context.Context, done func() (bool, error)) error {
 }
 
 // WaitForDescribe describes the latest run of workflowID every 100 milliseconds until done returns true for the
-// description, and returns that description. It returns an error if a describe fails or ctx ends first.
+// description, and returns that description. It returns an error if a describe fails, other than by a rate limit,
+// or ctx ends first.
 func WaitForDescribe(ctx context.Context, c client.Client, workflowID string, done func(*workflowservice.DescribeWorkflowExecutionResponse) bool) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	var desc *workflowservice.DescribeWorkflowExecutionResponse
 	err := waitUntil(ctx, func() (bool, error) {
@@ -147,7 +155,7 @@ func WaitForDescribe(ctx context.Context, c client.Client, workflowID string, do
 }
 
 // WaitForBacklog returns once the activity backlog of taskQueue in namespace, as DescribeTaskQueue reports it, is n
-// tasks. It returns an error if a describe fails or ctx ends first.
+// tasks. It returns an error if a describe fails, other than by a rate limit, or ctx ends first.
 func WaitForBacklog(ctx context.Context, c client.Client, namespace, taskQueue string, n int) error {
 	return waitUntil(ctx, func() (bool, error) {
 		resp, err := c.WorkflowService().DescribeTaskQueue(ctx, &workflowservice.DescribeTaskQueueRequest{Namespace: namespace, TaskQueue: &taskqueuepb.TaskQueue{Name: taskQueue}, TaskQueueType: enumspb.TASK_QUEUE_TYPE_ACTIVITY, ReportStats: true})

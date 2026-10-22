@@ -134,19 +134,25 @@ func getWorkflowsInputSchema() *jsonschema.Schema {
 }
 
 func getWorkflowsOutputSchema() *jsonschema.Schema {
+	payloadDef, err := jsonschema.For[payload.Field](nil)
+	if err != nil {
+		panic(fmt.Errorf("get_workflows: payload schema: %w", err))
+	}
+	payloadDef.Type, payloadDef.Types = "", []string{"null", "object"}
 	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
-		reflect.TypeFor[failure](): {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
+		reflect.TypeFor[failure]():       {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
+		reflect.TypeFor[payload.Field](): {Types: []string{"null", "object"}, Ref: "#/$defs/payload"},
 	}}
-	def, err := jsonschema.For[failureFields](opts)
+	failureDef, err := jsonschema.For[failureFields](opts)
 	if err != nil {
 		panic(fmt.Errorf("get_workflows: failure schema: %w", err))
 	}
-	def.Type, def.Types = "", []string{"null", "object"}
+	failureDef.Type, failureDef.Types = "", []string{"null", "object"}
 	schema, err := jsonschema.For[envelope[[]workflowEntry]](opts)
 	if err != nil {
 		panic(fmt.Errorf("get_workflows: output schema: %w", err))
 	}
-	schema.Defs = map[string]*jsonschema.Schema{"failure": def}
+	schema.Defs = map[string]*jsonschema.Schema{"failure": failureDef, "payload": payloadDef}
 	return schema
 }
 

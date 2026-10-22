@@ -131,10 +131,11 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
 	}, getWorkflowHistory(cfg, clients, payloads)), addTool(s, &mcp.Tool{
-		Name:        "get_task_queues",
-		Description: fmt.Sprintf("Get the pollers and backlog of up to %d task queues, with a section in each for every task queue type asked for: up to %d of the type's pollers, most recently polled first, and poller_count, the number of pollers (complete is false when any section's list of pollers is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error. result has an entry for each name in task_queues, in the order given. A name that the Temporal server rejects as invalid, such as one that is too long, gets an error in its entry and no sections, while the other entries are unaffected. Any other error reading a task queue fails the whole call, and its message starts with the task queue's path, such as task_queues[3].", maxListItems, maxPollers),
-		Annotations: readOnlyAnnotations,
-		InputSchema: getTaskQueuesInputSchema(),
+		Name:         "get_task_queues",
+		Description:  fmt.Sprintf("Get the pollers and backlog of up to %d task queues, with a section in each for every task queue type asked for: up to %d of the type's pollers, most recently polled first, and poller_count, the number of pollers (complete is false when any section's list of pollers is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error. result has an entry for each name in task_queues, in the order given. A name that the Temporal server rejects as invalid, such as one that is too long, gets an error in its entry and no sections, while the other entries are unaffected. Any other error reading a task queue fails the whole call, and its message starts with the task queue's path, such as task_queues[3].", maxListItems, maxPollers),
+		Annotations:  readOnlyAnnotations,
+		InputSchema:  getTaskQueuesInputSchema(),
+		OutputSchema: getTaskQueuesOutputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_DescribeTaskQueue_FullMethodName,
 	}, getTaskQueues(cfg, clients)), addTool(s, &mcp.Tool{

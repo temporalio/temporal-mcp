@@ -73,9 +73,9 @@ type toolServer struct {
 	inputs map[string]*jsonschema.Schema
 }
 
-// schemaFor returns the schema inferred from T, the input or output of tool, as which says.
-func schemaFor[T any](tool, which string) *jsonschema.Schema {
-	schema, err := jsonschema.For[T](&jsonschema.ForOptions{})
+// schemaFor returns the schema inferred from T with opts, which may be nil, and panics naming tool and which schema, such as "input", if it cannot.
+func schemaFor[T any](tool, which string, opts *jsonschema.ForOptions) *jsonschema.Schema {
+	schema, err := jsonschema.For[T](opts)
 	if err != nil {
 		panic(fmt.Errorf("tool %q: %s schema: %w", tool, which, err))
 	}
@@ -84,10 +84,10 @@ func schemaFor[T any](tool, which string) *jsonschema.Schema {
 
 func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
 	if def.InputSchema == nil {
-		def.InputSchema = schemaFor[In](def.Name, "input")
+		def.InputSchema = schemaFor[In](def.Name, "input", nil)
 	}
 	if def.OutputSchema == nil {
-		def.OutputSchema = schemaFor[Out](def.Name, "output")
+		def.OutputSchema = schemaFor[Out](def.Name, "output", nil)
 	}
 	s.inputs[def.Name], _ = def.InputSchema.(*jsonschema.Schema)
 	s.access[def.Name] = "write"

@@ -64,7 +64,7 @@ type historyEvent struct {
 }
 
 func getWorkflowHistoryInputSchema() *jsonschema.Schema {
-	schema := schemaFor[getWorkflowHistoryInput]("get_workflow_history", "input")
+	schema := schemaFor[getWorkflowHistoryInput]("get_workflow_history", "input", nil)
 	order := schema.Properties["order"]
 	order.Enum, order.Default = []any{"oldest_first", "newest_first"}, json.RawMessage(`"oldest_first"`)
 	boundPageSize(schema.Properties["limit"])

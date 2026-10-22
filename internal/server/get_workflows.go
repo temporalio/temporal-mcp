@@ -78,6 +78,10 @@ type execution struct {
 	RunID      string `json:"run_id"`
 }
 
+type typeName struct {
+	Name string `json:"name"`
+}
+
 type pendingActivity struct {
 	ActivityID        string           `json:"activity_id"`
 	Type              string           `json:"type"`
@@ -107,24 +111,29 @@ type pendingWorkflowTask struct {
 }
 
 type failure struct {
-	Message              string              `json:"message"`
-	Kind                 string              `json:"kind"`
-	StackTrace           string              `json:"stack_trace"`
-	Application          *applicationFailure `json:"application"`
-	Details              []*payload.Field    `json:"details"`
-	EncodedAttributes    *payload.Field      `json:"encoded_attributes"`
-	LastHeartbeatDetails []*payload.Field    `json:"last_heartbeat_details"`
-	Cause                *failure            `json:"cause"`
+	Message                string                         `json:"message"`
+	Kind                   string                         `json:"kind"`
+	StackTrace             string                         `json:"stack_trace"`
+	Application            *applicationFailure            `json:"application"`
+	Timeout                *timeoutFailure                `json:"timeout"`
+	Canceled               *canceledFailure               `json:"canceled"`
+	Terminated             *terminatedFailure             `json:"terminated"`
+	Server                 *serverFailure                 `json:"server"`
+	Activity               *activityFailure               `json:"activity"`
+	ChildWorkflowExecution *childWorkflowExecutionFailure `json:"child_workflow_execution"`
+	NexusOperation         *nexusOperationFailure         `json:"nexus_operation"`
+	NexusHandler           *nexusHandlerFailure           `json:"nexus_handler"`
+	Details                []*payload.Field               `json:"details"`
+	EncodedAttributes      *payload.Field                 `json:"encoded_attributes"`
+	LastHeartbeatDetails   []*payload.Field               `json:"last_heartbeat_details"`
+	Cause                  *failure                       `json:"cause"`
 }
 
 // failureFields builds failure's $defs entry; jsonschema.For[failure] would return the $ref override.
 type failureFields failure
 
 func getWorkflowsInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getWorkflowsInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: input schema: %w", err))
-	}
+	schema := schemaFor[getWorkflowsInput]("get_workflows", "input", nil)
 	workflows := schema.Properties["workflows"]
 	boundList(workflows, workflows.Items.Properties["workflow_id"])
 	// Null-valued arguments are dropped only at the top level, so a null run_id in an item is allowed here.
@@ -134,31 +143,71 @@ func getWorkflowsInputSchema() *jsonschema.Schema {
 }
 
 func getWorkflowsOutputSchema() *jsonschema.Schema {
-	payloadDef, err := jsonschema.For[payload.Field](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: payload schema: %w", err))
-	}
+	payloadDef := schemaFor[payload.Field]("get_workflows", "payload", nil)
 	payloadDef.Type, payloadDef.Types = "", []string{"null", "object"}
 	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[failure]():       {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
 		reflect.TypeFor[payload.Field](): {Types: []string{"null", "object"}, Ref: "#/$defs/payload"},
 	}}
-	failureDef, err := jsonschema.For[failureFields](opts)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: failure schema: %w", err))
-	}
+	failureDef := schemaFor[failureFields]("get_workflows", "failure", opts)
 	failureDef.Type, failureDef.Types = "", []string{"null", "object"}
-	schema, err := jsonschema.For[envelope[[]workflowEntry]](opts)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: output schema: %w", err))
-	}
+	schema := schemaFor[envelope[[]workflowEntry]]("get_workflows", "output", opts)
 	schema.Defs = map[string]*jsonschema.Schema{"failure": failureDef, "payload": payloadDef}
 	return schema
 }
 
 type applicationFailure struct {
-	Type         string `json:"type"`
-	NonRetryable bool   `json:"non_retryable"`
+	Type           string  `json:"type"`
+	NonRetryable   bool    `json:"non_retryable"`
+	NextRetryDelay *string `json:"next_retry_delay"`
+	Category       string  `json:"category"`
+}
+
+type timeoutFailure struct {
+	TimeoutType string `json:"timeout_type"`
+}
+
+type canceledFailure struct {
+	Identity string `json:"identity"`
+}
+
+type terminatedFailure struct {
+	Identity string `json:"identity"`
+}
+
+type serverFailure struct {
+	NonRetryable bool `json:"non_retryable"`
+}
+
+type activityFailure struct {
+	ScheduledEventID int64    `json:"scheduled_event_id"`
+	StartedEventID   int64    `json:"started_event_id"`
+	Identity         string   `json:"identity"`
+	ActivityType     typeName `json:"activity_type"`
+	ActivityID       string   `json:"activity_id"`
+	RetryState       string   `json:"retry_state"`
+}
+
+type childWorkflowExecutionFailure struct {
+	Namespace         string    `json:"namespace"`
+	WorkflowExecution execution `json:"workflow_execution"`
+	WorkflowType      typeName  `json:"workflow_type"`
+	InitiatedEventID  int64     `json:"initiated_event_id"`
+	StartedEventID    int64     `json:"started_event_id"`
+	RetryState        string    `json:"retry_state"`
+}
+
+type nexusOperationFailure struct {
+	ScheduledEventID int64  `json:"scheduled_event_id"`
+	Endpoint         string `json:"endpoint"`
+	Service          string `json:"service"`
+	Operation        string `json:"operation"`
+	OperationToken   string `json:"operation_token"`
+}
+
+type nexusHandlerFailure struct {
+	Type          string `json:"type"`
+	RetryBehavior string `json:"retry_behavior"`
 }
 
 func getWorkflows(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) mcp.ToolHandlerFor[getWorkflowsInput, envelope[[]workflowEntry]] {
@@ -372,10 +421,10 @@ func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent, batch *payload.B
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT:
 		next = e.GetWorkflowExecutionTimedOutEventAttributes().GetNewExecutionRunId()
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED:
-		run.Failure = &failure{Details: batch.AddAll(e.GetWorkflowExecutionCanceledEventAttributes().GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
+		run.Failure = &failure{Kind: "CanceledFailure", Details: batch.AddAll(e.GetWorkflowExecutionCanceledEventAttributes().GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED:
 		a := e.GetWorkflowExecutionTerminatedEventAttributes()
-		run.Failure = &failure{Message: a.GetReason(), Details: batch.AddAll(a.GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
+		run.Failure = &failure{Message: a.GetReason(), Kind: "TerminatedFailure", Terminated: &terminatedFailure{Identity: a.GetIdentity()}, Details: batch.AddAll(a.GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
 		next = e.GetWorkflowExecutionContinuedAsNewEventAttributes().GetNewExecutionRunId()
 	}
@@ -403,10 +452,56 @@ func toFailure(f *failurepb.Failure, batch *payload.Batch) *failure {
 		out.Kind = strings.TrimSuffix(string(info.Message().Name()), "Info")
 	}
 	if a := f.GetApplicationFailureInfo(); a != nil {
-		out.Application = &applicationFailure{Type: a.GetType(), NonRetryable: a.GetNonRetryable()}
+		out.Application = &applicationFailure{Type: a.GetType(), NonRetryable: a.GetNonRetryable(), Category: a.GetCategory().String()}
+		if d := a.GetNextRetryDelay(); d != nil {
+			out.Application.NextRetryDelay = new(durationString(d))
+		}
+	}
+	if t := f.GetTimeoutFailureInfo(); t != nil {
+		out.Timeout = &timeoutFailure{TimeoutType: t.GetTimeoutType().String()}
 	}
 	if c := f.GetCanceledFailureInfo(); c != nil {
 		out.Details = batch.AddAll(c.GetDetails())
+		out.Canceled = &canceledFailure{Identity: c.GetIdentity()}
+	}
+	if t := f.GetTerminatedFailureInfo(); t != nil {
+		out.Terminated = &terminatedFailure{Identity: t.GetIdentity()}
+	}
+	if s := f.GetServerFailureInfo(); s != nil {
+		out.Server = &serverFailure{NonRetryable: s.GetNonRetryable()}
+	}
+	if a := f.GetActivityFailureInfo(); a != nil {
+		out.Activity = &activityFailure{
+			ScheduledEventID: a.GetScheduledEventId(),
+			StartedEventID:   a.GetStartedEventId(),
+			Identity:         a.GetIdentity(),
+			ActivityType:     typeName{Name: a.GetActivityType().GetName()},
+			ActivityID:       a.GetActivityId(),
+			RetryState:       a.GetRetryState().String(),
+		}
+	}
+	if c := f.GetChildWorkflowExecutionFailureInfo(); c != nil {
+		out.ChildWorkflowExecution = &childWorkflowExecutionFailure{
+			Namespace:         c.GetNamespace(),
+			WorkflowExecution: execution{WorkflowID: c.GetWorkflowExecution().GetWorkflowId(), RunID: c.GetWorkflowExecution().GetRunId()},
+			WorkflowType:      typeName{Name: c.GetWorkflowType().GetName()},
+			InitiatedEventID:  c.GetInitiatedEventId(),
+			StartedEventID:    c.GetStartedEventId(),
+			RetryState:        c.GetRetryState().String(),
+		}
+	}
+	if n := f.GetNexusOperationExecutionFailureInfo(); n != nil {
+		out.NexusOperation = &nexusOperationFailure{
+			ScheduledEventID: n.GetScheduledEventId(),
+			Endpoint:         n.GetEndpoint(),
+			Service:          n.GetService(),
+			Operation:        n.GetOperation(),
+			// A failure from before operation_token has the token in the deprecated operation_id.
+			OperationToken: cmp.Or(n.GetOperationToken(), n.GetOperationId()),
+		}
+	}
+	if n := f.GetNexusHandlerFailureInfo(); n != nil {
+		out.NexusHandler = &nexusHandlerFailure{Type: n.GetType(), RetryBehavior: n.GetRetryBehavior().String()}
 	}
 	return out
 }

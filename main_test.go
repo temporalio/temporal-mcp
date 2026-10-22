@@ -336,7 +336,7 @@ func TestBinaryDoesNotImportFixture(t *testing.T) {
 }
 
 func TestExitsWithoutServing(t *testing.T) {
-	bin := buildBinary(t)
+	bin := buildBinary(t, "-ldflags", "-X main.version=9.9.9-test")
 	writeConfig := func(yaml string) string {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -380,6 +380,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		want     string
 	}{
 		{"-h", []string{"-h"}, 0, "Usage of temporal-operator-mcp"},
+		{"--version", []string{"--version"}, 0, "temporal-operator-mcp 9.9.9-test"},
 		{"unexpected arguments", []string{"--config", filepath.Join("testdata", "config.yaml"), "extra"}, 1, `unexpected arguments ["extra"]`},
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},

@@ -49,11 +49,16 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
 	stdio := flags.Bool("stdio", false, "serve MCP over stdin and stdout, for an MCP client that launches the server, rather than over HTTP")
+	printVersion := flags.Bool("version", false, "print the version and exit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
+	}
+	if *printVersion {
+		fmt.Fprintln(stdout, name, version)
+		return nil
 	}
 	if *configPath == "" {
 		return errors.New("--config is required")

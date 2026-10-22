@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +109,7 @@ func TestRenderDecodes(t *testing.T) {
 			`{"handling":"decoded","value":null},` +
 			`{"handling":"decoded","value":{"seconds":"5"}},` +
 			`{"handling":"decoded","encoding":"binary/plain","data":"cmF3"},` +
-			`{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed"}]`
+			`{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed","error":"the codec server decoded the payload to encoding json/plain, but its data is not valid UTF-8 JSON"}]`
 		if got != want {
 			t.Errorf("fields = %s\nwant %s", got, want)
 		}
@@ -129,7 +130,7 @@ func TestRenderDecodes(t *testing.T) {
 			t.Errorf("sent payloads %v, want %v", req.payloads, sent)
 		}
 	}
-	if !strings.Contains(logs.String(), "but its data is not valid UTF-8 JSON") {
+	if !strings.Contains(logs.String(), "the codec server decoded the payload to encoding json/plain, but its data is not valid UTF-8 JSON") {
 		t.Errorf("log %q does not give the cause of the payload that is not JSON", logs.String())
 	}
 
@@ -233,7 +234,7 @@ func TestRenderJSONUTF8(t *testing.T) {
 					if tt.base64 != "" {
 						want = `[{"handling":"passthrough","encoding":"` + encoding + `","data":"` + tt.base64 + `"}]`
 						if handling == "decode" {
-							want = fmt.Sprintf(`[{"handling":"omitted","encoding":%q,"size_bytes":%d,"reason":"decode_failed"}]`, encoding, len(tt.data))
+							want = fmt.Sprintf(`[{"handling":"omitted","encoding":%[1]q,"size_bytes":%[2]d,"reason":"decode_failed","error":"the codec server decoded the payload to encoding %[1]s, but its data is not valid UTF-8 JSON"}]`, encoding, len(tt.data))
 						}
 					}
 					if got != want {
@@ -306,12 +307,13 @@ func TestRenderFailsClosed(t *testing.T) {
 		timeout     time.Duration
 	}{
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized", 0},
+		{"bad gateway", respond(http.StatusBadGateway, customerData), nil, "the codec server responded HTTP 502 Bad Gateway", 0},
 		{"redirect", redirect.URL, nil, "the codec server responded HTTP 307 Temporary Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
 		{"permanent redirect", respond(http.StatusPermanentRedirect, ""), nil, "the codec server responded HTTP 308 Permanent Redirect; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode", 0},
 		{"not payloads", malformed, nil, "the codec server's response is not a list of payloads", 0},
 		{"wrong number of payloads", respond(http.StatusOK, `{"payloads":[{}]}`), nil, "the codec server returned a different number of payloads than it was sent", 0},
-		{"unreachable", closed, nil, "the request to the codec server failed", 0},
-		{"untrusted certificate", tlsServer.URL, nil, "the TLS certificate check with the codec server failed", 0},
+		{"unreachable", closed, nil, "could not connect to the codec server: connection refused", 0},
+		{"untrusted certificate", tlsServer.URL, nil, "the codec server's TLS certificate does not chain to a trusted CA", 0},
 		{"no response", hang.URL, nil, "timed out waiting for the codec server", 100 * time.Millisecond},
 		{"response cut short", cut.URL, nil, "the codec server's response could not be read", 0},
 		{"unreadable authorization header", malformed, &config.Secret{File: authFile}, "the authorization header for the codec server could not be read", 0},
@@ -333,6 +335,16 @@ func TestRenderFailsClosed(t *testing.T) {
 			if got := r.CheckCodec(t.Context(), "t"); got != tt.reason {
 				t.Errorf("CheckCodec = %q, want %q", got, tt.reason)
 			}
+			// Each payload the codec server should have decoded gives the reason check_connection does.
+			got, err := render(t, t.Context(), r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", ""))
+			want := fmt.Sprintf(`[{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed","error":%[1]q},`+
+				`{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"decode_failed","error":%[1]q}]`, tt.reason)
+			if got != want || err != nil {
+				t.Errorf("fields = %s, err %v; want %s and no error", got, err, want)
+			}
+			if u, _ := url.Parse(tt.endpoint); strings.Contains(got, u.Hostname()) {
+				t.Errorf("fields %s name the codec server's host %s", got, u.Hostname())
+			}
 			if log := logs.String(); !strings.Contains(log, tt.reason) || strings.Contains(log, customerData) {
 				t.Errorf("log %q, want the cause and never the codec server's response or the authorization header", log)
 			}
@@ -341,16 +353,10 @@ func TestRenderFailsClosed(t *testing.T) {
 
 	var logs bytes.Buffer
 	r := newRenderer(t, malformed, nil, &logs)
-	want := `[{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed"},{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"decode_failed"}]`
-	if got, err := render(t, t.Context(), r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", "")); got != want || err != nil {
-		t.Errorf("fields = %s, err %v; want %s and no error", got, err, want)
-	}
-	if log := logs.String(); !strings.Contains(log, "the codec server's response is not a list of payloads") || strings.Contains(log, customerData) {
-		t.Errorf("log %q, want the cause and never the codec server's response", log)
-	}
-	logs.Reset()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
+	want := `[{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed","error":"the request to the codec server failed"},` +
+		`{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"decode_failed","error":"the request to the codec server failed"}]`
 	if got, err := render(t, ctx, r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", "")); got != want || !errors.Is(err, context.Canceled) || logs.Len() != 0 {
 		t.Errorf("caller gone: fields = %s, err %v, log %q; want %s, the context's error and no log", got, err, logs.String(), want)
 	}

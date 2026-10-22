@@ -143,7 +143,7 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth.yaml`](../examples/http-auth.yaml) shows a complete section.
+Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use each of its `tools` on each of its `targets`.
   - `tools` (list of strings, required): At least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
@@ -175,6 +175,6 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
-  - `file` (filename): The path of a file holding the secret. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.
+  - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.
 
   A secret field with no value, such as `authorization_header:` on its own line, is an error.

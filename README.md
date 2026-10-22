@@ -13,21 +13,21 @@
 
 These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio.
 
-### Download
+### Install
 
-Each [release](https://github.com/temporalio/temporal-operator-mcp/releases) has an archive for each platform: `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs, and `linux_amd64` and `linux_arm64`. Its "Source code" links are a copy of this repository, not the server. Set `platform` to yours, then download the archive, check that GitHub Actions built it from this repository, and extract `temporal-operator-mcp`:
+```sh
+curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-operator-mcp/main/install.sh | sh
+```
+
+This downloads the latest [release](https://github.com/temporalio/temporal-operator-mcp/releases) for your platform, checks it against the release's checksums, and installs `temporal-operator-mcp` in `~/.temporalio/bin`, where the Temporal CLI's install script puts `temporal`. If that directory isn't on your `PATH`, the script prints the line to add to your shell's startup file.
+
+The script checks only the checksums. To also check that GitHub Actions built the archive from this repository, download it with `gh` instead. Set `platform` to `darwin_arm64` (Apple silicon), `darwin_amd64` (Intel Mac), `linux_amd64` or `linux_arm64`, then move the extracted `temporal-operator-mcp` to a directory on your `PATH`:
 
 ```sh
 platform=darwin_arm64
 gh release download --repo temporalio/temporal-operator-mcp --pattern "*_$platform.tar.gz"
 gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio/temporal-operator-mcp
 tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
-```
-
-On macOS, download with `gh` as above. A browser marks what it downloads with the `com.apple.quarantine` flag, and macOS won't run a binary with that flag unless it's notarized, which this one isn't. To run a binary from a browser download, remove the flag:
-
-```sh
-xattr -d com.apple.quarantine temporal-operator-mcp
 ```
 
 ### Configure
@@ -39,13 +39,13 @@ xattr -d com.apple.quarantine temporal-operator-mcp
 Add `temporal-operator-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
 
 ```sh
-claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+claude mcp add --scope user temporal-operator -e KEY=value -- temporal-operator-mcp --stdio --config /path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+codex mcp add temporal-operator --env KEY=value -- temporal-operator-mcp --stdio --config /path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.

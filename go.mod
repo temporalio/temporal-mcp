@@ -7,6 +7,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.1-0.20260914075210-e40f35d137b7
+	github.com/nexus-rpc/sdk-go v0.7.0
 	go.temporal.io/api v1.63.6
 	go.temporal.io/cloud-sdk v0.20.0
 	go.temporal.io/sdk v1.49.0
@@ -25,7 +26,6 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/nexus-rpc/nexus-proto-annotations v0.1.0 // indirect
-	github.com/nexus-rpc/sdk-go v0.7.0 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/robfig/cron v1.2.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect

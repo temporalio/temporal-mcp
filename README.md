@@ -22,7 +22,7 @@ temporal-operator-mcp --version # checks the install
 
 ### Configure
 
-`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
+`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio-config.yaml](examples/stdio-config.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
 
 ### Connect
 
@@ -46,7 +46,7 @@ Ask the agent to check its connection to Temporal. It calls `check_connection`.
 
 ## Run a shared server
 
-For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth-config.yaml](examples/http-auth-config.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
 
 Without `--stdio`, `temporal-operator-mcp` serves MCP at `/mcp` on the config's `listen` address:
 

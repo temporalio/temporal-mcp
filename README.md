@@ -11,7 +11,7 @@
 
 ## Get started
 
-These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces.
+These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces. When you're ready, go to [Run a shared server](#run-a-shared-server) to set up this MCP server for a broader audience.
 
 ### Install
 

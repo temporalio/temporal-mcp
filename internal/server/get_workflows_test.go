@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -41,6 +42,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/temporalio/temporal-operator-mcp/internal/config"
 	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
@@ -165,6 +167,159 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 	}
 }
 
+func TestToFailureFailureInfo(t *testing.T) {
+	infos := []string{"application", "timeout", "canceled", "terminated", "server", "activity", "child_workflow_execution", "nexus_operation", "nexus_handler"}
+	tests := []struct {
+		in                     *failurepb.Failure
+		name, kind, info, want string
+	}{
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: &failurepb.ApplicationFailureInfo{
+				Type: "PaymentDeclined", NonRetryable: true, NextRetryDelay: durationpb.New(1500 * time.Millisecond), Category: enumspb.APPLICATION_ERROR_CATEGORY_BENIGN,
+			}}},
+			kind: "ApplicationFailure", info: "application",
+			want: `{"type":"PaymentDeclined","non_retryable":true,"next_retry_delay":"1.5s","category":"Benign"}`,
+		},
+		{
+			in:   &failurepb.Failure{FailureInfo: &failurepb.Failure_TimeoutFailureInfo{TimeoutFailureInfo: &failurepb.TimeoutFailureInfo{TimeoutType: enumspb.TIMEOUT_TYPE_START_TO_CLOSE}}},
+			kind: "TimeoutFailure", info: "timeout",
+			want: `{"timeout_type":"StartToClose"}`,
+		},
+		{
+			in:   &failurepb.Failure{FailureInfo: &failurepb.Failure_CanceledFailureInfo{CanceledFailureInfo: &failurepb.CanceledFailureInfo{Identity: "operator"}}},
+			kind: "CanceledFailure", info: "canceled",
+			want: `{"identity":"operator"}`,
+		},
+		{
+			in:   &failurepb.Failure{FailureInfo: &failurepb.Failure_TerminatedFailureInfo{TerminatedFailureInfo: &failurepb.TerminatedFailureInfo{Identity: "operator"}}},
+			kind: "TerminatedFailure", info: "terminated",
+			want: `{"identity":"operator"}`,
+		},
+		{
+			in:   &failurepb.Failure{FailureInfo: &failurepb.Failure_ServerFailureInfo{ServerFailureInfo: &failurepb.ServerFailureInfo{NonRetryable: true}}},
+			kind: "ServerFailure", info: "server",
+			want: `{"non_retryable":true}`,
+		},
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_ActivityFailureInfo{ActivityFailureInfo: &failurepb.ActivityFailureInfo{
+				ScheduledEventId: 17, StartedEventId: 18, Identity: "worker-1", ActivityType: &commonpb.ActivityType{Name: "Ship"}, ActivityId: "17", RetryState: enumspb.RETRY_STATE_MAXIMUM_ATTEMPTS_REACHED,
+			}}},
+			kind: "ActivityFailure", info: "activity",
+			want: `{"scheduled_event_id":17,"started_event_id":18,"identity":"worker-1","activity_type":{"name":"Ship"},"activity_id":"17","retry_state":"MaximumAttemptsReached"}`,
+		},
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_ChildWorkflowExecutionFailureInfo{ChildWorkflowExecutionFailureInfo: &failurepb.ChildWorkflowExecutionFailureInfo{
+				Namespace: "orders", WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "ship-1", RunId: "run-1"}, WorkflowType: &commonpb.WorkflowType{Name: "ShipWorkflow"},
+				InitiatedEventId: 5, StartedEventId: 6, RetryState: enumspb.RETRY_STATE_NON_RETRYABLE_FAILURE,
+			}}},
+			kind: "ChildWorkflowExecutionFailure", info: "child_workflow_execution",
+			want: `{"namespace":"orders","workflow_execution":{"workflow_id":"ship-1","run_id":"run-1"},"workflow_type":{"name":"ShipWorkflow"},"initiated_event_id":5,"started_event_id":6,"retry_state":"NonRetryableFailure"}`,
+		},
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
+				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1", OperationToken: "token-1",
+			}}},
+			kind: "NexusOperationFailure", info: "nexus_operation",
+			want: `{"scheduled_event_id":9,"endpoint":"billing","service":"Billing","operation":"charge","operation_token":"token-1"}`,
+		},
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
+				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1",
+			}}},
+			name: "NexusOperationFailure from before operation_token", kind: "NexusOperationFailure", info: "nexus_operation",
+			want: `{"scheduled_event_id":9,"endpoint":"billing","service":"Billing","operation":"charge","operation_token":"id-1"}`,
+		},
+		{
+			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusHandlerFailureInfo{NexusHandlerFailureInfo: &failurepb.NexusHandlerFailureInfo{
+				Type: "INTERNAL", RetryBehavior: enumspb.NEXUS_HANDLER_ERROR_RETRY_BEHAVIOR_NON_RETRYABLE,
+			}}},
+			kind: "NexusHandlerFailure", info: "nexus_handler",
+			want: `{"type":"INTERNAL","retry_behavior":"NonRetryable"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(cmp.Or(tt.name, tt.kind), func(t *testing.T) {
+			b, err := json.Marshal(toFailure(tt.in, new(payload.Renderer).Batch("t")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if string(got["kind"]) != strconv.Quote(tt.kind) {
+				t.Errorf("kind = %s, want %q", got["kind"], tt.kind)
+			}
+			for _, info := range infos {
+				want := "null"
+				if info == tt.info {
+					want = tt.want
+				}
+				if raw, ok := got[info]; !ok {
+					t.Errorf("%s is missing, want %s", info, want)
+				} else if string(raw) != want {
+					t.Errorf("%s = %s, want %s", info, raw, want)
+				}
+			}
+		})
+	}
+}
+
+func TestToFailureGivesEveryFailureInfoField(t *testing.T) {
+	objects := map[string]string{
+		"application_failure_info":               "application",
+		"timeout_failure_info":                   "timeout",
+		"canceled_failure_info":                  "canceled",
+		"terminated_failure_info":                "terminated",
+		"server_failure_info":                    "server",
+		"activity_failure_info":                  "activity",
+		"child_workflow_execution_failure_info":  "child_workflow_execution",
+		"nexus_operation_execution_failure_info": "nexus_operation",
+		"nexus_handler_failure_info":             "nexus_handler",
+	}
+	// Payloads are given at the top level of the failure, and the deprecated operation_id only as operation_token.
+	elsewhere := map[string]bool{
+		"temporal.api.failure.v1.ApplicationFailureInfo.details":                  true,
+		"temporal.api.failure.v1.CanceledFailureInfo.details":                     true,
+		"temporal.api.failure.v1.TimeoutFailureInfo.last_heartbeat_details":       true,
+		"temporal.api.failure.v1.ResetWorkflowFailureInfo.last_heartbeat_details": true,
+		"temporal.api.failure.v1.NexusOperationFailureInfo.operation_id":          true,
+	}
+	variants := (&failurepb.Failure{}).ProtoReflect().Descriptor().Oneofs().ByName("failure_info").Fields()
+	for i := range variants.Len() {
+		variant := variants.Get(i)
+		want := []string{}
+		for j := range variant.Message().Fields().Len() {
+			if fd := variant.Message().Fields().Get(j); !elsewhere[string(fd.FullName())] {
+				want = append(want, string(fd.Name()))
+			}
+		}
+		slices.Sort(want)
+		key, ok := objects[string(variant.Name())]
+		if !ok {
+			if len(want) > 0 {
+				t.Errorf("failure_info variant %s has fields %v but no failure object; add one to toFailure and to this test's objects map", variant.Name(), want)
+			}
+			continue
+		}
+		f := &failurepb.Failure{}
+		m := f.ProtoReflect()
+		m.Set(variant, m.NewField(variant))
+		b, err := json.Marshal(toFailure(f, new(payload.Renderer).Batch("t")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		object, _ := got[key].(map[string]any)
+		if keys := slices.Sorted(maps.Keys(object)); !slices.Equal(keys, want) {
+			t.Errorf("toFailure gives %s the object %s with keys %v, want its fields %v", variant.Name(), key, keys, want)
+		}
+	}
+}
+
 func continueOnce(ctx workflow.Context, continued bool) (bool, error) {
 	if !continued {
 		return false, workflow.NewContinueAsNewError(ctx, continueOnce, true)
@@ -257,7 +412,7 @@ func TestToolsOnDevServer(t *testing.T) {
 	if err := os.WriteFile(codecAuthorization, []byte("Bearer codec-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	encoded := &client.Options{DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
+	encoded := &client.Options{Identity: "test-client", DataConverter: converter.NewCodecDataConverter(converter.GetDefaultDataConverter(), zlib)}
 	// encode returns value as the test's clients and workers store it.
 	encode := func(t *testing.T, value any) *commonpb.Payload {
 		t.Helper()
@@ -606,6 +761,23 @@ func TestToolsOnDevServer(t *testing.T) {
 		empty := []any{}
 
 		t.Run("failed", func(t *testing.T) {
+			var scheduledID, startedID int64
+			activityIDs := map[int64]string{}
+			for iter := c.GetWorkflowHistory(ctx, "order-88231", failed.GetRunID(), false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT); iter.HasNext(); {
+				e, err := iter.Next()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if a := e.GetActivityTaskScheduledEventAttributes(); a != nil {
+					activityIDs[e.GetEventId()] = a.GetActivityId()
+				}
+				if a := e.GetActivityTaskFailedEventAttributes(); a != nil {
+					scheduledID, startedID = a.GetScheduledEventId(), a.GetStartedEventId()
+				}
+			}
+			if scheduledID == 0 {
+				t.Fatal("order-88231's history has no ActivityTaskFailed event")
+			}
 			for _, run := range getRuns(t, "local",
 				map[string]any{"workflow_id": "order-88231"},
 				map[string]any{"workflow_id": "order-88231", "run_id": failed.GetRunID()},
@@ -626,22 +798,45 @@ func TestToolsOnDevServer(t *testing.T) {
 					"result":                nil,
 					"new_execution_run_id":  nil,
 					"failure": map[string]any{
-						"message":                "activity error",
-						"kind":                   "ActivityFailure",
-						"stack_trace":            "",
-						"application":            nil,
-						"details":                empty,
-						"encoded_attributes":     nil,
-						"last_heartbeat_details": empty,
+						"message":     "activity error",
+						"kind":        "ActivityFailure",
+						"stack_trace": "",
+						"application": nil,
+						"timeout":     nil,
+						"canceled":    nil,
+						"terminated":  nil,
+						"server":      nil,
+						"activity": map[string]any{
+							"scheduled_event_id": float64(scheduledID),
+							"started_event_id":   float64(startedID),
+							"identity":           "test-client",
+							"activity_type":      map[string]any{"name": "enrich_product"},
+							"activity_id":        activityIDs[scheduledID],
+							"retry_state":        "MaximumAttemptsReached",
+						},
+						"child_workflow_execution": nil,
+						"nexus_operation":          nil,
+						"nexus_handler":            nil,
+						"details":                  empty,
+						"encoded_attributes":       nil,
+						"last_heartbeat_details":   empty,
 						"cause": map[string]any{
-							"message":                "503 Service Unavailable from catalog service",
-							"kind":                   "ApplicationFailure",
-							"stack_trace":            "",
-							"application":            map[string]any{"type": "CatalogServiceUnavailable", "non_retryable": false},
-							"details":                empty,
-							"encoded_attributes":     nil,
-							"last_heartbeat_details": empty,
-							"cause":                  nil,
+							"message":                  "503 Service Unavailable from catalog service",
+							"kind":                     "ApplicationFailure",
+							"stack_trace":              "",
+							"application":              map[string]any{"type": "CatalogServiceUnavailable", "non_retryable": false, "next_retry_delay": nil, "category": "Unspecified"},
+							"timeout":                  nil,
+							"canceled":                 nil,
+							"terminated":               nil,
+							"server":                   nil,
+							"activity":                 nil,
+							"child_workflow_execution": nil,
+							"nexus_operation":          nil,
+							"nexus_handler":            nil,
+							"details":                  empty,
+							"encoded_attributes":       nil,
+							"last_heartbeat_details":   empty,
+							"cause":                    nil,
 						},
 					},
 				})
@@ -870,14 +1065,22 @@ func TestToolsOnDevServer(t *testing.T) {
 				"run_id": rejected.GetRunID(),
 				"status": "Failed",
 				"failure": map[string]any{
-					"message":                "order rejected",
-					"kind":                   "ApplicationFailure",
-					"stack_trace":            "",
-					"application":            map[string]any{"type": "OrderRejected", "non_retryable": false},
-					"details":                []any{decoded("detail-1")},
-					"encoded_attributes":     nil,
-					"last_heartbeat_details": empty,
-					"cause":                  nil,
+					"message":                  "order rejected",
+					"kind":                     "ApplicationFailure",
+					"stack_trace":              "",
+					"application":              map[string]any{"type": "OrderRejected", "non_retryable": false, "next_retry_delay": nil, "category": "Unspecified"},
+					"timeout":                  nil,
+					"canceled":                 nil,
+					"terminated":               nil,
+					"server":                   nil,
+					"activity":                 nil,
+					"child_workflow_execution": nil,
+					"nexus_operation":          nil,
+					"nexus_handler":            nil,
+					"details":                  []any{decoded("detail-1")},
+					"encoded_attributes":       nil,
+					"last_heartbeat_details":   empty,
+					"cause":                    nil,
 				},
 			})
 		})
@@ -886,14 +1089,22 @@ func TestToolsOnDevServer(t *testing.T) {
 			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-terminated"})[0], map[string]any{
 				"status": "Terminated",
 				"failure": map[string]any{
-					"message":                "stopped by test",
-					"kind":                   "",
-					"stack_trace":            "",
-					"application":            nil,
-					"details":                empty,
-					"encoded_attributes":     nil,
-					"last_heartbeat_details": empty,
-					"cause":                  nil,
+					"message":                  "stopped by test",
+					"kind":                     "TerminatedFailure",
+					"stack_trace":              "",
+					"application":              nil,
+					"timeout":                  nil,
+					"canceled":                 nil,
+					"terminated":               map[string]any{"identity": "test-client"},
+					"server":                   nil,
+					"activity":                 nil,
+					"child_workflow_execution": nil,
+					"nexus_operation":          nil,
+					"nexus_handler":            nil,
+					"details":                  empty,
+					"encoded_attributes":       nil,
+					"last_heartbeat_details":   empty,
+					"cause":                    nil,
 				},
 			})
 		})
@@ -902,14 +1113,22 @@ func TestToolsOnDevServer(t *testing.T) {
 			check(t, getRuns(t, "dev", map[string]any{"workflow_id": "order-canceled"})[0], map[string]any{
 				"status": "Canceled",
 				"failure": map[string]any{
-					"message":                "",
-					"kind":                   "",
-					"stack_trace":            "",
-					"application":            nil,
-					"details":                empty,
-					"encoded_attributes":     nil,
-					"last_heartbeat_details": empty,
-					"cause":                  nil,
+					"message":                  "",
+					"kind":                     "CanceledFailure",
+					"stack_trace":              "",
+					"application":              nil,
+					"timeout":                  nil,
+					"canceled":                 nil,
+					"terminated":               nil,
+					"server":                   nil,
+					"activity":                 nil,
+					"child_workflow_execution": nil,
+					"nexus_operation":          nil,
+					"nexus_handler":            nil,
+					"details":                  empty,
+					"encoded_attributes":       nil,
+					"last_heartbeat_details":   empty,
+					"cause":                    nil,
 				},
 			})
 		})
@@ -1795,7 +2014,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		if got := typesOf(events); !slices.Equal(got, []string{"ActivityTaskFailed", "WorkflowExecutionFailed"}) {
 			t.Fatalf("failures = %v, want ActivityTaskFailed and WorkflowExecutionFailed", got)
 		}
-		if got := attributes(events[0])["failure"].(map[string]any)["application"]; !reflect.DeepEqual(got, map[string]any{"type": "LedgerWriteRejected", "non_retryable": true}) {
+		if got := attributes(events[0])["failure"].(map[string]any)["application"]; !reflect.DeepEqual(got, map[string]any{"type": "LedgerWriteRejected", "non_retryable": true, "next_retry_delay": nil, "category": "Unspecified"}) {
 			t.Errorf("ActivityTaskFailed application failure = %#v, want the non-retryable LedgerWriteRejected", got)
 		}
 	})

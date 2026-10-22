@@ -17,17 +17,7 @@ These steps set up `temporal-operator-mcp` for one developer, whose agent launch
 
 ```sh
 curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-operator-mcp/main/install.sh | sh
-```
-
-This downloads the latest [release](https://github.com/temporalio/temporal-operator-mcp/releases) for your platform, checks it against the release's checksums, and installs `temporal-operator-mcp` in `~/.temporalio/bin`, where the Temporal CLI's install script puts `temporal`. If that directory isn't on your `PATH`, the script prints the line to add to your shell's startup file.
-
-The script checks only the checksums. To also check that GitHub Actions built the archive from this repository, download it with `gh` instead. Set `platform` to `darwin_arm64` (Apple silicon), `darwin_amd64` (Intel Mac), `linux_amd64` or `linux_arm64`, then move the extracted `temporal-operator-mcp` to a directory on your `PATH`:
-
-```sh
-platform=darwin_arm64
-gh release download --repo temporalio/temporal-operator-mcp --pattern "*_$platform.tar.gz"
-gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio/temporal-operator-mcp
-tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
+temporal-operator-mcp --version # checks the install
 ```
 
 ### Configure

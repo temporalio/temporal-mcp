@@ -22,10 +22,10 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/identity"
-	"github.com/temporalio/temporal-operator-mcp/internal/payload"
-	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/identity"
+	"github.com/temporalio/temporal-mcp/internal/payload"
+	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 type envelope[T any] struct {

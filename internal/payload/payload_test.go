@@ -23,7 +23,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/config"
 )
 
 func newRenderer(t *testing.T, endpoint string, auth *config.Secret, logs io.Writer) *Renderer {

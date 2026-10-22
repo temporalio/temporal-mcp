@@ -1,6 +1,6 @@
-# temporal-operator-mcp ([Pre-release])
+# temporal-mcp ([Pre-release])
 
-`temporal-operator-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can read and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, and search and count workflow runs with Visibility queries.
+`temporal-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can read and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, and search and count workflow runs with Visibility queries.
 
 > [!NOTE]
 >
@@ -11,41 +11,41 @@
 
 ## Get started
 
-These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio.
+These steps set up `temporal-mcp` for one developer, whose agent launches it and talks to it over stdio.
 
 ### Download
 
-Each [release](https://github.com/temporalio/temporal-operator-mcp/releases) has an archive for each platform: `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs, and `linux_amd64` and `linux_arm64`. Its "Source code" links are a copy of this repository, not the server. Set `platform` to yours, then download the archive, check that GitHub Actions built it from this repository, and extract `temporal-operator-mcp`:
+Each [release](https://github.com/temporalio/temporal-mcp/releases) has an archive for each platform: `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs, and `linux_amd64` and `linux_arm64`. Its "Source code" links are a copy of this repository, not the server. Set `platform` to yours, then download the archive, check that GitHub Actions built it from this repository, and extract `temporal-mcp`:
 
 ```sh
 platform=darwin_arm64
-gh release download --repo temporalio/temporal-operator-mcp --pattern "*_$platform.tar.gz"
-gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio/temporal-operator-mcp
-tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
+gh release download --repo temporalio/temporal-mcp --pattern "*_$platform.tar.gz"
+gh attestation verify temporal-mcp_*_$platform.tar.gz --repo temporalio/temporal-mcp
+tar -xzf temporal-mcp_*_$platform.tar.gz temporal-mcp
 ```
 
 On macOS, download with `gh` as above. A browser marks what it downloads with the `com.apple.quarantine` flag, and macOS won't run a binary with that flag unless it's notarized, which this one isn't. To run a binary from a browser download, remove the flag:
 
 ```sh
-xattr -d com.apple.quarantine temporal-operator-mcp
+xattr -d com.apple.quarantine temporal-mcp
 ```
 
 ### Configure
 
-`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
+`temporal-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
 
 ### Connect
 
-Add `temporal-operator-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
+Add `temporal-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
 
 ```sh
-claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-mcp --stdio --config /path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-operator-mcp --stdio --config /path/to/config.yaml
+codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-mcp --stdio --config /path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.
@@ -56,17 +56,17 @@ Ask the agent to check its connection to Temporal. It calls `check_connection`.
 
 ## Run a shared server
 
-For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+For a team, run `temporal-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
 
-Without `--stdio`, `temporal-operator-mcp` serves MCP at `/mcp` on the config's `listen` address:
+Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` address:
 
 ```sh
-./temporal-operator-mcp --config config.yaml
+./temporal-mcp --config config.yaml
 ```
 
 ## Audit records and logs
 
-`temporal-operator-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
+`temporal-mcp` writes an audit record of each tool call that passes the token check to stdout, as one line of JSON, and its logs to stderr. With `--stdio`, both go to stderr, and each record's `issuer` and `subject` are null because there is no token. [`audit_log_file` and `error_log_file`](docs/config.md#audit_log_file-and-error_log_file) send the audit records and the logs to files instead.
 
 ## Build from source
 
@@ -76,11 +76,11 @@ With Go 1.27.2 or later:
 go build -o bin/ .
 ```
 
-This writes `bin/temporal-operator-mcp`.
+This writes `bin/temporal-mcp`.
 
 ## Shutdown
 
-On SIGINT or SIGTERM, `temporal-operator-mcp` stops accepting new requests and waits up to `shutdown_timeout` for the tool calls in progress to finish. With `--stdio`, closing stdin also starts this shutdown, and stdout stays open for the calls' responses:
+On SIGINT or SIGTERM, `temporal-mcp` stops accepting new requests and waits up to `shutdown_timeout` for the tool calls in progress to finish. With `--stdio`, closing stdin also starts this shutdown, and stdout stays open for the calls' responses:
 
 ```yaml
 shutdown_timeout: 25s # 8s if unset
@@ -90,7 +90,7 @@ It then cancels the calls still running, which get audit records with outcome `c
 
 Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
 
-A second signal stops `temporal-operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
+A second signal stops `temporal-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
 
 ## Lint
 
@@ -112,7 +112,7 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## Test
 
-CI runs the tests with the race detector, which does not cover the `temporal-operator-mcp` binary that the tests in `main_test.go` build and run:
+CI runs the tests with the race detector, which does not cover the `temporal-mcp` binary that the tests in `main_test.go` build and run:
 
 ```sh
 go test -race ./...

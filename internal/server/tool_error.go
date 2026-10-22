@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/config"
 )
 
 // The names of the servers a tool calls, as error messages give them.

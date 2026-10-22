@@ -1,4 +1,4 @@
-// Temporal-operator-mcp runs an MCP server that gives AI agents read access to
+// Temporal-mcp runs an MCP server that gives AI agents read access to
 // Temporal targets.
 package main
 
@@ -20,14 +20,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/payload"
-	"github.com/temporalio/temporal-operator-mcp/internal/server"
-	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/payload"
+	"github.com/temporalio/temporal-mcp/internal/server"
+	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 const (
-	name       = "temporal-operator-mcp"
+	name       = "temporal-mcp"
 	serverName = "temporal-operator"
 )
 

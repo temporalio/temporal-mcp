@@ -19,8 +19,8 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/grpc"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 type listSearchAttributesInput struct {

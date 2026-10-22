@@ -1,6 +1,6 @@
 version: 2
 
-project_name: temporal-operator-mcp
+project_name: temporal-mcp
 
 builds:
   - env:
@@ -27,7 +27,7 @@ changelog:
 
 release:
   header: |
-    `temporal-operator-mcp` is a read-only MCP server that gives AI agents access to Temporal namespaces. To install it, follow [Get started](https://github.com/temporalio/temporal-operator-mcp#get-started) in the README, which downloads the archive for your platform (not the "Source code" links) with `gh`.
+    `temporal-mcp` is a read-only MCP server that gives AI agents access to Temporal namespaces. To install it, follow [Get started](https://github.com/temporalio/temporal-mcp#get-started) in the README, which downloads the archive for your platform (not the "Source code" links) with `gh`.
   draft: true
   replace_existing_draft: true
   prerelease: auto

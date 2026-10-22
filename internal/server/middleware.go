@@ -14,6 +14,7 @@ import (
 	"maps"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -206,9 +207,9 @@ func argumentError(msg string, schema *jsonschema.Schema, args json.RawMessage) 
 	case keyword == "maxItems":
 		problems = []string{fmt.Sprintf("%s must have at most %d items", path, *schema.MaxItems)}
 	case keyword == "minimum":
-		problems = []string{fmt.Sprintf("%s must be at least %g", path, *schema.Minimum)}
+		problems = []string{path + " must be at least " + strconv.FormatFloat(*schema.Minimum, 'f', -1, 64)}
 	case keyword == "maximum":
-		problems = []string{fmt.Sprintf("%s must be at most %g", path, *schema.Maximum)}
+		problems = []string{path + " must be at most " + strconv.FormatFloat(*schema.Maximum, 'f', -1, 64)}
 	}
 	if len(problems) == 0 {
 		return msg

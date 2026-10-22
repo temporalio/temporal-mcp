@@ -68,7 +68,7 @@ func getWorkflowHistoryInputSchema() *jsonschema.Schema {
 	order.Enum, order.Default = []any{"oldest_first", "newest_first"}, json.RawMessage(`"oldest_first"`)
 	boundPageSize(schema.Properties["limit"])
 	for _, id := range schema.Properties["event_range"].Properties {
-		id.Minimum = new(1.0)
+		id.Minimum, id.Maximum = new(1.0), new(float64(maxJSONInteger))
 	}
 	return schema
 }

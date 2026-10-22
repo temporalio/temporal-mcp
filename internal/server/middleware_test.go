@@ -108,6 +108,7 @@ func TestInvalidArgumentMessages(t *testing.T) {
 		{"maxItems", "get_workflows", map[string]any{"target": "prod", "workflows": tooMany}, "workflows must have at most 50 items"},
 		{"minimum", "get_workflow_history", map[string]any{"target": "prod", "workflow_id": "wf", "event_range": map[string]any{"first": 0}}, "event_range.first must be at least 1"},
 		{"maximum", "search_workflows", map[string]any{"target": "prod", "page_size": 101}, "page_size must be at most 100"},
+		{"maximum beyond int64", "get_workflow_history", map[string]any{"target": "prod", "workflow_id": "wf", "event_range": map[string]any{"first": 1e300}}, "event_range.first must be at most 9007199254740991"},
 		{"unknown rule", "pattern", map[string]any{"code": "A"}, `validating root: validating /properties/code: pattern: "A" does not match regular expression "^[a-z]+$"`},
 	}
 	for _, tt := range tests {

@@ -49,6 +49,10 @@ func boundPageSize(p *jsonschema.Schema) {
 	p.Description += fmt.Sprintf(", from 1 to %d", maxPageSize)
 }
 
+// maxJSONInteger, 2^53-1, is the largest integer a JSON number holds exactly, and the maximum of an int64 argument:
+// the SDK validates arguments as float64, in which math.MaxInt64 rounds up to 2^63 and overflows an int64.
+const maxJSONInteger = 1<<53 - 1
+
 // maxListItems is the most items a list argument, such as get_workflows' workflows, may have.
 const maxListItems = 50
 

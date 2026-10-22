@@ -729,17 +729,22 @@ func TestToolsOnDevServer(t *testing.T) {
 			stored := func(value any) map[string]any {
 				return map[string]any{"handling": "passthrough", "encoding": "binary/zlib", "data": base64.StdEncoding.EncodeToString(encode(t, value).GetData())}
 			}
-			omitted := func(reason string, value any) map[string]any {
-				return map[string]any{"handling": "omitted", "reason": reason, "encoding": "binary/zlib", "size_bytes": float64(len(encode(t, value).GetData()))}
+			omitted := func(reason, why string, value any) map[string]any {
+				f := map[string]any{"handling": "omitted", "reason": reason, "encoding": "binary/zlib", "size_bytes": float64(len(encode(t, value).GetData()))}
+				if why != "" {
+					f["error"] = why
+				}
+				return f
 			}
+			const unauthorized = "the codec server responded HTTP 401 Unauthorized"
 			result := map[string]string{"enrichment": "product-enriched:1", "payment": "payment-authorized:1"}
 			for _, tt := range []struct {
 				target       string
 				result, memo map[string]any
 			}{
 				{"dev-passthrough", stored(result), stored("gift")},
-				{"dev-omit", omitted("payload_handling", result), omitted("payload_handling", "gift")},
-				{"dev-unauthorized", omitted("decode_failed", result), omitted("decode_failed", "gift")},
+				{"dev-omit", omitted("payload_handling", "", result), omitted("payload_handling", "", "gift")},
+				{"dev-unauthorized", omitted("decode_failed", unauthorized, result), omitted("decode_failed", unauthorized, "gift")},
 			} {
 				t.Run(tt.target, func(t *testing.T) {
 					check(t, getRuns(t, tt.target, map[string]any{"workflow_id": "order-completed"})[0], map[string]any{

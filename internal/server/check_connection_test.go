@@ -194,12 +194,9 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 	}
 }
 
-func TestAPIKeyFileRemovedAfterStartup(t *testing.T) {
+func TestUnreadableAPIKeyFile(t *testing.T) {
 	dir := t.TempDir()
-	keyPath := filepath.Join(dir, "key")
-	if err := os.WriteFile(keyPath, []byte("key\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyPath := filepath.Join(dir, "missing-key")
 	logs, err := os.Create(filepath.Join(dir, "error.log"))
 	if err != nil {
 		t.Fatal(err)
@@ -211,9 +208,6 @@ func TestAPIKeyFileRemovedAfterStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := serveTools(t, cfg, clients, t.Output())
-	if err := os.Remove(keyPath); err != nil {
-		t.Fatal(err)
-	}
 
 	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
 	if err != nil {

@@ -181,26 +181,10 @@ func TestParseAPIKey(t *testing.T) {
 func TestSecretReader(t *testing.T) {
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
-	if _, err := (&Secret{File: path}).Reader(); err == nil {
-		t.Error("Reader of a missing file: want an error")
+	env, file := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Reader(), (&Secret{File: path}).Reader()
+	if _, err := file(); err == nil {
+		t.Error("a missing file: want an error")
 	}
-	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (&Secret{File: path}).Reader(); err == nil {
-		t.Error("Reader of an empty file: want an error")
-	}
-	if err := os.WriteFile(path, []byte("file-secret-1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	reader := func(s *Secret) func() (string, error) {
-		read, err := s.Reader()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return read
-	}
-	env, file := reader(&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}), reader(&Secret{File: path})
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
 	for _, tt := range []struct {
 		read        func() (string, error)
@@ -224,6 +208,49 @@ func TestSecretReader(t *testing.T) {
 	}
 	if _, err := file(); err == nil {
 		t.Error("an empty file: want an error")
+	}
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " \n")
+	if _, err := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Reader()(); err == nil {
+		t.Error("an empty environment variable: want an error")
+	}
+}
+
+func TestCheckSecrets(t *testing.T) {
+	dir := t.TempDir()
+	missing, empty, valid := filepath.Join(dir, "missing"), filepath.Join(dir, "empty"), filepath.Join(dir, "valid")
+	for path, data := range map[string]string{empty: " \n", valid: "secret\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "secret")
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET", "")
+	os.Unsetenv("TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET")
+	cfg := &Config{
+		Targets: []Target{
+			{Name: "a", APIKey: &Secret{File: missing}},
+			{Name: "b", APIKey: &Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET"}},
+			{Name: "c", APIKey: &Secret{File: valid}},
+			{Name: "d", APIKey: &Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}},
+			{Name: "e"},
+		},
+		Codecs: map[string]Codec{
+			"empty": {AuthorizationHeader: &Secret{File: empty}},
+			"none":  {},
+			"valid": {AuthorizationHeader: &Secret{File: valid}},
+		},
+	}
+	want := "targets[0]: api_key: open " + missing + ": no such file or directory\n" +
+		"targets[1]: api_key: environment variable TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET is unset or empty\n" +
+		`codecs: "empty": authorization_header: ` + empty + " is empty"
+	if err := cfg.CheckSecrets(); err == nil || err.Error() != want {
+		t.Errorf("CheckSecrets = %v, want %q", err, want)
+	}
+
+	cfg.Targets = cfg.Targets[2:]
+	delete(cfg.Codecs, "empty")
+	if err := cfg.CheckSecrets(); err != nil {
+		t.Errorf("CheckSecrets of readable secrets = %v, want no error", err)
 	}
 }
 
@@ -361,10 +388,10 @@ func TestParseInvalid(t *testing.T) {
 				"  - {name: c, description: x, address: \"c:\", namespace: c}\n" +
 				"  - {name: d, description: x, address: \"dns:///localhost\", namespace: d}\n",
 			want: []string{
-				`targets[0]: address: "localhost": missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+				`targets[0]: address: address localhost: missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
 				`targets[1]: address: ":7233" must be host:port, with a host and a port from 1 to 65535`,
 				`targets[2]: address: "c:" must be host:port, with a host and a port from 1 to 65535`,
-				`targets[3]: address: "dns:///localhost": missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+				`targets[3]: address: address localhost: missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
 			},
 		},
 		{

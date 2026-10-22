@@ -3,7 +3,6 @@ package temporal
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -62,25 +61,6 @@ func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 				t.Errorf("code = %v, want %v (err %v)", got, tt.want, err)
 			}
 		})
-	}
-}
-
-func TestNewClientsAPIKeyFromEnv(t *testing.T) {
-	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_API_KEY"}}}
-
-	for _, value := range []string{"", "  \n"} {
-		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
-			t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", value)
-			_, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
-			if want := "targets[0]: api_key: environment variable TEMPORAL_OPERATOR_MCP_TEST_API_KEY is unset or empty"; err == nil || !strings.Contains(err.Error(), want) {
-				t.Errorf("err = %v, want it to contain %q", err, want)
-			}
-		})
-	}
-
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
-	if _, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler)); err != nil {
-		t.Error(err)
 	}
 }
 

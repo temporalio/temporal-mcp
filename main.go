@@ -77,6 +77,8 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
+	// Reported with NewClients' errors below, so that a bad secret doesn't hide them.
+	secretsErr := cfg.CheckSecrets()
 
 	// Over stdio, stdout carries only MCP messages, so the audit records default to stderr.
 	var records io.Writer = stdout
@@ -92,8 +94,8 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
 	}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
-	if err != nil {
+	clients, clientsErr := temporal.NewClients(cfg.Targets, name, version, logger)
+	if err := errors.Join(secretsErr, clientsErr); err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 

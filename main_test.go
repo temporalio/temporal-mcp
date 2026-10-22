@@ -367,6 +367,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	mismatchedClientKey := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, tls: {cert_file: %q, key_file: %q}}\n", filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key")))
 	missingKeyPath := filepath.Join(dir, "missing-api-key")
 	missingKey := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n", missingKeyPath))
+	missingKeyAndCertificate := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n  - {name: b, description: x, address: \"b:7233\", namespace: default, tls: {cert_file: %q, key_file: %q}}\n", missingKeyPath, filepath.Join(dir, "missing.crt"), filepath.Join(dir, "a.key")))
 	emptyAuthorizationPath := filepath.Join(dir, "empty-authorization")
 	if err := os.WriteFile(emptyAuthorizationPath, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -386,6 +387,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
 		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY is unset or empty`},
 		{"missing API key file", []string{"--config", missingKey}, 1, "invalid config " + missingKey + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory"},
+		{"missing API key file and client certificate", []string{"--config", missingKeyAndCertificate}, 1, "invalid config " + missingKeyAndCertificate + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory\ntargets[1]: tls: open " + filepath.Join(dir, "missing.crt")},
 		{"empty codec authorization header file", []string{"--config", emptyCodecAuthorization}, 1, "invalid config " + emptyCodecAuthorization + `: codecs: "c": authorization_header: ` + emptyAuthorizationPath + " is empty"},
 		{"unreadable certificate", []string{"--config", missingCertificate}, 1, "invalid config " + missingCertificate + ": listen_tls: open " + filepath.Join(dir, "missing.crt")},
 		{"key does not match certificate", []string{"--config", mismatchedKey}, 1, "invalid config " + mismatchedKey + ": listen_tls: tls: private key does not match public key"},

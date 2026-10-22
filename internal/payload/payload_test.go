@@ -90,9 +90,6 @@ func TestRenderDecodes(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	authFile := filepath.Join(t.TempDir(), "authorization")
-	if err := os.WriteFile(authFile, []byte("Bearer one\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	var logs bytes.Buffer
 	r := newRenderer(t, srv.URL+"/codecs/{namespace}", &config.Secret{File: authFile}, &logs)
 
@@ -294,17 +291,13 @@ func TestRenderFailsClosed(t *testing.T) {
 
 	const customerData = "customer data"
 	malformed := respond(http.StatusOK, `{"payloads":[{"data":"`+customerData+`"}]}`)
-	authFile := filepath.Join(t.TempDir(), "authorization")
-	if err := os.WriteFile(authFile, []byte("Bearer a\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	tests := []struct {
-		name        string
-		endpoint    string
-		removedAuth *config.Secret
-		reason      string
-		timeout     time.Duration
+		name     string
+		endpoint string
+		auth     *config.Secret
+		reason   string
+		timeout  time.Duration
 	}{
 		{"unauthorized", respond(http.StatusUnauthorized, customerData), nil, "the codec server responded HTTP 401 Unauthorized", 0},
 		{"bad gateway", respond(http.StatusBadGateway, customerData), nil, "the codec server responded HTTP 502 Bad Gateway", 0},
@@ -316,7 +309,7 @@ func TestRenderFailsClosed(t *testing.T) {
 		{"untrusted certificate", tlsServer.URL, nil, "the codec server's TLS certificate does not chain to a trusted CA", 0},
 		{"no response", hang.URL, nil, "timed out waiting for the codec server", 100 * time.Millisecond},
 		{"response cut short", cut.URL, nil, "the codec server's response could not be read", 0},
-		{"unreadable authorization header", malformed, &config.Secret{File: authFile}, "the authorization header for the codec server could not be read", 0},
+		{"unreadable authorization header", malformed, &config.Secret{File: filepath.Join(t.TempDir(), "missing")}, "the authorization header for the codec server could not be read", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,12 +319,7 @@ func TestRenderFailsClosed(t *testing.T) {
 				codecTimeout = tt.timeout
 			}
 			var logs bytes.Buffer
-			r := newRenderer(t, tt.endpoint, tt.removedAuth, &logs)
-			if tt.removedAuth != nil {
-				if err := os.Remove(tt.removedAuth.File); err != nil {
-					t.Fatal(err)
-				}
-			}
+			r := newRenderer(t, tt.endpoint, tt.auth, &logs)
 			if got := r.CheckCodec(t.Context(), "t"); got != tt.reason {
 				t.Errorf("CheckCodec = %q, want %q", got, tt.reason)
 			}

@@ -180,17 +180,20 @@ type Secret struct {
 }
 
 // Reader returns a function that returns the secret, trimmed of surrounding
-// whitespace. It reads an environment variable now, failing if it is unset or
-// empty, and a file now and on every call, failing if it cannot be read or is empty.
-func (s *Secret) Reader() (func() (string, error), error) {
+// whitespace. It reads an environment variable now and a file on every call, and
+// the function fails if the variable was unset or empty or the file cannot be
+// read or is empty.
+func (s *Secret) Reader() func() (string, error) {
 	if s.Env != "" {
 		v := strings.TrimSpace(os.Getenv(s.Env))
-		if v == "" {
-			return nil, fmt.Errorf("environment variable %s is unset or empty", s.Env)
+		return func() (string, error) {
+			if v == "" {
+				return "", fmt.Errorf("environment variable %s is unset or empty", s.Env)
+			}
+			return v, nil
 		}
-		return func() (string, error) { return v, nil }, nil
 	}
-	read := func() (string, error) {
+	return func() (string, error) {
 		data, err := os.ReadFile(s.File)
 		if err != nil {
 			return "", err
@@ -201,10 +204,6 @@ func (s *Secret) Reader() (func() (string, error), error) {
 		}
 		return v, nil
 	}
-	if _, err := read(); err != nil {
-		return nil, err
-	}
-	return read, nil
 }
 
 // Load reads the YAML file at path and returns the validated configuration for
@@ -218,6 +217,30 @@ func Load(path string) (*Config, error) {
 // configure HTTP.
 func LoadStdio(path string) (*Config, error) {
 	return load(path, parseStdio)
+}
+
+// CheckSecrets reads every secret in c once: each target's api_key and each
+// codec's authorization_header. It fails if an environment variable is unset or
+// empty, or a file cannot be read or is empty, and reports every such secret.
+// Load and LoadStdio read no secrets, so the server calls CheckSecrets after
+// loading its config.
+func (c *Config) CheckSecrets() error {
+	var errs []error
+	for i, t := range c.Targets {
+		if t.APIKey != nil {
+			if err := t.APIKey.check(); err != nil {
+				errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
+		if h := c.Codecs[name].AuthorizationHeader; h != nil {
+			if err := h.check(); err != nil {
+				errs = append(errs, fmt.Errorf("codecs: %q: authorization_header: %w", name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
@@ -532,16 +555,17 @@ func validateListen(listen string, authenticated bool) error {
 func validateAddress(address string) error {
 	host, port, err := net.SplitHostPort(strings.TrimPrefix(address, "dns:///"))
 	if err != nil {
-		var addrErr *net.AddrError
-		if errors.As(err, &addrErr) {
-			return fmt.Errorf("%q: %s; it must be host:port, with a host and a port from 1 to 65535", address, addrErr.Err)
-		}
-	} else if host != "" {
-		if n, err := strconv.ParseUint(port, 10, 16); err == nil && n != 0 {
-			return nil
-		}
+		return fmt.Errorf("%w; it must be host:port, with a host and a port from 1 to 65535", err)
 	}
-	return fmt.Errorf("%q must be host:port, with a host and a port from 1 to 65535", address)
+	if host == "" || !validPort(port) {
+		return fmt.Errorf("%q must be host:port, with a host and a port from 1 to 65535", address)
+	}
+	return nil
+}
+
+func validPort(s string) bool {
+	n, err := strconv.ParseUint(s, 10, 16)
+	return err == nil && n != 0
 }
 
 func (a *Auth) validate() []error {
@@ -591,6 +615,12 @@ func validateSecret(label string, s *Secret) error {
 		return fmt.Errorf("%s: exactly one of env or file is required", label)
 	}
 	return nil
+}
+
+// check reads s once, failing as Reader's function would.
+func (s *Secret) check() error {
+	_, err := s.Reader()()
+	return err
 }
 
 // validateURL requires value to be an https URL, or an http one for a loopback host or

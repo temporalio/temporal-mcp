@@ -62,7 +62,7 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The example's `payments-staging` target shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
-The server sees only the environment variables the agent passes it, so for each one your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) before the `--` in the command. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
+For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
 
 The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
 

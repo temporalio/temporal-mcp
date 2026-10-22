@@ -82,10 +82,7 @@ func ifSet(s string) any {
 }
 
 func searchWorkflowsInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[searchWorkflowsInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("search_workflows: input schema: %w", err))
-	}
+	schema := schemaFor[searchWorkflowsInput]("search_workflows", "input")
 	boundPageSize(schema.Properties["page_size"])
 	return schema
 }

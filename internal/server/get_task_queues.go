@@ -5,7 +5,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"time"
 
@@ -52,10 +51,7 @@ type poller struct {
 }
 
 func getTaskQueuesInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getTaskQueuesInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_task_queues: input schema: %w", err))
-	}
+	schema := schemaFor[getTaskQueuesInput]("get_task_queues", "input")
 	queues := schema.Properties["task_queues"]
 	boundList(queues, queues.Items)
 	schema.Properties["types"].Items.Enum = []any{"workflow", "activity", "nexus"}

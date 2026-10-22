@@ -121,10 +121,7 @@ type failure struct {
 type failureFields failure
 
 func getWorkflowsInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getWorkflowsInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: input schema: %w", err))
-	}
+	schema := schemaFor[getWorkflowsInput]("get_workflows", "input")
 	workflows := schema.Properties["workflows"]
 	boundList(workflows, workflows.Items.Properties["workflow_id"])
 	// Null-valued arguments are dropped only at the top level, so a null run_id in an item is allowed here.

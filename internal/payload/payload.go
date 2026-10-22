@@ -13,11 +13,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -51,23 +48,13 @@ type target struct {
 }
 
 // NewRenderer returns the Renderer for cfg's targets. logger gets the cause of
-// each payload that is not decoded. It fails if a codec's authorization header
-// is read from an environment variable that is unset or empty.
+// each payload that is not decoded.
 func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
-	var errs []error
-	for _, name := range slices.Sorted(maps.Keys(cfg.Codecs)) {
-		if h := cfg.Codecs[name].AuthorizationHeader; h != nil {
-			read, err := h.Reader()
-			if err != nil {
-				errs = append(errs, fmt.Errorf("codecs: %q: authorization_header: %w", name, err))
-				continue
-			}
-			authorization[name] = read
+	for name, c := range cfg.Codecs {
+		if c.AuthorizationHeader != nil {
+			authorization[name] = c.AuthorizationHeader.Reader()
 		}
-	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
 	}
 	r := &Renderer{targets: map[string]*target{}, logger: logger}
 	for _, t := range cfg.Targets {

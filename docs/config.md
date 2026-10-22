@@ -67,7 +67,7 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `name` (string, required): The name agents and authorization profiles use for the target. Names must be unique and are compared exactly, so `prod` and `Prod` are two different targets.
 - `aliases` (list of strings, optional): Other names agents may use for the target. A target name in a tool call matches an alias ignoring case, but a `name` only exactly. An alias must not be empty, and must differ from every name and every other alias ignoring case, including its own target's name.
 - `description` (string, required): What the target is, shown to agents so they can pick the right one.
-- `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`.
+- `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`. Both the host and the port are required.
 - `namespace` (string, required): The Temporal namespace, such as `my-namespace.a1b2c` or `default`.
 - `api_key` (secret, optional): Where to read the API key the server connects with. `api_key:` with no value is an error.
 - `tls` (optional): A client certificate the server presents to the target instead of an API key, as Temporal Cloud namespaces that use mTLS require. It is not allowed with `api_key`, and `tls:` with no value is an error.
@@ -175,6 +175,6 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
-  - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.
+  - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.
 
   A secret field with no value, such as `authorization_header:` on its own line, is an error.

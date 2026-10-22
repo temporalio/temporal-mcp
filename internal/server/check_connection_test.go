@@ -194,6 +194,41 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 	}
 }
 
+func TestUnreadableAPIKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "missing-key")
+	logs, err := os.Create(filepath.Join(dir, "error.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logs.Close() })
+	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: listen(t).Addr().String(), Namespace: "default", APIKey: &config.Secret{File: keyPath}}}}
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.NewTextHandler(logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := serveTools(t, cfg, clients, t.Output())
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverStage := res.StructuredContent.(map[string]any)["result"].(map[string]any)["stages"].([]any)[0].(map[string]any)
+	if got, want := serverStage["reason"], "Unknown: this server's API key for the target could not be read; the cause is in this server's log"; got != want {
+		t.Errorf("check_connection server stage reason = %q, want %q", got, want)
+	}
+	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "get_workflows", Arguments: map[string]any{"target": "a", "workflows": []any{map[string]any{"workflow_id": "w"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := errorContent(t, res)["message"], "workflows[0]: this server's API key for the target could not be read; the cause is in this server's log"; got != want {
+		t.Errorf("get_workflows error message = %q, want %q", got, want)
+	}
+	if log, err := os.ReadFile(logs.Name()); err != nil || !strings.Contains(string(log), keyPath) {
+		t.Errorf("error log %q, %v; want the cause, naming the key file", log, err)
+	}
+}
+
 // newCertificate returns a self-signed certificate for 127.0.0.1 named name, and its PEM certificate and key.
 func newCertificate(t *testing.T, name string) (cert *x509.Certificate, certPEM, keyPEM []byte) {
 	t.Helper()

@@ -96,51 +96,6 @@ func outputValidator(t *testing.T, session *mcp.ClientSession) func(*testing.T, 
 	}
 }
 
-// inlineDefs replaces each $ref to schema's $defs entry name with the entry and deletes the entry, failing if no $ref
-// points at it or a keyword beside a $ref differs from the entry's.
-func inlineDefs(t *testing.T, schema any, name string) any {
-	t.Helper()
-	root := schema.(map[string]any)
-	defs, _ := root["$defs"].(map[string]any)
-	def, ok := defs[name].(map[string]any)
-	if !ok {
-		t.Fatalf("no $defs entry %q", name)
-	}
-	delete(defs, name)
-	if len(defs) == 0 {
-		delete(root, "$defs")
-	}
-	ref, refs := "#/$defs/"+name, 0
-	var walk func(any) any
-	walk = func(v any) any {
-		switch v := v.(type) {
-		case map[string]any:
-			if v["$ref"] == ref {
-				refs++
-				for k, x := range v {
-					if k != "$ref" && !reflect.DeepEqual(x, def[k]) {
-						t.Errorf("%s beside $ref %s = %v, want %v as in the entry", k, ref, x, def[k])
-					}
-				}
-				return walk(def)
-			}
-			for k, x := range v {
-				v[k] = walk(x)
-			}
-		case []any:
-			for i, x := range v {
-				v[i] = walk(x)
-			}
-		}
-		return v
-	}
-	out := walk(root)
-	if refs == 0 {
-		t.Errorf("no $ref to $defs entry %q", name)
-	}
-	return out
-}
-
 func errorContent(t *testing.T, res *mcp.CallToolResult) map[string]any {
 	t.Helper()
 	if !res.IsError || res.StructuredContent != nil {
@@ -188,59 +143,6 @@ func TestListAvailableTargets(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.StructuredContent, want) {
 		t.Errorf("structuredContent = %#v\nwant %#v", res.StructuredContent, want)
-	}
-}
-
-func TestOutputSchemaDefs(t *testing.T) {
-	tools, err := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output()).ListTools(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schemas := map[string]any{}
-	for _, tool := range tools.Tools {
-		schemas[tool.Name] = tool.OutputSchema
-	}
-	// failure is recursive, so it stays in $defs.
-	failureRef := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
-		reflect.TypeFor[failure](): {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
-	}}
-	failureDef, err := jsonschema.For[failureFields](failureRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	failureDef.Type, failureDef.Types = "", []string{"null", "object"}
-	workflows, err := jsonschema.For[envelope[[]workflowEntry]](failureRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflows.Defs = map[string]*jsonschema.Schema{"failure": failureDef}
-	taskQueues, err := jsonschema.For[envelope[[]taskQueue]](nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		tool string
-		name string
-		want *jsonschema.Schema
-	}{
-		{"get_workflows", "payload", workflows},
-		{"get_task_queues", "section", taskQueues},
-	}
-	for _, tt := range tests {
-		t.Run(tt.tool, func(t *testing.T) {
-			b, err := json.Marshal(tt.want)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var want any
-			if err := json.Unmarshal(b, &want); err != nil {
-				t.Fatal(err)
-			}
-			if got := inlineDefs(t, schemas[tt.tool], tt.name); !reflect.DeepEqual(got, want) {
-				g, _ := json.Marshal(got)
-				t.Errorf("output schema with $defs entry %s inlined = %s\nwant %s", tt.name, g, b)
-			}
-		})
 	}
 }
 

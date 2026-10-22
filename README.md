@@ -30,7 +30,7 @@ temporal server start-dev
 
 ### Configure
 
-`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and delete its `payments-staging` target, keeping the `local` target, which reads the dev server. `payments-staging` reads its API key from an environment variable, and the server doesn't start while that variable is unset.
+`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio-local-config.yaml](examples/stdio-local-config.yaml), whose `local` target reads the dev server.
 
 ### Connect
 
@@ -60,7 +60,7 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 ### Add your own namespaces
 
-To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The example's `payments-staging` target shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
+To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio.yaml](examples/stdio.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
 

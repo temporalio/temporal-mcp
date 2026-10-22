@@ -80,7 +80,7 @@ This writes `bin/temporal-operator-mcp`.
 
 ## Shutdown
 
-In HTTP mode, on SIGINT or SIGTERM, `temporal-operator-mcp` stops accepting connections and waits up to `shutdown_timeout` for the tool calls in progress to finish:
+On SIGINT or SIGTERM, `temporal-operator-mcp` stops accepting new requests and waits up to `shutdown_timeout` for the tool calls in progress to finish. With `--stdio`, closing stdin also starts this shutdown, and stdout stays open for the calls' responses:
 
 ```yaml
 shutdown_timeout: 25s # 8s if unset

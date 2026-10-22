@@ -30,7 +30,7 @@ type Config struct {
 	// ListenTLS, when set, makes the server serve HTTPS on Listen rather than plain HTTP.
 	ListenTLS *Certificate `yaml:"listen_tls"`
 	// ShutdownTimeout is how long the server waits for the tool calls in progress
-	// after SIGINT or SIGTERM before it cancels them. Zero means DefaultShutdownTimeout.
+	// after SIGINT, SIGTERM or stdin closing before it cancels them. Zero means DefaultShutdownTimeout.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	Targets         []Target      `yaml:"targets"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
@@ -278,7 +278,11 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 			cfg.Codecs[name] = codec
 		}
 	}
-	if err := errors.Join(validate(&cfg, &keys), cfg.validateTargets()); err != nil {
+	var shutdownErr error
+	if cfg.ShutdownTimeout < 0 {
+		shutdownErr = fmt.Errorf("shutdown_timeout: %s is negative", cfg.ShutdownTimeout)
+	}
+	if err := errors.Join(validate(&cfg, &keys), shutdownErr, cfg.validateTargets()); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -335,9 +339,6 @@ func (c *Config) validateHTTP() error {
 	}
 	if err := validateCertificate("listen_tls", c.ListenTLS); err != nil {
 		errs = append(errs, err)
-	}
-	if c.ShutdownTimeout < 0 {
-		errs = append(errs, fmt.Errorf("shutdown_timeout: %s is negative", c.ShutdownTimeout))
 	}
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)

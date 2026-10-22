@@ -37,14 +37,18 @@ func recoverPanics(logger *slog.Logger) mcp.Middleware {
 
 var errServerShutdown = errors.New("the server is shutting down")
 
-// cancelWith cancels each request with errServerShutdown once stop is done. The SDK cancels a request only when its
-// HTTP request ends, and only for MCP 2026-07-28 and later.
-func cancelWith(stop context.Context) mcp.Middleware {
+// cancelWith cancels subscription listeners when subscriptions is done, and
+// every request when stop is done, whatever its MCP protocol version.
+func cancelWith(stop, subscriptions context.Context) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			ctx, cancel := context.WithCancelCause(ctx)
 			defer cancel(nil)
-			defer context.AfterFunc(stop, func() { cancel(errServerShutdown) })()
+			shutdown := func() { cancel(errServerShutdown) }
+			defer context.AfterFunc(stop, shutdown)()
+			if method == "subscriptions/listen" {
+				defer context.AfterFunc(subscriptions, shutdown)()
+			}
 			return next(ctx, method, req)
 		}
 	}

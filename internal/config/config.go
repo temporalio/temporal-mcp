@@ -173,37 +173,32 @@ type Codec struct {
 
 // Secret says where to read a secret from. Exactly one field is set.
 type Secret struct {
-	// Env is the name of an environment variable holding the secret, read at startup.
+	// Env is the name of an environment variable holding the secret, read at startup and on every use.
 	Env string `yaml:"env"`
 	// File is the path of a file holding the secret, read at startup and on every use.
 	File string `yaml:"file"`
 }
 
-// Reader returns a function that returns the secret, trimmed of surrounding
-// whitespace. It reads an environment variable now and a file on every call, and
-// the function fails if the variable was unset or empty or the file cannot be
-// read or is empty.
-func (s *Secret) Reader() func() (string, error) {
+// Read returns the secret, trimmed of surrounding whitespace. It reads the
+// environment variable or file on every call, and fails if the variable is unset
+// or empty or the file cannot be read or is empty.
+func (s *Secret) Read() (string, error) {
 	if s.Env != "" {
 		v := strings.TrimSpace(os.Getenv(s.Env))
-		return func() (string, error) {
-			if v == "" {
-				return "", fmt.Errorf("environment variable %s is unset or empty", s.Env)
-			}
-			return v, nil
-		}
-	}
-	return func() (string, error) {
-		data, err := os.ReadFile(s.File)
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimSpace(string(data))
 		if v == "" {
-			return "", fmt.Errorf("%s is empty", s.File)
+			return "", fmt.Errorf("environment variable %s is unset or empty", s.Env)
 		}
 		return v, nil
 	}
+	data, err := os.ReadFile(s.File)
+	if err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" {
+		return "", fmt.Errorf("%s is empty", s.File)
+	}
+	return v, nil
 }
 
 // Load reads the YAML file at path and returns the validated configuration for
@@ -228,14 +223,14 @@ func (c *Config) CheckSecrets() error {
 	var errs []error
 	for i, t := range c.Targets {
 		if t.APIKey != nil {
-			if err := t.APIKey.check(); err != nil {
+			if _, err := t.APIKey.Read(); err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
 			}
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
 		if h := c.Codecs[name].AuthorizationHeader; h != nil {
-			if err := h.check(); err != nil {
+			if _, err := h.Read(); err != nil {
 				errs = append(errs, fmt.Errorf("codecs: %q: authorization_header: %w", name, err))
 			}
 		}
@@ -615,12 +610,6 @@ func validateSecret(label string, s *Secret) error {
 		return fmt.Errorf("%s: exactly one of env or file is required", label)
 	}
 	return nil
-}
-
-// check reads s once, failing as Reader's function would.
-func (s *Secret) check() error {
-	_, err := s.Reader()()
-	return err
 }
 
 // validateURL requires value to be an https URL, or an http one for a loopback host or

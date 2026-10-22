@@ -174,7 +174,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
-  - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
+  - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.
 
   A secret field with no value, such as `authorization_header:` on its own line, is an error.

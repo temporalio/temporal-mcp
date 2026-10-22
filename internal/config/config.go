@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -174,13 +175,13 @@ type Codec struct {
 type Secret struct {
 	// Env is the name of an environment variable holding the secret, read at startup.
 	Env string `yaml:"env"`
-	// File is the path of a file holding the secret, read on every use.
+	// File is the path of a file holding the secret, read at startup and on every use.
 	File string `yaml:"file"`
 }
 
 // Reader returns a function that returns the secret, trimmed of surrounding
 // whitespace. It reads an environment variable now, failing if it is unset or
-// empty, and a file on every call, failing if it cannot be read or is empty.
+// empty, and a file now and on every call, failing if it cannot be read or is empty.
 func (s *Secret) Reader() (func() (string, error), error) {
 	if s.Env != "" {
 		v := strings.TrimSpace(os.Getenv(s.Env))
@@ -189,7 +190,7 @@ func (s *Secret) Reader() (func() (string, error), error) {
 		}
 		return func() (string, error) { return v, nil }, nil
 	}
-	return func() (string, error) {
+	read := func() (string, error) {
 		data, err := os.ReadFile(s.File)
 		if err != nil {
 			return "", err
@@ -199,7 +200,11 @@ func (s *Secret) Reader() (func() (string, error), error) {
 			return "", fmt.Errorf("%s is empty", s.File)
 		}
 		return v, nil
-	}, nil
+	}
+	if _, err := read(); err != nil {
+		return nil, err
+	}
+	return read, nil
 }
 
 // Load reads the YAML file at path and returns the validated configuration for
@@ -373,6 +378,11 @@ func (c *Config) validateTargets() error {
 				errs = append(errs, fmt.Errorf("%s: %s is required", label, f.name))
 			}
 		}
+		if strings.TrimSpace(t.Address) != "" {
+			if err := validateAddress(t.Address); err != nil {
+				errs = append(errs, fmt.Errorf("%s: address: %w", label, err))
+			}
+		}
 		if strings.TrimSpace(t.Name) != "" {
 			if j, ok := names[t.Name]; ok {
 				errs = append(errs, fmt.Errorf("%s: name %q conflicts with the name of targets[%d]", label, t.Name, j))
@@ -515,6 +525,23 @@ func validateListen(listen string, authenticated bool) error {
 		return fmt.Errorf("listen: host %q must be a loopback IP address such as 127.0.0.1 or ::1, because the config has no auth section", host)
 	}
 	return nil
+}
+
+// validateAddress requires address to be host:port, optionally after a dns:///
+// prefix, with a host and a port from 1 to 65535.
+func validateAddress(address string) error {
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(address, "dns:///"))
+	if err != nil {
+		var addrErr *net.AddrError
+		if errors.As(err, &addrErr) {
+			return fmt.Errorf("%q: %s; it must be host:port, with a host and a port from 1 to 65535", address, addrErr.Err)
+		}
+	} else if host != "" {
+		if n, err := strconv.ParseUint(port, 10, 16); err == nil && n != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%q must be host:port, with a host and a port from 1 to 65535", address)
 }
 
 func (a *Auth) validate() []error {

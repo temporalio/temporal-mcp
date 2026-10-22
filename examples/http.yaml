@@ -7,7 +7,8 @@ targets:
     description: Staging namespace of the payments service, on Temporal Cloud.
     address: payments-staging.a1b2c.tmprl.cloud:7233
     namespace: payments-staging.a1b2c
-    # Read on every use, so a rotated key takes effect without a restart.
+    # Read at startup, where an unreadable or empty file stops the server, and
+    # again on every use, so a rotated key takes effect without a restart.
     api_key: {file: /etc/temporal-operator-mcp/payments-staging.key}
   - name: local
     description: Local Temporal dev server.

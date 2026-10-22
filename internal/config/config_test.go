@@ -94,6 +94,15 @@ func TestParseLoopbackListen(t *testing.T) {
 	}
 }
 
+func TestParseTargetAddress(t *testing.T) {
+	for _, address := range []string{"localhost:1", "localhost:65535", "dns:///prod.example.tmprl.cloud:7233"} {
+		data := "listen: 127.0.0.1:8080\ntargets:\n  - {name: a, description: x, address: \"" + address + "\", namespace: a}\n"
+		if _, err := parse([]byte(data)); err != nil {
+			t.Errorf("address %s: %v", address, err)
+		}
+	}
+}
+
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
 		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
@@ -172,6 +181,18 @@ func TestParseAPIKey(t *testing.T) {
 func TestSecretReader(t *testing.T) {
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
+	if _, err := (&Secret{File: path}).Reader(); err == nil {
+		t.Error("Reader of a missing file: want an error")
+	}
+	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Secret{File: path}).Reader(); err == nil {
+		t.Error("Reader of an empty file: want an error")
+	}
+	if err := os.WriteFile(path, []byte("file-secret-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	reader := func(s *Secret) func() (string, error) {
 		read, err := s.Reader()
 		if err != nil {
@@ -331,6 +352,34 @@ func TestParseInvalid(t *testing.T) {
 			name: "whitespace-only required target fields",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - {name: \" \", description: \"\\t\", address: \" \", namespace: \"  \"}\n",
 			want: []string{"targets[0]: name is required", "targets[0]: description is required", "targets[0]: address is required", "targets[0]: namespace is required"},
+		},
+		{
+			name: "address without a host or port",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: localhost, namespace: a}\n" +
+				"  - {name: b, description: x, address: \":7233\", namespace: b}\n" +
+				"  - {name: c, description: x, address: \"c:\", namespace: c}\n" +
+				"  - {name: d, description: x, address: \"dns:///localhost\", namespace: d}\n",
+			want: []string{
+				`targets[0]: address: "localhost": missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+				`targets[1]: address: ":7233" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[2]: address: "c:" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[3]: address: "dns:///localhost": missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+			},
+		},
+		{
+			name: "address with a port that is not a number from 1 to 65535, or a scheme other than dns:///",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: \"localhost:abc\", namespace: a}\n" +
+				"  - {name: b, description: x, address: \"localhost:0\", namespace: b}\n" +
+				"  - {name: c, description: x, address: \"localhost:99999\", namespace: c}\n" +
+				"  - {name: d, description: x, address: \"https://host\", namespace: d}\n",
+			want: []string{
+				`targets[0]: address: "localhost:abc" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[1]: address: "localhost:0" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[2]: address: "localhost:99999" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[3]: address: "https://host" must be host:port, with a host and a port from 1 to 65535`,
+			},
 		},
 		{
 			name: "whitespace-only alias",

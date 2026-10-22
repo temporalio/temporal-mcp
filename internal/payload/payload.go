@@ -51,7 +51,7 @@ type target struct {
 
 // NewRenderer returns the Renderer for cfg's targets. logger gets the cause of
 // each payload that is not decoded. It fails if a codec's authorization header
-// is read from an environment variable that is unset or empty.
+// cannot be read.
 func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
 	var errs []error

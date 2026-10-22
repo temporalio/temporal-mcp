@@ -49,6 +49,10 @@ func boundPageSize(p *jsonschema.Schema) {
 	p.Description += fmt.Sprintf(", from 1 to %d", maxPageSize)
 }
 
+// maxJSONInteger, 2^53-1, is the largest integer a JSON number holds exactly, and the maximum of an int64 argument:
+// the SDK validates arguments as float64, in which math.MaxInt64 rounds up to 2^63 and overflows an int64.
+const maxJSONInteger = 1<<53 - 1
+
 // maxListItems is the most items a list argument, such as get_workflows' workflows, may have.
 const maxListItems = 50
 
@@ -61,20 +65,31 @@ func boundList(p, key *jsonschema.Schema) {
 
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
-// A toolServer is an MCP server that knows the access, read or write, of each tool addTool adds to it.
+// A toolServer is an MCP server that knows the access, read or write, and the input schema of each tool addTool adds
+// to it.
 type toolServer struct {
 	*mcp.Server
 	access map[string]string
+	inputs map[string]*jsonschema.Schema
+}
+
+// schemaFor returns the schema inferred from T with opts, which may be nil, and panics naming tool and which schema, such as "input", if it cannot.
+func schemaFor[T any](tool, which string, opts *jsonschema.ForOptions) *jsonschema.Schema {
+	schema, err := jsonschema.For[T](opts)
+	if err != nil {
+		panic(fmt.Errorf("tool %q: %s schema: %w", tool, which, err))
+	}
+	return schema
 }
 
 func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.ToolHandlerFor[In, Out]) string {
-	if def.OutputSchema == nil {
-		schema, err := jsonschema.For[Out](&jsonschema.ForOptions{})
-		if err != nil {
-			panic(fmt.Errorf("tool %q: output schema: %w", def.Name, err))
-		}
-		def.OutputSchema = schema
+	if def.InputSchema == nil {
+		def.InputSchema = schemaFor[In](def.Name, "input", nil)
 	}
+	if def.OutputSchema == nil {
+		def.OutputSchema = schemaFor[Out](def.Name, "output", nil)
+	}
+	s.inputs[def.Name], _ = def.InputSchema.(*jsonschema.Schema)
 	s.access[def.Name] = "write"
 	if def.Annotations != nil && def.Annotations.ReadOnlyHint {
 		s.access[def.Name] = "read"
@@ -228,8 +243,8 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 
 // newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
 func newServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
-	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}}
-	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), audit(records, logger, cfg, s.access), normalizeToolCalls, authorize(cfg))
+	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}, map[string]*jsonschema.Schema{}}
+	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), audit(records, logger, cfg, s.access), normalizeToolCalls(s.inputs), authorize(cfg))
 	return s, addTools(s, cfg, clients, payloads)
 }
 

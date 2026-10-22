@@ -133,10 +133,7 @@ type failure struct {
 type failureFields failure
 
 func getWorkflowsInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getWorkflowsInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: input schema: %w", err))
-	}
+	schema := schemaFor[getWorkflowsInput]("get_workflows", "input", nil)
 	workflows := schema.Properties["workflows"]
 	boundList(workflows, workflows.Items.Properties["workflow_id"])
 	// Null-valued arguments are dropped only at the top level, so a null run_id in an item is allowed here.
@@ -146,24 +143,15 @@ func getWorkflowsInputSchema() *jsonschema.Schema {
 }
 
 func getWorkflowsOutputSchema() *jsonschema.Schema {
-	payloadDef, err := jsonschema.For[payload.Field](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: payload schema: %w", err))
-	}
+	payloadDef := schemaFor[payload.Field]("get_workflows", "payload", nil)
 	payloadDef.Type, payloadDef.Types = "", []string{"null", "object"}
 	opts := &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[failure]():       {Types: []string{"null", "object"}, Ref: "#/$defs/failure"},
 		reflect.TypeFor[payload.Field](): {Types: []string{"null", "object"}, Ref: "#/$defs/payload"},
 	}}
-	failureDef, err := jsonschema.For[failureFields](opts)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: failure schema: %w", err))
-	}
+	failureDef := schemaFor[failureFields]("get_workflows", "failure", opts)
 	failureDef.Type, failureDef.Types = "", []string{"null", "object"}
-	schema, err := jsonschema.For[envelope[[]workflowEntry]](opts)
-	if err != nil {
-		panic(fmt.Errorf("get_workflows: output schema: %w", err))
-	}
+	schema := schemaFor[envelope[[]workflowEntry]]("get_workflows", "output", opts)
 	schema.Defs = map[string]*jsonschema.Schema{"failure": failureDef, "payload": payloadDef}
 	return schema
 }

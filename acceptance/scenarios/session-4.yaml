@@ -1,0 +1,18 @@
+version: 1
+name: temporal-operator-mcp-session-4
+session:
+  provider: codex
+  sandbox: read-only
+  approvalPolicy: never
+  ephemeral: true
+  targetMcp: |
+    {
+      "name": "temporal-operator",
+      "transport": "stdio",
+      "command": {{json .Server}},
+      "args": ["--stdio", "--config", {{json .Config}}],
+      "cwd": {{json .Root}},
+      "expectedTools": ["list_available_targets", "list_search_attributes", "search_workflows", "count_workflows", "get_workflow_history", "get_task_queues"]
+    }
+prompts:
+  - "We had a ledger incident from {{.IncidentStart}} through {{.IncidentEnd}}. Which teams' workflows were affected, and which ones touch money? Normal runs finish within 5 seconds."

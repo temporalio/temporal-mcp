@@ -1,0 +1,18 @@
+version: 1
+name: temporal-operator-mcp-session-3
+session:
+  provider: codex
+  sandbox: read-only
+  approvalPolicy: never
+  ephemeral: true
+  targetMcp: |
+    {
+      "name": "temporal-operator",
+      "transport": "stdio",
+      "command": {{json .Server}},
+      "args": ["--stdio", "--config", {{json .Config}}],
+      "cwd": {{json .Root}},
+      "expectedTools": ["list_available_targets", "list_search_attributes", "search_workflows", "count_workflows", "get_workflow_history"]
+    }
+prompts:
+  - "We shipped fulfillment build fulfillment-v2 at {{.Deployed}}. I think some in-flight runs are hitting non-determinism errors. How many, and which ones?"

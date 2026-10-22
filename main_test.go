@@ -331,7 +331,7 @@ func TestBinaryDoesNotImportFixture(t *testing.T) {
 		t.Fatalf("go list -deps did not list internal/server:\n%s", out)
 	}
 	if slices.Contains(deps, "github.com/temporalio/temporal-operator-mcp/internal/fixture") {
-		t.Error("the binary imports internal/fixture, which must stay test-only")
+		t.Error("the binary imports internal/fixture, which only the tests and the acceptance runner may use")
 	}
 }
 

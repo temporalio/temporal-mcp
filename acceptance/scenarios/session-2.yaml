@@ -1,0 +1,19 @@
+version: 1
+name: temporal-operator-mcp-session-2
+session:
+  provider: codex
+  sandbox: read-only
+  approvalPolicy: never
+  ephemeral: true
+  targetMcp: |
+    {
+      "name": "temporal-operator",
+      "transport": "stdio",
+      "command": {{json .Server}},
+      "args": ["--stdio", "--config", {{json .Config}}],
+      "cwd": {{json .Root}},
+      "expectedTools": ["list_available_targets", "get_workflows", "get_workflow_history", "get_task_queues"]
+    }
+prompts:
+  - "In orders prod, is payment-reconciliation-main currently stuck? It normally finishes within 15 minutes. Please investigate."
+  - "Can this exact workflow dispatch its pending work right now, and what does the evidence not tell us?"

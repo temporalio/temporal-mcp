@@ -11,7 +11,7 @@
 
 ## Get started
 
-These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio.
+These steps set up `temporal-operator-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces.
 
 ### Install
 
@@ -30,29 +30,51 @@ gh attestation verify temporal-operator-mcp_*_$platform.tar.gz --repo temporalio
 tar -xzf temporal-operator-mcp_*_$platform.tar.gz temporal-operator-mcp
 ```
 
+### Start a dev server
+
+[Install the Temporal CLI](https://docs.temporal.io/cli/setup-cli) and start a dev server, which serves a `default` namespace at `localhost:7233`:
+
+```sh
+temporal server start-dev
+```
+
 ### Configure
 
-`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
+`temporal-operator-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and delete its `payments-staging` target, keeping the `local` target, which reads the dev server. `payments-staging` reads its API key from an environment variable, and the server doesn't start while that variable is unset.
 
 ### Connect
 
-Add `temporal-operator-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
+Add `temporal-operator-mcp` to your agent with `--stdio` and the absolute path of your config, since the agent starts the server from its own working directory. For Claude Code, with `--scope user` so the server is available to you in every project, instead of only in the current directory:
 
 ```sh
-claude mcp add --scope user temporal-operator -e KEY=value -- temporal-operator-mcp --stdio --config /path/to/config.yaml
+claude mcp add --scope user temporal-operator -- temporal-operator-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal-operator --env KEY=value -- temporal-operator-mcp --stdio --config /path/to/config.yaml
+codex mcp add temporal-operator -- temporal-operator-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.
 
 ### Check
 
-Ask the agent to check its connection to Temporal. It calls `check_connection`.
+Ask the agent to check its connection to the `local` target. It calls `check_connection`, which reports whether the server can reach the dev server and its `default` namespace.
+
+Once your app runs workflows on the dev server, or once you add your own namespaces, ask the agent about them, for example:
+
+- Why is workflow `order-123` stuck?
+- Which workflow runs failed in the last hour?
+- Is any worker polling the `orders` task queue?
+
+### Add your own namespaces
+
+To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The example's `payments-staging` target shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
+
+The server sees only the environment variables the agent passes it, so for each one your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) before the `--` in the command. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
+
+The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
 
 ## Run a shared server
 
@@ -91,31 +113,5 @@ It then cancels the calls still running, which get audit records with outcome `c
 Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
 
 A second signal stops `temporal-operator-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
-
-## Lint
-
-CI runs `go vet` and a `gofmt` check:
-
-```sh
-go vet ./...
-test -z "$(gofmt -l .)"
-```
-
-If the `gofmt` check fails, `gofmt -l .` lists the unformatted files and `gofmt -w .` fixes them.
-
-Locally we also run staticcheck and govulncheck:
-
-```sh
-go run honnef.co/go/tools/cmd/staticcheck@latest ./...
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-```
-
-## Test
-
-CI runs the tests with the race detector, which does not cover the `temporal-operator-mcp` binary that the tests in `main_test.go` build and run:
-
-```sh
-go test -race ./...
-```
 
 [Pre-release]: https://docs.temporal.io/evaluate/development-production-features/release-stages

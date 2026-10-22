@@ -1,0 +1,7 @@
+# --stdio against a local dev server started with temporal server start-dev:
+# no API key, plaintext. See docs/config.md.
+targets:
+  - name: local
+    description: Local Temporal dev server.
+    address: localhost:7233
+    namespace: default

@@ -8,7 +8,33 @@ Open a GitHub issue for bugs, feature requests and questions. Search the existin
 
 Open an issue to discuss a substantial change, such as a new tool or config field, before you start on it. Small fixes can go straight to a pull request.
 
-Keep each pull request to one logical change, include tests for behavior changes, and update [docs/config.md](docs/config.md) when you add or change a config field. The README's [Build from source](README.md#build-from-source), [Lint](README.md#lint) and [Test](README.md#test) sections have the commands, and CI must pass before a pull request can be merged.
+Keep each pull request to one logical change, include tests for behavior changes, and update [docs/config.md](docs/config.md) when you add or change a config field. The README's [Build from source](README.md#build-from-source) section and the [Lint](#lint) and [Test](#test) sections below have the commands, and CI must pass before a pull request can be merged.
+
+### Lint
+
+CI runs `go vet` and a `gofmt` check:
+
+```sh
+go vet ./...
+test -z "$(gofmt -l .)"
+```
+
+If the `gofmt` check fails, `gofmt -l .` lists the unformatted files and `gofmt -w .` fixes them.
+
+Locally we also run staticcheck and govulncheck:
+
+```sh
+go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+```
+
+### Test
+
+CI runs the tests with the race detector, which does not cover the `temporal-operator-mcp` binary that the tests in `main_test.go` build and run:
+
+```sh
+go test -race ./...
+```
 
 ## AI-assisted contributions
 

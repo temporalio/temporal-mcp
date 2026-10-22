@@ -161,6 +161,7 @@ func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 
 // IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
 func IsCloud(address string) bool {
+	address = strings.TrimPrefix(address, "dns:///")
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address

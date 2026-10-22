@@ -123,7 +123,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
 	}, getWorkflows(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:        "get_workflow_history",
-		Description: "Get the events of a workflow run's history, oldest first unless order is newest_first, each with its event_id, event_time, event_type and attributes; run_id in the result is the run read. event_types (event types, or the category failures: every event type that ends in Failed or TimedOut) and event_range filter the events, and combine. A call can return fewer than limit events, even none, while more events still match: until complete is true, call next_call's tool with its arguments unchanged for the rest.",
+		Description: "Get the events of a workflow run's history, oldest first unless order is newest_first, each with its event_id, event_time, event_type, attributes and links; run_id in the result is the run read. links point to related executions, such as the workflow run a Nexus operation started; read a linked run in another namespace with get_workflows on the target for that namespace (see list_available_targets). event_types (event types, or the category failures: every event type that ends in Failed or TimedOut) and event_range filter the events, and combine. A call can return fewer than limit events, even none, while more events still match: until complete is true, call next_call's tool with its arguments unchanged for the rest.",
 		Annotations: readOnlyAnnotations,
 		InputSchema: getWorkflowHistoryInputSchema(),
 	}, []string{

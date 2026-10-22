@@ -23,9 +23,11 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/nexus-rpc/sdk-go/nexus"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
+	nexuspb "go.temporal.io/api/nexus/v1"
 	"go.temporal.io/api/operatorservice/v1"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
@@ -34,6 +36,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/temporalnexus"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -192,6 +195,23 @@ func rejectWithDetails(workflow.Context) error {
 	return temporal.NewApplicationError("order rejected", "OrderRejected", "detail-1")
 }
 
+// handlerNamespace is the namespace of the workflow that greetOperation starts, apart from the caller's.
+const handlerNamespace = "nexus-handler"
+
+func greet(_ workflow.Context, name string) (string, error) {
+	return "hello " + name, nil
+}
+
+var greetOperation = temporalnexus.NewWorkflowRunOperation("greet", greet, func(_ context.Context, name string, _ nexus.StartOperationOptions) (client.StartWorkflowOptions, error) {
+	return client.StartWorkflowOptions{ID: "greet-" + name}, nil
+})
+
+func callGreet(ctx workflow.Context, name string) (string, error) {
+	var greeting string
+	err := workflow.NewNexusClient("greeter", "greeter").ExecuteOperation(ctx, greetOperation, name, workflow.NexusOperationOptions{}).Get(ctx, &greeting)
+	return greeting, err
+}
+
 func waitUntil(ctx context.Context, t *testing.T, what string, done func() bool) {
 	t.Helper()
 	for !done() {
@@ -257,6 +277,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		"--search-attribute", "SaDatetime=Datetime",
 		"--search-attribute", "SaKeywordList=KeywordList",
 		"--search-attribute", "Domain=Keyword",
+		"--namespace", handlerNamespace,
 		// Small history pages let a filtered get_workflow_history read reach its page limit on a short history.
 		"--dynamic-config-value", "frontend.historyMaxPageSize=5",
 	}})
@@ -417,7 +438,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		"  - {name: dev-omit, description: x, address: %[3]q, namespace: default}\n"+
 		"  - {name: dev-unauthorized, description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: unauthorized}\n"+
 		"  - {name: down, description: x, address: %[4]q, namespace: default}\n"+
-		"  - {name: misconfigured, description: x, address: %[3]q, namespace: nosuchns}\n", codecServer.URL, codecAuthorization, dev.FrontendHostPort(), unreachable)), 0o600); err != nil {
+		"  - {name: misconfigured, description: x, address: %[3]q, namespace: nosuchns}\n"+
+		"  - {name: dev-handler, description: x, address: %[3]q, namespace: %[5]s}\n", codecServer.URL, codecAuthorization, dev.FrontendHostPort(), unreachable, handlerNamespace)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	addresses := []string{dev.FrontendHostPort(), unreachable, strings.TrimPrefix(codecServer.URL, "http://")}
@@ -1347,6 +1369,59 @@ func TestToolsOnDevServer(t *testing.T) {
 			omitted := map[string]any{"handling": "omitted", "reason": "payload_handling", "encoding": "binary/zlib", "size_bytes": float64(len(stored.GetData()))}
 			if !reflect.DeepEqual(a["input"], []any{omitted}) || !reflect.DeepEqual(a["search_attributes"], map[string]any{"OrderId": "88231"}) {
 				t.Errorf("first event's input = %#v, search_attributes = %#v; want the input omitted with its encoding and size, and the search attributes decoded", a["input"], a["search_attributes"])
+			}
+		})
+
+		t.Run("nexus links", func(t *testing.T) {
+			if _, err := c.OperatorService().CreateNexusEndpoint(ctx, &operatorservice.CreateNexusEndpointRequest{Spec: &nexuspb.EndpointSpec{
+				Name:   "greeter",
+				Target: &nexuspb.EndpointTarget{Variant: &nexuspb.EndpointTarget_Worker_{Worker: &nexuspb.EndpointTarget_Worker{Namespace: handlerNamespace, TaskQueue: "greeter"}}},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			hc, err := client.NewClientFromExisting(c, client.Options{Namespace: handlerNamespace, DataConverter: encoded.DataConverter})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(hc.Close)
+			service := nexus.NewService("greeter")
+			if err := service.Register(greetOperation); err != nil {
+				t.Fatal(err)
+			}
+			handler := worker.New(hc, "greeter", worker.Options{})
+			handler.RegisterWorkflow(greet)
+			handler.RegisterNexusService(service)
+			caller := worker.New(c, "greeter-caller", worker.Options{})
+			caller.RegisterWorkflow(callGreet)
+			for _, w := range []worker.Worker{handler, caller} {
+				if err := w.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(w.Stop)
+			}
+			run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: "greet-caller", TaskQueue: "greeter-caller"}, callGreet, "ada")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := run.Get(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			link := func(namespace, workflowID, runID string, eventID any, eventType string) []any {
+				return []any{map[string]any{"workflow_event": map[string]any{"namespace": namespace, "workflow_id": workflowID, "run_id": runID, "event_ref": map[string]any{"event_id": eventID, "event_type": eventType}}}}
+			}
+			handled := callTool(t, "get_workflow_history", map[string]any{"target": "dev-handler", "workflow_id": "greet-ada", "event_types": []any{"WorkflowExecutionStarted"}})
+			events := historyEvents(callTool(t, "get_workflow_history", map[string]any{"target": "dev", "workflow_id": "greet-caller", "event_types": []any{"WorkflowExecutionStarted", "NexusOperationStarted"}}))
+			if got := events[0]["links"]; !reflect.DeepEqual(got, []any{}) {
+				t.Errorf("caller's WorkflowExecutionStarted links = %#v, want none", got)
+			}
+			started := events[1]
+			if got, want := started["links"], link(handlerNamespace, "greet-ada", handled["result"].(map[string]any)["run_id"].(string), 1.0, "WorkflowExecutionStarted"); !reflect.DeepEqual(got, want) {
+				t.Errorf("NexusOperationStarted links = %#v, want the handler's run in %s and its WorkflowExecutionStarted %#v", got, handlerNamespace, want)
+			}
+			// The server keeps the handler's link back to the caller on the completion callback, not in the event's links.
+			callback := attributes(historyEvents(handled)[0])["completion_callbacks"].([]any)[0].(map[string]any)
+			if got, want := callback["links"], link("default", "greet-caller", run.GetRunID(), attributes(started)["scheduled_event_id"], "NexusOperationScheduled"); !reflect.DeepEqual(got, want) {
+				t.Errorf("handler's completion callback links = %#v, want the caller's NexusOperationScheduled %#v", got, want)
 			}
 		})
 

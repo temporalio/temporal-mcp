@@ -60,7 +60,7 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 ### Add your own namespaces
 
-To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio.yaml](examples/stdio.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
+To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
 
@@ -68,7 +68,7 @@ The server reads its config only when it starts, so restart your agent after you
 
 ## Run a shared server
 
-For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+For a team, run `temporal-operator-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth-config.yaml](examples/http-auth-config.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
 
 Without `--stdio`, `temporal-operator-mcp` serves MCP at `/mcp` on the config's `listen` address:
 

@@ -5,6 +5,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"slices"
 	"time"
 
@@ -55,6 +57,22 @@ func getTaskQueuesInputSchema() *jsonschema.Schema {
 	queues := schema.Properties["task_queues"]
 	boundList(queues, queues.Items)
 	schema.Properties["types"].Items.Enum = []any{"workflow", "activity", "nexus"}
+	return schema
+}
+
+func getTaskQueuesOutputSchema() *jsonschema.Schema {
+	def, err := jsonschema.For[taskQueueSection](nil)
+	if err != nil {
+		panic(fmt.Errorf("get_task_queues: section schema: %w", err))
+	}
+	def.Type, def.Types = "", []string{"null", "object"}
+	schema, err := jsonschema.For[envelope[[]taskQueue]](&jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+		reflect.TypeFor[taskQueueSection](): {Types: []string{"null", "object"}, Ref: "#/$defs/section"},
+	}})
+	if err != nil {
+		panic(fmt.Errorf("get_task_queues: output schema: %w", err))
+	}
+	schema.Defs = map[string]*jsonschema.Schema{"section": def}
 	return schema
 }
 

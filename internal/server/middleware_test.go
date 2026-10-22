@@ -100,6 +100,7 @@ func TestInvalidArgumentMessages(t *testing.T) {
 		{"required", "get_task_queues", map[string]any{}, "target is required; task_queues is required"},
 		{"required in an item", "get_workflows", map[string]any{"target": "prod", "workflows": []any{map[string]any{"workflow_id": "wf"}, map[string]any{"run_id": "r"}}}, "workflows[1].workflow_id is required"},
 		{"additionalProperties", "check_connection", map[string]any{"target": "prod", "TARGET": "staging"}, "TARGET is not a known argument"},
+		{"additionalProperties beside a list", "get_workflows", map[string]any{"target": "prod", "workflows": []any{map[string]any{"workflow_id": "wf"}}, "extra": "x"}, "extra is not a known argument"},
 		{"type", "get_workflow_history", map[string]any{"target": "prod", "workflow_id": "wf", "limit": "10"}, "limit must be an integer"},
 		{"type in an item", "get_workflows", map[string]any{"target": "prod", "workflows": []any{map[string]any{"workflow_id": "wf", "run_id": 5}}}, "workflows[0].run_id must be a string"},
 		{"enum", "get_task_queues", map[string]any{"target": "prod", "task_queues": []any{"tq"}, "types": []any{"workflow", "workflows"}}, "types[1] must be one of workflow, activity, nexus"},

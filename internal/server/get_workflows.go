@@ -430,7 +430,7 @@ func addCloseEvent(run *workflowRun, e *historypb.HistoryEvent, batch *payload.B
 		run.Failure = &failure{Kind: "CanceledFailure", Details: batch.AddAll(e.GetWorkflowExecutionCanceledEventAttributes().GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED:
 		a := e.GetWorkflowExecutionTerminatedEventAttributes()
-		run.Failure = &failure{Message: a.GetReason(), Kind: "TerminatedFailure", Details: batch.AddAll(a.GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
+		run.Failure = &failure{Message: a.GetReason(), Kind: "TerminatedFailure", Terminated: &terminatedFailure{Identity: a.GetIdentity()}, Details: batch.AddAll(a.GetDetails()), LastHeartbeatDetails: []*payload.Field{}}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
 		next = e.GetWorkflowExecutionContinuedAsNewEventAttributes().GetNewExecutionRunId()
 	}

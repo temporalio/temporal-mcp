@@ -1073,7 +1073,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"application":              nil,
 					"timeout":                  nil,
 					"canceled":                 nil,
-					"terminated":               nil,
+					"terminated":               map[string]any{"identity": "test-client"},
 					"server":                   nil,
 					"activity":                 nil,
 					"child_workflow_execution": nil,

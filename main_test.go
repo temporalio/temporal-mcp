@@ -632,6 +632,13 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			var url string
 			if !tt.stdio {
 				url = listening(t, stderr)
+				// A connection that never sends a request, like one a client's pool dials and leaves
+				// unused, must not hold the shutdown open. The server accepts it before the client's.
+				unused, err := net.Dial("tcp", strings.TrimSuffix(strings.TrimPrefix(url, "http://"), "/mcp"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unused.Close()
 			}
 			// logUntil logs stderr until a line equal to want, or to its end if want is "", and reports whether it saw want.
 			logUntil := func(want string) bool {
@@ -643,7 +650,7 @@ func TestShutdownDuringToolCall(t *testing.T) {
 						}
 						t.Log(line)
 						if tt.calls == 0 && strings.Contains(line, "cancelling the requests still in progress") {
-							t.Error("an idle subscription waited for the shutdown timeout")
+							t.Error("the shutdown waited for the timeout with no call in progress")
 						}
 						if tt.stdio && strings.HasPrefix(line, "{") {
 							records.WriteString(line + "\n")

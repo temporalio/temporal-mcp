@@ -179,9 +179,9 @@ func TestParseAPIKey(t *testing.T) {
 }
 
 func TestSecretRead(t *testing.T) {
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
-	env, file := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Read, (&Secret{File: path}).Read
+	env, file := (&Secret{Env: "TEMPORAL_MCP_TEST_SECRET"}).Read, (&Secret{File: path}).Read
 	if _, err := file(); err == nil {
 		t.Error("a missing file: want an error")
 	}
@@ -202,7 +202,7 @@ func TestSecretRead(t *testing.T) {
 			t.Errorf("secret = %q, %v; want %q", got, err, tt.want)
 		}
 	}
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", "changed")
 	if got, err := env(); err != nil || got != "changed" {
 		t.Errorf("secret after the environment variable changed = %q, %v; want %q", got, err, "changed")
 	}
@@ -212,7 +212,7 @@ func TestSecretRead(t *testing.T) {
 	if _, err := file(); err == nil {
 		t.Error("an empty file: want an error")
 	}
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " \n")
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", " \n")
 	if _, err := env(); err == nil {
 		t.Error("an empty environment variable: want an error")
 	}
@@ -226,15 +226,15 @@ func TestCheckSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "secret")
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET", "")
-	os.Unsetenv("TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET")
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", "secret")
+	t.Setenv("TEMPORAL_MCP_TEST_UNSET_SECRET", "")
+	os.Unsetenv("TEMPORAL_MCP_TEST_UNSET_SECRET")
 	cfg := &Config{
 		Targets: []Target{
 			{Name: "a", APIKey: &Secret{File: missing}},
-			{Name: "b", APIKey: &Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET"}},
+			{Name: "b", APIKey: &Secret{Env: "TEMPORAL_MCP_TEST_UNSET_SECRET"}},
 			{Name: "c", APIKey: &Secret{File: valid}},
-			{Name: "d", APIKey: &Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}},
+			{Name: "d", APIKey: &Secret{Env: "TEMPORAL_MCP_TEST_SECRET"}},
 			{Name: "e"},
 		},
 		Codecs: map[string]Codec{
@@ -244,7 +244,7 @@ func TestCheckSecrets(t *testing.T) {
 		},
 	}
 	want := "targets[0]: api_key: open " + missing + ": no such file or directory\n" +
-		"targets[1]: api_key: environment variable TEMPORAL_OPERATOR_MCP_TEST_UNSET_SECRET is unset or empty\n" +
+		"targets[1]: api_key: environment variable TEMPORAL_MCP_TEST_UNSET_SECRET is unset or empty\n" +
 		`codecs: "empty": authorization_header: ` + empty + " is empty"
 	if err := cfg.CheckSecrets(); err == nil || err.Error() != want {
 		t.Errorf("CheckSecrets = %v, want %q", err, want)
@@ -350,7 +350,7 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "listen_tls without key_file",
-			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/temporal-operator-mcp/tls.crt}\n" + validTargets,
+			yaml: "listen: 127.0.0.1:8080\nlisten_tls: {cert_file: /etc/temporal-mcp/tls.crt}\n" + validTargets,
 			want: []string{"listen_tls: cert_file and key_file are both required"},
 		},
 		{

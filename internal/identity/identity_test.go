@@ -23,7 +23,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/config"
 )
 
 const (

@@ -9,7 +9,7 @@ targets:
     namespace: payments-staging.a1b2c
     # Read at startup, where an unreadable or empty file stops the server, and
     # again on every use, so a rotated key takes effect without a restart.
-    api_key: {file: /etc/temporal-operator-mcp/payments-staging.key}
+    api_key: {file: /etc/temporal-mcp/payments-staging.key}
   - name: local
     description: Local Temporal dev server.
     address: localhost:7233

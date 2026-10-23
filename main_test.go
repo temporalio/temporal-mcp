@@ -144,8 +144,8 @@ func TestServerHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if got := session.InitializeResult().ServerInfo; got.Name != "temporal-operator" || got.Version != "9.9.9-test" {
-		t.Errorf("server info = %+v, want name temporal-operator and version 9.9.9-test", got)
+	if got := session.InitializeResult().ServerInfo; got.Name != "temporal" || got.Version != "9.9.9-test" {
+		t.Errorf("server info = %+v, want name temporal and version 9.9.9-test", got)
 	}
 	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
 		t.Errorf("protocol version = %s, want 2026-07-28: clients fell back to the 2025 session protocol, so check that the HTTP handler is still stateless", got)
@@ -327,10 +327,10 @@ func TestBinaryDoesNotImportFixture(t *testing.T) {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
 	deps := strings.Fields(string(out))
-	if !slices.Contains(deps, "github.com/temporalio/temporal-operator-mcp/internal/server") {
+	if !slices.Contains(deps, "github.com/temporalio/temporal-mcp/internal/server") {
 		t.Fatalf("go list -deps did not list internal/server:\n%s", out)
 	}
-	if slices.Contains(deps, "github.com/temporalio/temporal-operator-mcp/internal/fixture") {
+	if slices.Contains(deps, "github.com/temporalio/temporal-mcp/internal/fixture") {
 		t.Error("the binary imports internal/fixture, which must stay test-only")
 	}
 }
@@ -348,9 +348,9 @@ func TestExitsWithoutServing(t *testing.T) {
 	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
-	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY}}\n")
+	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
-		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY}}\n")
+		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	dir := t.TempDir()
 	writeCertificate(t, filepath.Join(dir, "a.crt"), filepath.Join(dir, "a.key"))
 	writeCertificate(t, filepath.Join(dir, "b.crt"), filepath.Join(dir, "b.key"))
@@ -380,12 +380,12 @@ func TestExitsWithoutServing(t *testing.T) {
 		exitCode int
 		want     string
 	}{
-		{"-h", []string{"-h"}, 0, "Usage of temporal-operator-mcp"},
-		{"--version", []string{"--version"}, 0, "temporal-operator-mcp 9.9.9-test"},
+		{"-h", []string{"-h"}, 0, "Usage of temporal-mcp"},
+		{"--version", []string{"--version"}, 0, "temporal-mcp 9.9.9-test"},
 		{"unexpected arguments", []string{"--config", filepath.Join("testdata", "config.yaml"), "extra"}, 1, `unexpected arguments ["extra"]`},
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
-		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY is unset or empty`},
+		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable TEMPORAL_MCP_TEST_UNSET_KEY is unset or empty`},
 		{"missing API key file", []string{"--config", missingKey}, 1, "invalid config " + missingKey + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory"},
 		{"missing API key file and client certificate", []string{"--config", missingKeyAndCertificate}, 1, "invalid config " + missingKeyAndCertificate + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory\ntargets[1]: tls: open " + filepath.Join(dir, "missing.crt")},
 		{"empty codec authorization header file", []string{"--config", emptyCodecAuthorization}, 1, "invalid config " + emptyCodecAuthorization + `: codecs: "c": authorization_header: ` + emptyAuthorizationPath + " is empty"},
@@ -401,7 +401,7 @@ func TestExitsWithoutServing(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, bin, tt.args...)
-			cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "TEMPORAL_OPERATOR_MCP_TEST_UNSET_KEY=") })
+			cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "TEMPORAL_MCP_TEST_UNSET_KEY=") })
 			out, err := cmd.CombinedOutput()
 			if code := cmd.ProcessState.ExitCode(); code != tt.exitCode {
 				t.Fatalf("exit code = %d (err %v), want %d\n%s", code, err, tt.exitCode, out)

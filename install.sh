@@ -1,10 +1,10 @@
 #!/bin/sh
-# Installs the latest release of temporal-operator-mcp into ~/.temporalio/bin:
+# Installs the latest release of temporal-mcp into ~/.temporalio/bin:
 #
-#   curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-operator-mcp/main/install.sh | sh
+#   curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-mcp/main/install.sh | sh
 set -eu
 
-repo=https://github.com/temporalio/temporal-operator-mcp
+repo=https://github.com/temporalio/temporal-mcp
 
 fail() {
 	echo "install.sh: $*" >&2
@@ -33,7 +33,7 @@ main() {
 	url=$(fetch -I -o /dev/null -w '%{url_effective}' "$repo/releases/latest")
 	tag=${url##*/releases/tag/}
 	[ "$tag" != "$url" ] || fail "found no release at $repo/releases"
-	archive="temporal-operator-mcp_${tag#v}_${os}_${arch}.tar.gz"
+	archive="temporal-mcp_${tag#v}_${os}_${arch}.tar.gz"
 
 	tmp=$(mktemp -d)
 	trap 'rm -rf "$tmp"' EXIT
@@ -55,10 +55,10 @@ main() {
 
 	bin="$HOME/.temporalio/bin"
 	# -o gives the binary to the user running this, not to the release's builder.
-	tar -xzof "$tmp/$archive" -C "$tmp" temporal-operator-mcp
+	tar -xzof "$tmp/$archive" -C "$tmp" temporal-mcp
 	mkdir -p "$bin"
-	mv "$tmp/temporal-operator-mcp" "$bin/"
-	echo "Installed $bin/temporal-operator-mcp"
+	mv "$tmp/temporal-mcp" "$bin/"
+	echo "Installed $bin/temporal-mcp"
 
 	case ":$PATH:" in
 	*":$bin:"*) ;;

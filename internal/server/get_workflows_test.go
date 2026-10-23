@@ -44,9 +44,9 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/fixture"
-	"github.com/temporalio/temporal-operator-mcp/internal/payload"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/fixture"
+	"github.com/temporalio/temporal-mcp/internal/payload"
 )
 
 func describeWithSearchAttributes(fields map[string]*commonpb.Payload) *workflowservice.DescribeWorkflowExecutionResponse {

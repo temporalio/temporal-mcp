@@ -31,8 +31,8 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 type fakeWorkflowService struct {
@@ -91,7 +91,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	unavailable := listen(t)
 	serve(t, unavailable, fakeWorkflowService{describeNamespaceErr: status.Error(codes.Unavailable, "namespace ns1 is unavailable on "+unavailable.Addr().String())})
 
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
 	tests := []struct {
 		name                  string
 		target                config.Target
@@ -101,7 +101,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	}{
 		{
 			name:       "TLS handshake fails",
-			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_API_KEY"}},
+			target:     config.Target{Address: tlsMismatch.Addr().String(), APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}},
 			wantServer: "Unavailable: the TLS handshake or certificate check with the Temporal server failed",
 		},
 		{

@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/config"
 )
 
 func TestShutdownCancellationResult(t *testing.T) {

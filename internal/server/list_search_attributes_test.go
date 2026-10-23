@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/temporal"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 type fakeCloudService struct {
@@ -84,7 +84,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 	}
 	var records bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, _ := newServer(t.Context(), t.Context(), "temporal-operator", "0", cfg, clients, newRenderer(t, cfg, logger), &records, logger)
+	s, _ := newServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), &records, logger)
 	srv := httptest.NewServer(newHandler(s.Server, cfg))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)

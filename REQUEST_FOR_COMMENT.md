@@ -30,10 +30,10 @@ To start, we'd like to know:
 
 ### 1. Deploy the server
 
-The server is a single binary. Download the release for your platform from the [GitHub releases page](https://github.com/temporalio/operator-mcp/releases), put it on a host in your network, and start it with your config file:
+The server is a single binary. Download the release for your platform from the [GitHub releases page](https://github.com/temporalio/temporal-mcp/releases), put it on a host in your network, and start it with your config file:
 
 ```bash
-./temporal-operator-mcp --config config.yaml
+./temporal-mcp --config config.yaml
 ```
 
 To upgrade, replace the binary with a newer release and restart it. The server is fully stateless, so you can run several copies behind a load balancer.

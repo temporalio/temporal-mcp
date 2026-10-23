@@ -19,8 +19,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/temporalio/temporal-operator-mcp/internal/config"
-	"github.com/temporalio/temporal-operator-mcp/internal/identity"
+	"github.com/temporalio/temporal-mcp/internal/config"
+	"github.com/temporalio/temporal-mcp/internal/identity"
 )
 
 func closedAddress(t *testing.T) string {
@@ -78,13 +78,13 @@ func TestIsCloud(t *testing.T) {
 }
 
 func TestAPIKeyTargetsUseTLS(t *testing.T) {
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
 	tests := []struct {
 		name   string
 		apiKey *config.Secret
 		want   byte
 	}{
-		{"api key", &config.Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_API_KEY"}, 0x16},
+		{"api key", &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}, 0x16},
 		{"no api key", nil, 'P'},
 	}
 	for _, tt := range tests {
@@ -173,7 +173,7 @@ func serve(t *testing.T, svc workflowservice.WorkflowServiceServer) string {
 
 func newClient(t *testing.T, target config.Target) client.Client {
 	t.Helper()
-	clients, err := NewClients([]config.Target{target}, "temporal-operator-mcp", "1.2.3", slog.New(slog.DiscardHandler))
+	clients, err := NewClients([]config.Target{target}, "temporal-mcp", "1.2.3", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,14 +209,14 @@ func TestClientIdentityHeaders(t *testing.T) {
 	var methods []string
 	for _, c := range fake.calls {
 		methods = append(methods, c.method)
-		if got, want := c.md.Get("client-name"), []string{"temporal-operator-mcp"}; !slices.Equal(got, want) {
+		if got, want := c.md.Get("client-name"), []string{"temporal-mcp"}; !slices.Equal(got, want) {
 			t.Errorf("%s client-name = %v, want %v", c.method, got, want)
 		}
 		if got, want := c.md.Get("client-version"), []string{"1.2.3"}; !slices.Equal(got, want) {
 			t.Errorf("%s client-version = %v, want %v", c.method, got, want)
 		}
-		if ua := c.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "temporal-operator-mcp/1.2.3") {
-			t.Errorf("%s user-agent = %v, want prefix temporal-operator-mcp/1.2.3", c.method, ua)
+		if ua := c.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "temporal-mcp/1.2.3") {
+			t.Errorf("%s user-agent = %v, want prefix temporal-mcp/1.2.3", c.method, ua)
 		}
 	}
 	slices.Sort(methods)

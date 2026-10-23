@@ -144,8 +144,8 @@ func TestServerHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if got := session.InitializeResult().ServerInfo; got.Name != "temporal-operator" || got.Version != "9.9.9-test" {
-		t.Errorf("server info = %+v, want name temporal-operator and version 9.9.9-test", got)
+	if got := session.InitializeResult().ServerInfo; got.Name != "temporal" || got.Version != "9.9.9-test" {
+		t.Errorf("server info = %+v, want name temporal and version 9.9.9-test", got)
 	}
 	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
 		t.Errorf("protocol version = %s, want 2026-07-28: clients fell back to the 2025 session protocol, so check that the HTTP handler is still stateless", got)

@@ -29,7 +29,7 @@ import (
 
 const (
 	name       = "temporal-mcp"
-	serverName = "temporal-operator"
+	serverName = "temporal"
 )
 
 var version = "dev"

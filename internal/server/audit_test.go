@@ -92,7 +92,7 @@ func TestAudit(t *testing.T) {
 		return session
 	}
 
-	s, _ := newServer(t.Context(), t.Context(), "temporal-operator", "0", authCfg, clients, newRenderer(t, authCfg, logger), records, logger)
+	s, _ := newServer(t.Context(), t.Context(), "temporal", "0", authCfg, clients, newRenderer(t, authCfg, logger), records, logger)
 	addTool(s, &mcp.Tool{Name: "fail"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 		return nil, struct{}{}, errors.New("dial tcp 10.0.0.1:7233: connection refused")
 	})
@@ -117,7 +117,7 @@ func TestAudit(t *testing.T) {
 	callToken.Store(&token)
 	authed := connectTo(NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
 	openCfg := &config.Config{Targets: targets}
-	open, _ := newServer(t.Context(), t.Context(), "temporal-operator", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
+	open, _ := newServer(t.Context(), t.Context(), "temporal", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
 	unauthed := connectTo(NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {
 		t.Fatal(err)

@@ -37,13 +37,13 @@ temporal server start-dev
 Add `temporal-mcp` to your agent with `--stdio` and the absolute path of your config, since the agent starts the server from its own working directory. For Claude Code, with `--scope user` so the server is available to you in every project, instead of only in the current directory:
 
 ```sh
-claude mcp add --scope user temporal-operator -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
+claude mcp add --scope user temporal -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal-operator -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
+codex mcp add temporal -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.
@@ -62,7 +62,7 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
-For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
+For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first.
 
 The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
 

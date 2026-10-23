@@ -71,6 +71,12 @@ func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
 	}
 }
 
+func TestIsCloud(t *testing.T) {
+	if !IsCloud("dns:///orders.acct1.tmprl.cloud:7233") {
+		t.Error(`IsCloud("dns:///orders.acct1.tmprl.cloud:7233") = false, want true`)
+	}
+}
+
 func TestAPIKeyTargetsUseTLS(t *testing.T) {
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_API_KEY", "key")
 	tests := []struct {

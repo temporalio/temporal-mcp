@@ -182,6 +182,24 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 			message: "temporal.example.com at 10.1.2.3 refused temporal.example.com:7233",
 			want:    "the Temporal server reported: <address> at <address> refused <address>",
 		},
+		{
+			name:    "host of a dns:/// address is replaced",
+			address: "dns:///temporal.example.com:7233",
+			message: "temporal.example.com at 10.1.2.3 refused dns:///temporal.example.com:7233",
+			want:    "the Temporal server reported: <address> at <address> refused <address>",
+		},
+		{
+			name:    "unprefixed address of a dns:/// address is replaced",
+			address: "dns:///temporal.example.com:7233",
+			message: "temporal.example.com:7233 refused the call",
+			want:    "the Temporal server reported: <address> refused the call",
+		},
+		{
+			name:    "host of a port-less dns:/// address is replaced",
+			address: "dns:///temporal.example.com",
+			message: "no route to temporal.example.com",
+			want:    "the Temporal server reported: no route to <address>",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

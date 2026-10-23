@@ -8,7 +8,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.1-0.20260914075210-e40f35d137b7
 	github.com/nexus-rpc/sdk-go v0.7.0
-	go.temporal.io/api v1.63.6
+	go.temporal.io/api v1.63.7
 	go.temporal.io/cloud-sdk v0.20.0
 	go.temporal.io/sdk v1.49.0
 	go.temporal.io/server v1.32.0

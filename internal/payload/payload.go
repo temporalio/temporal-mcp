@@ -53,7 +53,7 @@ func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
 	for name, c := range cfg.Codecs {
 		if c.AuthorizationHeader != nil {
-			authorization[name] = c.AuthorizationHeader.Reader()
+			authorization[name] = c.AuthorizationHeader.Read
 		}
 	}
 	r := &Renderer{targets: map[string]*target{}, logger: logger}

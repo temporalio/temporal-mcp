@@ -101,9 +101,8 @@ func apiKeyCredential(k *config.Secret, logger *slog.Logger) credential {
 	if k == nil {
 		return nil
 	}
-	read := k.Reader()
 	return func(ctx context.Context, _ *identity.Caller, t *config.Target) (string, error) {
-		key, err := read()
+		key, err := k.Read()
 		if err != nil {
 			logger.ErrorContext(ctx, "cannot read API key", "target", t.Name, "error", err.Error())
 			return "", errors.New("this server's API key for the target could not be read; the cause is in this server's log")

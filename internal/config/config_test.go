@@ -178,14 +178,13 @@ func TestParseAPIKey(t *testing.T) {
 	}
 }
 
-func TestSecretReader(t *testing.T) {
+func TestSecretRead(t *testing.T) {
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
-	env, file := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Reader(), (&Secret{File: path}).Reader()
+	env, file := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Read, (&Secret{File: path}).Read
 	if _, err := file(); err == nil {
 		t.Error("a missing file: want an error")
 	}
-	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
 	for _, tt := range []struct {
 		read        func() (string, error)
 		write, want string
@@ -203,6 +202,10 @@ func TestSecretReader(t *testing.T) {
 			t.Errorf("secret = %q, %v; want %q", got, err, tt.want)
 		}
 	}
+	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", "changed")
+	if got, err := env(); err != nil || got != "changed" {
+		t.Errorf("secret after the environment variable changed = %q, %v; want %q", got, err, "changed")
+	}
 	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +213,7 @@ func TestSecretReader(t *testing.T) {
 		t.Error("an empty file: want an error")
 	}
 	t.Setenv("TEMPORAL_OPERATOR_MCP_TEST_SECRET", " \n")
-	if _, err := (&Secret{Env: "TEMPORAL_OPERATOR_MCP_TEST_SECRET"}).Reader()(); err == nil {
+	if _, err := env(); err == nil {
 		t.Error("an empty environment variable: want an error")
 	}
 }

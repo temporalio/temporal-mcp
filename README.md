@@ -11,52 +11,64 @@
 
 ## Get started
 
-These steps set up `temporal-mcp` for one developer, whose agent launches it and talks to it over stdio.
+These steps set up `temporal-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces. When you're ready, go to [Run a shared server](#run-a-shared-server) to set up this MCP server for a broader audience.
 
-### Download
-
-Each [release](https://github.com/temporalio/temporal-mcp/releases) has an archive for each platform: `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs, and `linux_amd64` and `linux_arm64`. Its "Source code" links are a copy of this repository, not the server. Set `platform` to yours, then download the archive, check that GitHub Actions built it from this repository, and extract `temporal-mcp`:
+### Install
 
 ```sh
-platform=darwin_arm64
-gh release download --repo temporalio/temporal-mcp --pattern "*_$platform.tar.gz"
-gh attestation verify temporal-mcp_*_$platform.tar.gz --repo temporalio/temporal-mcp
-tar -xzf temporal-mcp_*_$platform.tar.gz temporal-mcp
+curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-mcp/main/install.sh | sh
+temporal-mcp --version # checks the install
 ```
 
-On macOS, download with `gh` as above. A browser marks what it downloads with the `com.apple.quarantine` flag, and macOS won't run a binary with that flag unless it's notarized, which this one isn't. To run a binary from a browser download, remove the flag:
+### Start a dev server
+
+[Install the Temporal CLI](https://docs.temporal.io/cli/setup-cli) and start a dev server, which serves a `default` namespace at `localhost:7233`:
 
 ```sh
-xattr -d com.apple.quarantine temporal-mcp
+temporal server start-dev
 ```
 
 ### Configure
 
-`temporal-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio.yaml](examples/stdio.yaml) and change its targets to the Temporal namespaces you want the agent to read. [docs/config.md](docs/config.md) documents every field.
+`temporal-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio-local-config.yaml](examples/stdio-local-config.yaml), whose `local` target reads the dev server.
 
 ### Connect
 
-Add `temporal-mcp` to your agent with `--stdio`, your config and the name and value of each environment variable your config reads with `env:`. For Claude Code, with `--scope user` so the server is available in every project:
+Add `temporal-mcp` to your agent with `--stdio` and the absolute path of your config, since the agent starts the server from its own working directory. For Claude Code, with `--scope user` so the server is available to you in every project, instead of only in the current directory:
 
 ```sh
-claude mcp add --scope user temporal-operator -e KEY=value -- /path/to/temporal-mcp --stdio --config /path/to/config.yaml
+claude mcp add --scope user temporal-operator -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal-operator --env KEY=value -- /path/to/temporal-mcp --stdio --config /path/to/config.yaml
+codex mcp add temporal-operator -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.
 
 ### Check
 
-Ask the agent to check its connection to Temporal. It calls `check_connection`.
+Ask the agent to check its connection to the `local` target. It calls `check_connection`, which reports whether the server can reach the dev server and its `default` namespace.
+
+Once your app runs workflows on the dev server, or once you add your own namespaces, ask the agent about them, for example:
+
+- Why is workflow `order-123` stuck?
+- Which workflow runs failed in the last hour?
+- Is any worker polling the `orders` task queue?
+
+### Add your own namespaces
+
+To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
+
+For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal-operator` first.
+
+The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
 
 ## Run a shared server
 
-For a team, run `temporal-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth.yaml](examples/http-auth.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+For a team, run `temporal-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth-config.yaml](examples/http-auth-config.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
 
 Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` address:
 
@@ -91,31 +103,5 @@ It then cancels the calls still running, which get audit records with outcome `c
 Calls interrupted by shutdown return a tool error with code `server_shutting_down`, message `the server is shutting down`, and `retryable: true`.
 
 A second signal stops `temporal-mcp` at once. A call cut off that way, or by SIGKILL, gets no audit record.
-
-## Lint
-
-CI runs `go vet` and a `gofmt` check:
-
-```sh
-go vet ./...
-test -z "$(gofmt -l .)"
-```
-
-If the `gofmt` check fails, `gofmt -l .` lists the unformatted files and `gofmt -w .` fixes them.
-
-Locally we also run staticcheck and govulncheck:
-
-```sh
-go run honnef.co/go/tools/cmd/staticcheck@latest ./...
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-```
-
-## Test
-
-CI runs the tests with the race detector, which does not cover the `temporal-mcp` binary that the tests in `main_test.go` build and run:
-
-```sh
-go test -race ./...
-```
 
 [Pre-release]: https://docs.temporal.io/evaluate/development-production-features/release-stages

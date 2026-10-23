@@ -5,7 +5,7 @@ package server
 
 import (
 	"context"
-	"fmt"
+	"reflect"
 	"slices"
 	"time"
 
@@ -52,13 +52,20 @@ type poller struct {
 }
 
 func getTaskQueuesInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getTaskQueuesInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_task_queues: input schema: %w", err))
-	}
+	schema := schemaFor[getTaskQueuesInput]("get_task_queues", "input", nil)
 	queues := schema.Properties["task_queues"]
 	boundList(queues, queues.Items)
 	schema.Properties["types"].Items.Enum = []any{"workflow", "activity", "nexus"}
+	return schema
+}
+
+func getTaskQueuesOutputSchema() *jsonschema.Schema {
+	def := schemaFor[taskQueueSection]("get_task_queues", "section", nil)
+	def.Type, def.Types = "", []string{"null", "object"}
+	schema := schemaFor[envelope[[]taskQueue]]("get_task_queues", "output", &jsonschema.ForOptions{TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+		reflect.TypeFor[taskQueueSection](): {Types: []string{"null", "object"}, Ref: "#/$defs/section"},
+	}})
+	schema.Defs = map[string]*jsonschema.Schema{"section": def}
 	return schema
 }
 

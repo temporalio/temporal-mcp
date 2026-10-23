@@ -56,22 +56,20 @@ type workflowHistory struct {
 }
 
 type historyEvent struct {
-	EventID    int64          `json:"event_id"`
-	EventTime  *time.Time     `json:"event_time"`
-	EventType  string         `json:"event_type"`
-	Attributes map[string]any `json:"attributes"`
+	EventID    int64            `json:"event_id"`
+	EventTime  *time.Time       `json:"event_time"`
+	EventType  string           `json:"event_type"`
+	Attributes map[string]any   `json:"attributes"`
+	Links      []map[string]any `json:"links"`
 }
 
 func getWorkflowHistoryInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[getWorkflowHistoryInput](nil)
-	if err != nil {
-		panic(fmt.Errorf("get_workflow_history: input schema: %w", err))
-	}
+	schema := schemaFor[getWorkflowHistoryInput]("get_workflow_history", "input", nil)
 	order := schema.Properties["order"]
 	order.Enum, order.Default = []any{"oldest_first", "newest_first"}, json.RawMessage(`"oldest_first"`)
 	boundPageSize(schema.Properties["limit"])
 	for _, id := range schema.Properties["event_range"].Properties {
-		id.Minimum = new(1.0)
+		id.Minimum, id.Maximum = new(1.0), new(float64(maxJSONInteger))
 	}
 	return schema
 }
@@ -238,13 +236,20 @@ func eventTypes(names []string) (map[enumspb.EventType]bool, error) {
 }
 
 func toHistoryEvent(e *historypb.HistoryEvent, batch *payload.Batch) (historyEvent, error) {
-	event := historyEvent{EventID: e.GetEventId(), EventTime: timeOf(e.GetEventTime()), EventType: e.GetEventType().String(), Attributes: map[string]any{}}
+	event := historyEvent{EventID: e.GetEventId(), EventTime: timeOf(e.GetEventTime()), EventType: e.GetEventType().String(), Attributes: map[string]any{}, Links: []map[string]any{}}
 	m := e.ProtoReflect()
 	if fd := m.WhichOneof(m.Descriptor().Oneofs().ByName("attributes")); fd != nil {
 		var err error
 		if event.Attributes, err = protoFields(m.Get(fd).Message(), batch); err != nil {
 			return historyEvent{}, err
 		}
+	}
+	for _, l := range e.GetLinks() {
+		link, err := protoFields(l.ProtoReflect(), batch)
+		if err != nil {
+			return historyEvent{}, err
+		}
+		event.Links = append(event.Links, link)
 	}
 	return event, nil
 }

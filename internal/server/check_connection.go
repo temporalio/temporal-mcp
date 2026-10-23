@@ -135,7 +135,11 @@ func scrub(msg string, t *config.Target, p *peer.Peer) string {
 		addrs = append(addrs, p.Addr.String())
 	}
 	for _, addr := range slices.Clone(addrs) {
-		if host, _, err := net.SplitHostPort(addr); err == nil && strings.ContainsAny(host, ".:") {
+		stripped, prefixed := strings.CutPrefix(addr, "dns:///")
+		if prefixed {
+			addrs = append(addrs, stripped)
+		}
+		if host, _, err := net.SplitHostPort(stripped); err == nil && strings.ContainsAny(host, ".:") {
 			addrs = append(addrs, host)
 		}
 	}

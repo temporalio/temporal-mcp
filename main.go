@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,11 +50,16 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
 	stdio := flags.Bool("stdio", false, "serve MCP over stdin and stdout, for an MCP client that launches the server, rather than over HTTP")
+	printVersion := flags.Bool("version", false, "print the version and exit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
+	}
+	if *printVersion {
+		fmt.Fprintln(stdout, name, version)
+		return nil
 	}
 	if *configPath == "" {
 		return errors.New("--config is required")
@@ -72,6 +78,8 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
+	// Reported with NewClients' errors below, so that a bad secret doesn't hide them.
+	secretsErr := cfg.CheckSecrets()
 
 	// Over stdio, stdout carries only MCP messages, so the audit records default to stderr.
 	var records io.Writer = stdout
@@ -87,8 +95,8 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
 	}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
-	if err != nil {
+	clients, clientsErr := temporal.NewClients(cfg.Targets, name, version, logger)
+	if err := errors.Join(secretsErr, clientsErr); err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
 
@@ -144,6 +152,19 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	}
 
 	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
+	// Shutdown waits up to 5s for a connection that has not sent a request yet, such
+	// as one a client dialed and left unused in its pool, so close those right away.
+	var unused sync.Map
+	srv.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			unused.Store(c, nil)
+		} else {
+			unused.Delete(c)
+		}
+	}
+	srv.RegisterOnShutdown(func() {
+		unused.Range(func(c, _ any) bool { c.(net.Conn).Close(); return true })
+	})
 	scheme := "http"
 	if cfg.ListenTLS != nil {
 		if err := cfg.ListenTLS.Check(logger); err != nil {

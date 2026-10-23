@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,34 +173,32 @@ type Codec struct {
 
 // Secret says where to read a secret from. Exactly one field is set.
 type Secret struct {
-	// Env is the name of an environment variable holding the secret, read at startup.
+	// Env is the name of an environment variable holding the secret, read at startup and on every use.
 	Env string `yaml:"env"`
-	// File is the path of a file holding the secret, read on every use.
+	// File is the path of a file holding the secret, read at startup and on every use.
 	File string `yaml:"file"`
 }
 
-// Reader returns a function that returns the secret, trimmed of surrounding
-// whitespace. It reads an environment variable now, failing if it is unset or
-// empty, and a file on every call, failing if it cannot be read or is empty.
-func (s *Secret) Reader() (func() (string, error), error) {
+// Read returns the secret, trimmed of surrounding whitespace. It reads the
+// environment variable or file on every call, and fails if the variable is unset
+// or empty or the file cannot be read or is empty.
+func (s *Secret) Read() (string, error) {
 	if s.Env != "" {
 		v := strings.TrimSpace(os.Getenv(s.Env))
 		if v == "" {
-			return nil, fmt.Errorf("environment variable %s is unset or empty", s.Env)
-		}
-		return func() (string, error) { return v, nil }, nil
-	}
-	return func() (string, error) {
-		data, err := os.ReadFile(s.File)
-		if err != nil {
-			return "", err
-		}
-		v := strings.TrimSpace(string(data))
-		if v == "" {
-			return "", fmt.Errorf("%s is empty", s.File)
+			return "", fmt.Errorf("environment variable %s is unset or empty", s.Env)
 		}
 		return v, nil
-	}, nil
+	}
+	data, err := os.ReadFile(s.File)
+	if err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" {
+		return "", fmt.Errorf("%s is empty", s.File)
+	}
+	return v, nil
 }
 
 // Load reads the YAML file at path and returns the validated configuration for
@@ -213,6 +212,30 @@ func Load(path string) (*Config, error) {
 // configure HTTP.
 func LoadStdio(path string) (*Config, error) {
 	return load(path, parseStdio)
+}
+
+// CheckSecrets reads every secret in c once: each target's api_key and each
+// codec's authorization_header. It fails if an environment variable is unset or
+// empty, or a file cannot be read or is empty, and reports every such secret.
+// Load and LoadStdio read no secrets, so the server calls CheckSecrets after
+// loading its config.
+func (c *Config) CheckSecrets() error {
+	var errs []error
+	for i, t := range c.Targets {
+		if t.APIKey != nil {
+			if _, err := t.APIKey.Read(); err != nil {
+				errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
+		if h := c.Codecs[name].AuthorizationHeader; h != nil {
+			if _, err := h.Read(); err != nil {
+				errs = append(errs, fmt.Errorf("codecs: %q: authorization_header: %w", name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
@@ -373,6 +396,11 @@ func (c *Config) validateTargets() error {
 				errs = append(errs, fmt.Errorf("%s: %s is required", label, f.name))
 			}
 		}
+		if strings.TrimSpace(t.Address) != "" {
+			if err := validateAddress(t.Address); err != nil {
+				errs = append(errs, fmt.Errorf("%s: address: %w", label, err))
+			}
+		}
 		if strings.TrimSpace(t.Name) != "" {
 			if j, ok := names[t.Name]; ok {
 				errs = append(errs, fmt.Errorf("%s: name %q conflicts with the name of targets[%d]", label, t.Name, j))
@@ -515,6 +543,24 @@ func validateListen(listen string, authenticated bool) error {
 		return fmt.Errorf("listen: host %q must be a loopback IP address such as 127.0.0.1 or ::1, because the config has no auth section", host)
 	}
 	return nil
+}
+
+// validateAddress requires address to be host:port, optionally after a dns:///
+// prefix, with a host and a port from 1 to 65535.
+func validateAddress(address string) error {
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(address, "dns:///"))
+	if err != nil {
+		return fmt.Errorf("%w; it must be host:port, with a host and a port from 1 to 65535", err)
+	}
+	if host == "" || !validPort(port) {
+		return fmt.Errorf("%q must be host:port, with a host and a port from 1 to 65535", address)
+	}
+	return nil
+}
+
+func validPort(s string) bool {
+	n, err := strconv.ParseUint(s, 10, 16)
+	return err == nil && n != 0
 }
 
 func (a *Auth) validate() []error {

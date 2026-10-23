@@ -67,7 +67,7 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 - `name` (string, required): The name agents and authorization profiles use for the target. Names must be unique and are compared exactly, so `prod` and `Prod` are two different targets.
 - `aliases` (list of strings, optional): Other names agents may use for the target. A target name in a tool call matches an alias ignoring case, but a `name` only exactly. An alias must not be empty, and must differ from every name and every other alias ignoring case, including its own target's name.
 - `description` (string, required): What the target is, shown to agents so they can pick the right one.
-- `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`.
+- `address` (host:port, required): The namespace's gRPC endpoint, such as `my-namespace.a1b2c.tmprl.cloud:7233` or `localhost:7233`. Both the host and the port are required.
 - `namespace` (string, required): The Temporal namespace, such as `my-namespace.a1b2c` or `default`.
 - `api_key` (secret, optional): Where to read the API key the server connects with. `api_key:` with no value is an error.
 - `tls` (optional): A client certificate the server presents to the target instead of an API key, as Temporal Cloud namespaces that use mTLS require. It is not allowed with `api_key`, and `tls:` with no value is an error.
@@ -88,7 +88,7 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 
 - `omit` leaves each payload's data out and shows only its encoding and its size in bytes as stored, so you can tell whether `passthrough` would show it as JSON or it needs `decode`. A `binary/null` payload, such as the result of a workflow that returned nothing, shows encoding `binary/null` and size zero. It hides only payloads, so failure messages, stack traces, termination reasons and search attribute values are still shown.
 - `passthrough` shows payloads as Temporal stores them, which the agent can read unless your application encrypts them. A payload with encoding `json/plain` or `json/protobuf`, such as one from the SDKs' default data converter, is shown as JSON, and a `binary/null` payload as JSON `null`. Any other payload, including one whose encoding says JSON but whose data is not valid JSON, is shown as its encoding and its data in base64.
-- `decode` has the target's codec server decode payloads, and shows a decoded payload the way `passthrough` shows a stored one, except that a decoded payload with a JSON encoding but data that is not valid JSON is left out as with `omit`, showing its encoding and size as stored. If the request to the codec server fails, every payload in that response is left out the same way. Either way, the cause goes to the log. For a target that decodes, `check_connection` also checks its codec server.
+- `decode` has the target's codec server decode payloads, and shows a decoded payload the way `passthrough` shows a stored one, except that a decoded payload with a JSON encoding but data that is not valid JSON is left out as with `omit`, showing its encoding and size as stored. If the request to the codec server fails, every payload in that response is left out the same way. Either way, each payload left out has an `error` saying why, such as `could not connect to the codec server: connection refused`, and the full cause goes to the log. The `error` never includes the codec server's URL or response. For a target that decodes, `check_connection` also checks its codec server.
 
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
@@ -143,7 +143,7 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth.yaml`](../examples/http-auth.yaml) shows a complete section.
+Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use each of its `tools` on each of its `targets`.
   - `tools` (list of strings, required): At least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
@@ -174,7 +174,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
-  - `env` (string): The name of an environment variable holding the secret. The server reads it once, at startup, and does not start if it is unset or empty.
-  - `file` (filename): The path of a file holding the secret. The server reads it on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty.
+  - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.
+  - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.
 
   A secret field with no value, such as `authorization_header:` on its own line, is an error.

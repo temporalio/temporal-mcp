@@ -94,6 +94,15 @@ func TestParseLoopbackListen(t *testing.T) {
 	}
 }
 
+func TestParseTargetAddress(t *testing.T) {
+	for _, address := range []string{"localhost:1", "localhost:65535", "dns:///prod.example.tmprl.cloud:7233"} {
+		data := "listen: 127.0.0.1:8080\ntargets:\n  - {name: a, description: x, address: \"" + address + "\", namespace: a}\n"
+		if _, err := parse([]byte(data)); err != nil {
+			t.Errorf("address %s: %v", address, err)
+		}
+	}
+}
+
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
 		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
@@ -169,18 +178,13 @@ func TestParseAPIKey(t *testing.T) {
 	}
 }
 
-func TestSecretReader(t *testing.T) {
+func TestSecretRead(t *testing.T) {
 	t.Setenv("TEMPORAL_MCP_TEST_SECRET", " env-secret\n")
 	path := filepath.Join(t.TempDir(), "secret")
-	reader := func(s *Secret) func() (string, error) {
-		read, err := s.Reader()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return read
+	env, file := (&Secret{Env: "TEMPORAL_MCP_TEST_SECRET"}).Read, (&Secret{File: path}).Read
+	if _, err := file(); err == nil {
+		t.Error("a missing file: want an error")
 	}
-	env, file := reader(&Secret{Env: "TEMPORAL_MCP_TEST_SECRET"}), reader(&Secret{File: path})
-	t.Setenv("TEMPORAL_MCP_TEST_SECRET", "changed")
 	for _, tt := range []struct {
 		read        func() (string, error)
 		write, want string
@@ -198,11 +202,58 @@ func TestSecretReader(t *testing.T) {
 			t.Errorf("secret = %q, %v; want %q", got, err, tt.want)
 		}
 	}
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", "changed")
+	if got, err := env(); err != nil || got != "changed" {
+		t.Errorf("secret after the environment variable changed = %q, %v; want %q", got, err, "changed")
+	}
 	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file(); err == nil {
 		t.Error("an empty file: want an error")
+	}
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", " \n")
+	if _, err := env(); err == nil {
+		t.Error("an empty environment variable: want an error")
+	}
+}
+
+func TestCheckSecrets(t *testing.T) {
+	dir := t.TempDir()
+	missing, empty, valid := filepath.Join(dir, "missing"), filepath.Join(dir, "empty"), filepath.Join(dir, "valid")
+	for path, data := range map[string]string{empty: " \n", valid: "secret\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TEMPORAL_MCP_TEST_SECRET", "secret")
+	t.Setenv("TEMPORAL_MCP_TEST_UNSET_SECRET", "")
+	os.Unsetenv("TEMPORAL_MCP_TEST_UNSET_SECRET")
+	cfg := &Config{
+		Targets: []Target{
+			{Name: "a", APIKey: &Secret{File: missing}},
+			{Name: "b", APIKey: &Secret{Env: "TEMPORAL_MCP_TEST_UNSET_SECRET"}},
+			{Name: "c", APIKey: &Secret{File: valid}},
+			{Name: "d", APIKey: &Secret{Env: "TEMPORAL_MCP_TEST_SECRET"}},
+			{Name: "e"},
+		},
+		Codecs: map[string]Codec{
+			"empty": {AuthorizationHeader: &Secret{File: empty}},
+			"none":  {},
+			"valid": {AuthorizationHeader: &Secret{File: valid}},
+		},
+	}
+	want := "targets[0]: api_key: open " + missing + ": no such file or directory\n" +
+		"targets[1]: api_key: environment variable TEMPORAL_MCP_TEST_UNSET_SECRET is unset or empty\n" +
+		`codecs: "empty": authorization_header: ` + empty + " is empty"
+	if err := cfg.CheckSecrets(); err == nil || err.Error() != want {
+		t.Errorf("CheckSecrets = %v, want %q", err, want)
+	}
+
+	cfg.Targets = cfg.Targets[2:]
+	delete(cfg.Codecs, "empty")
+	if err := cfg.CheckSecrets(); err != nil {
+		t.Errorf("CheckSecrets of readable secrets = %v, want no error", err)
 	}
 }
 
@@ -331,6 +382,34 @@ func TestParseInvalid(t *testing.T) {
 			name: "whitespace-only required target fields",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - {name: \" \", description: \"\\t\", address: \" \", namespace: \"  \"}\n",
 			want: []string{"targets[0]: name is required", "targets[0]: description is required", "targets[0]: address is required", "targets[0]: namespace is required"},
+		},
+		{
+			name: "address without a host or port",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: localhost, namespace: a}\n" +
+				"  - {name: b, description: x, address: \":7233\", namespace: b}\n" +
+				"  - {name: c, description: x, address: \"c:\", namespace: c}\n" +
+				"  - {name: d, description: x, address: \"dns:///localhost\", namespace: d}\n",
+			want: []string{
+				`targets[0]: address: address localhost: missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+				`targets[1]: address: ":7233" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[2]: address: "c:" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[3]: address: address localhost: missing port in address; it must be host:port, with a host and a port from 1 to 65535`,
+			},
+		},
+		{
+			name: "address with a port that is not a number from 1 to 65535, or a scheme other than dns:///",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: \"localhost:abc\", namespace: a}\n" +
+				"  - {name: b, description: x, address: \"localhost:0\", namespace: b}\n" +
+				"  - {name: c, description: x, address: \"localhost:99999\", namespace: c}\n" +
+				"  - {name: d, description: x, address: \"https://host\", namespace: d}\n",
+			want: []string{
+				`targets[0]: address: "localhost:abc" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[1]: address: "localhost:0" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[2]: address: "localhost:99999" must be host:port, with a host and a port from 1 to 65535`,
+				`targets[3]: address: "https://host" must be host:port, with a host and a port from 1 to 65535`,
+			},
 		},
 		{
 			name: "whitespace-only alias",

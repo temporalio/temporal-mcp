@@ -3,7 +3,6 @@ package temporal
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -65,29 +64,16 @@ func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 	}
 }
 
-func TestNewClientsAPIKeyFromEnv(t *testing.T) {
-	targets := []config.Target{{Name: "a", Address: "a:7233", Namespace: "a", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}}}
-
-	for _, value := range []string{"", "  \n"} {
-		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
-			t.Setenv("TEMPORAL_MCP_TEST_API_KEY", value)
-			_, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
-			if want := "targets[0]: api_key: environment variable TEMPORAL_MCP_TEST_API_KEY is unset or empty"; err == nil || !strings.Contains(err.Error(), want) {
-				t.Errorf("err = %v, want it to contain %q", err, want)
-			}
-		})
-	}
-
-	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
-	if _, err := NewClients(targets, "test", "0", slog.New(slog.DiscardHandler)); err != nil {
-		t.Error(err)
-	}
-}
-
 func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
 	_, err := NewClients([]config.Target{{Name: "a", Address: "%zz.example:7233", Namespace: "default"}}, "test", "0", slog.New(slog.DiscardHandler))
 	if want := "targets[0]: address:"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v, want it to contain %q", err, want)
+	}
+}
+
+func TestIsCloud(t *testing.T) {
+	if !IsCloud("dns:///orders.acct1.tmprl.cloud:7233") {
+		t.Error(`IsCloud("dns:///orders.acct1.tmprl.cloud:7233") = false, want true`)
 	}
 }
 

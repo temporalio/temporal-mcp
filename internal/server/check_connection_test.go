@@ -182,6 +182,24 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 			message: "temporal.example.com at 10.1.2.3 refused temporal.example.com:7233",
 			want:    "the Temporal server reported: <address> at <address> refused <address>",
 		},
+		{
+			name:    "host of a dns:/// address is replaced",
+			address: "dns:///temporal.example.com:7233",
+			message: "temporal.example.com at 10.1.2.3 refused dns:///temporal.example.com:7233",
+			want:    "the Temporal server reported: <address> at <address> refused <address>",
+		},
+		{
+			name:    "unprefixed address of a dns:/// address is replaced",
+			address: "dns:///temporal.example.com:7233",
+			message: "temporal.example.com:7233 refused the call",
+			want:    "the Temporal server reported: <address> refused the call",
+		},
+		{
+			name:    "host of a port-less dns:/// address is replaced",
+			address: "dns:///temporal.example.com",
+			message: "no route to temporal.example.com",
+			want:    "the Temporal server reported: no route to <address>",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,6 +209,41 @@ func TestRPCErrorMessageScrub(t *testing.T) {
 				t.Errorf("message = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestUnreadableAPIKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "missing-key")
+	logs, err := os.Create(filepath.Join(dir, "error.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { logs.Close() })
+	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: listen(t).Addr().String(), Namespace: "default", APIKey: &config.Secret{File: keyPath}}}}
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.NewTextHandler(logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := serveTools(t, cfg, clients, t.Output())
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverStage := res.StructuredContent.(map[string]any)["result"].(map[string]any)["stages"].([]any)[0].(map[string]any)
+	if got, want := serverStage["reason"], "Unknown: this server's API key for the target could not be read; the cause is in this server's log"; got != want {
+		t.Errorf("check_connection server stage reason = %q, want %q", got, want)
+	}
+	res, err = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "get_workflows", Arguments: map[string]any{"target": "a", "workflows": []any{map[string]any{"workflow_id": "w"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := errorContent(t, res)["message"], "workflows[0]: this server's API key for the target could not be read; the cause is in this server's log"; got != want {
+		t.Errorf("get_workflows error message = %q, want %q", got, want)
+	}
+	if log, err := os.ReadFile(logs.Name()); err != nil || !strings.Contains(string(log), keyPath) {
+		t.Errorf("error log %q, %v; want the cause, naming the key file", log, err)
 	}
 }
 

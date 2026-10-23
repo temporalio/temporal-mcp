@@ -336,7 +336,7 @@ func TestBinaryDoesNotImportFixture(t *testing.T) {
 }
 
 func TestExitsWithoutServing(t *testing.T) {
-	bin := buildBinary(t)
+	bin := buildBinary(t, "-ldflags", "-X main.version=9.9.9-test")
 	writeConfig := func(yaml string) string {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -365,6 +365,15 @@ func TestExitsWithoutServing(t *testing.T) {
 	missingCertificate := writeTLSConfig(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "a.key"))
 	mismatchedKey := writeTLSConfig(filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key"))
 	mismatchedClientKey := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, tls: {cert_file: %q, key_file: %q}}\n", filepath.Join(dir, "a.crt"), filepath.Join(dir, "b.key")))
+	missingKeyPath := filepath.Join(dir, "missing-api-key")
+	missingKey := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n", missingKeyPath))
+	missingKeyAndCertificate := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n  - {name: b, description: x, address: \"b:7233\", namespace: default, tls: {cert_file: %q, key_file: %q}}\n", missingKeyPath, filepath.Join(dir, "missing.crt"), filepath.Join(dir, "a.key")))
+	emptyAuthorizationPath := filepath.Join(dir, "empty-authorization")
+	if err := os.WriteFile(emptyAuthorizationPath, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyCodecAuthorization := writeConfig(fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n"+
+		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {file: %q}}\n", emptyAuthorizationPath))
 	tests := []struct {
 		name     string
 		args     []string
@@ -372,10 +381,14 @@ func TestExitsWithoutServing(t *testing.T) {
 		want     string
 	}{
 		{"-h", []string{"-h"}, 0, "Usage of temporal-mcp"},
+		{"--version", []string{"--version"}, 0, "temporal-mcp 9.9.9-test"},
 		{"unexpected arguments", []string{"--config", filepath.Join("testdata", "config.yaml"), "extra"}, 1, `unexpected arguments ["extra"]`},
 		{"invalid config", []string{"--config", noTargets}, 1, "invalid config " + noTargets + ": "},
 		{"unusable target", []string{"--config", unsetKey}, 1, "invalid config " + unsetKey + ": "},
 		{"unusable codec", []string{"--config", unsetCodecAuthorization}, 1, "invalid config " + unsetCodecAuthorization + `: codecs: "c": authorization_header: environment variable TEMPORAL_MCP_TEST_UNSET_KEY is unset or empty`},
+		{"missing API key file", []string{"--config", missingKey}, 1, "invalid config " + missingKey + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory"},
+		{"missing API key file and client certificate", []string{"--config", missingKeyAndCertificate}, 1, "invalid config " + missingKeyAndCertificate + ": targets[0]: api_key: open " + missingKeyPath + ": no such file or directory\ntargets[1]: tls: open " + filepath.Join(dir, "missing.crt")},
+		{"empty codec authorization header file", []string{"--config", emptyCodecAuthorization}, 1, "invalid config " + emptyCodecAuthorization + `: codecs: "c": authorization_header: ` + emptyAuthorizationPath + " is empty"},
 		{"unreadable certificate", []string{"--config", missingCertificate}, 1, "invalid config " + missingCertificate + ": listen_tls: open " + filepath.Join(dir, "missing.crt")},
 		{"key does not match certificate", []string{"--config", mismatchedKey}, 1, "invalid config " + mismatchedKey + ": listen_tls: tls: private key does not match public key"},
 		{"client key does not match certificate", []string{"--config", mismatchedClientKey}, 1, "invalid config " + mismatchedClientKey + ": targets[0]: tls: tls: private key does not match public key"},
@@ -619,6 +632,13 @@ func TestShutdownDuringToolCall(t *testing.T) {
 			var url string
 			if !tt.stdio {
 				url = listening(t, stderr)
+				// A connection that never sends a request, like one a client's pool dials and leaves
+				// unused, must not hold the shutdown open. The server accepts it before the client's.
+				unused, err := net.Dial("tcp", strings.TrimSuffix(strings.TrimPrefix(url, "http://"), "/mcp"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unused.Close()
 			}
 			// logUntil logs stderr until a line equal to want, or to its end if want is "", and reports whether it saw want.
 			logUntil := func(want string) bool {
@@ -630,7 +650,7 @@ func TestShutdownDuringToolCall(t *testing.T) {
 						}
 						t.Log(line)
 						if tt.calls == 0 && strings.Contains(line, "cancelling the requests still in progress") {
-							t.Error("an idle subscription waited for the shutdown timeout")
+							t.Error("the shutdown waited for the timeout with no call in progress")
 						}
 						if tt.stdio && strings.HasPrefix(line, "{") {
 							records.WriteString(line + "\n")

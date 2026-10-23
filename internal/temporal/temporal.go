@@ -55,10 +55,9 @@ func WithPlaintextCloudOpsAPI(address string) Option {
 
 // NewClients returns the clients for targets. Calls identify this server by
 // name and version in the gRPC user agent and the client-name and
-// client-version headers. The clients log to logger. It fails if an API key's
-// environment variable is unset or empty, if a client certificate cannot be
-// loaded, if a target's address cannot be parsed, or if a Cloud Ops API client
-// cannot be created.
+// client-version headers. The clients log to logger. It fails if a client
+// certificate cannot be loaded, if a target's address cannot be parsed, or if a
+// Cloud Ops API client cannot be created.
 func NewClients(targets []config.Target, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
 	var o options
 	for _, opt := range opts {
@@ -67,11 +66,7 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 	c := &Clients{byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
 	var errs []error
 	for i, t := range targets {
-		cred, err := apiKeyCredential(t.APIKey)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("targets[%d]: api_key: %w", i, err))
-			continue
-		}
+		cred := apiKeyCredential(t.APIKey, logger)
 		if t.TLS != nil {
 			if err := t.TLS.Check(logger); err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: tls: %w", i, err))
@@ -102,21 +97,18 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 // A credential returns the API key for each Temporal call to target; caller is nil without auth.
 type credential func(ctx context.Context, caller *identity.Caller, target *config.Target) (string, error)
 
-func apiKeyCredential(k *config.Secret) (credential, error) {
+func apiKeyCredential(k *config.Secret, logger *slog.Logger) credential {
 	if k == nil {
-		return nil, nil
+		return nil
 	}
-	read, err := k.Reader()
-	if err != nil {
-		return nil, err
-	}
-	return func(context.Context, *identity.Caller, *config.Target) (string, error) {
-		key, err := read()
+	return func(ctx context.Context, _ *identity.Caller, t *config.Target) (string, error) {
+		key, err := k.Read()
 		if err != nil {
-			return "", fmt.Errorf("read API key: %w", err)
+			logger.ErrorContext(ctx, "cannot read API key", "target", t.Name, "error", err.Error())
+			return "", errors.New("this server's API key for the target could not be read; the cause is in this server's log")
 		}
 		return key, nil
-	}, nil
+	}
 }
 
 func lazyClient(t config.Target, name, version string, cred credential, rootCAs *x509.CertPool, logger *slog.Logger) (client.Client, error) {
@@ -161,6 +153,7 @@ func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 
 // IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
 func IsCloud(address string) bool {
+	address = strings.TrimPrefix(address, "dns:///")
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address

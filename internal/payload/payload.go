@@ -13,11 +13,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -34,7 +31,8 @@ type Field struct {
 	Encoding  *string `json:"encoding,omitempty" jsonschema:"with handling omitted, or decoded or passthrough and no value: the payload's encoding, such as json/plain, binary/protobuf or binary/encrypted; an omitted payload's encoding is as stored, so json/plain or json/protobuf means passthrough would show it as JSON"`
 	Data      *string `json:"data,omitempty" jsonschema:"with handling decoded or passthrough and no value: the payload's bytes in base64; passthrough bytes are as stored, so may be encrypted or compressed"`
 	SizeBytes *int    `json:"size_bytes,omitempty" jsonschema:"with handling omitted: the size in bytes of the payload's data as stored, not counting its metadata"`
-	Reason    string  `json:"reason,omitempty" jsonschema:"with handling omitted, why: payload_handling if this target leaves payloads out of responses, decode_failed if its codec server could not decode this response's payloads, with the cause in the server log; check_connection's codec stage shows whether the codec server is reachable and accepts this server's credentials"`
+	Reason    string  `json:"reason,omitempty" jsonschema:"with handling omitted, why: payload_handling if this target leaves payloads out of responses, or decode_failed if the payload was not decoded"`
+	Error     string  `json:"error,omitempty" jsonschema:"with reason decode_failed: why the payload was not decoded, such as that the codec server could not be reached or responded with an HTTP error"`
 }
 
 // Renderer renders the payloads of each target's tool responses.
@@ -50,23 +48,13 @@ type target struct {
 }
 
 // NewRenderer returns the Renderer for cfg's targets. logger gets the cause of
-// each payload that is not decoded. It fails if a codec's authorization header
-// is read from an environment variable that is unset or empty.
+// each payload that is not decoded.
 func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
-	var errs []error
-	for _, name := range slices.Sorted(maps.Keys(cfg.Codecs)) {
-		if h := cfg.Codecs[name].AuthorizationHeader; h != nil {
-			read, err := h.Reader()
-			if err != nil {
-				errs = append(errs, fmt.Errorf("codecs: %q: authorization_header: %w", name, err))
-				continue
-			}
-			authorization[name] = read
+	for name, c := range cfg.Codecs {
+		if c.AuthorizationHeader != nil {
+			authorization[name] = c.AuthorizationHeader.Read
 		}
-	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
 	}
 	r := &Renderer{targets: map[string]*target{}, logger: logger}
 	for _, t := range cfg.Targets {
@@ -87,13 +75,11 @@ func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 // payloads, a decode request with no payloads, and returns why it failed, worded
 // for agents, or "" if it succeeded. The cause of a failure goes to the log.
 func (r *Renderer) CheckCodec(ctx context.Context, target string) string {
-	_, err := r.targets[target].codec.decode(ctx, nil)
-	ce := (*codecError)(nil)
-	if !errors.As(err, &ce) {
-		return ""
+	if _, err := r.targets[target].codec.decode(ctx, nil); err != nil {
+		r.logger.ErrorContext(ctx, "codec check failed", "target", target, "error", err.Error())
+		return err.reason
 	}
-	r.logger.ErrorContext(ctx, "codec check failed", "target", target, "error", err.Error())
-	return ce.reason
+	return ""
 }
 
 // A Batch holds the payloads of one tool response, so that they are rendered together.
@@ -132,8 +118,9 @@ func (b *Batch) AddAll(ps *commonpb.Payloads) []*Field {
 
 // Render fills in the Field of each payload in b as the target's payload_handling
 // says. To decode, it sends every payload to the codec server in one request; each
-// payload it cannot decode is omitted with reason decode_failed, and the cause goes
-// to the log. Render returns an error only when ctx ends before the payloads are decoded.
+// payload it cannot decode is omitted with reason decode_failed and an error that
+// says why, and the cause goes to the log. Render returns an error only when ctx
+// ends before the payloads are decoded.
 func (b *Batch) Render(ctx context.Context) error {
 	switch {
 	case b.target != nil && b.target.handling == config.PayloadPassthrough:
@@ -146,7 +133,7 @@ func (b *Batch) Render(ctx context.Context) error {
 			return b.decode(ctx)
 		}
 	default:
-		b.omit("payload_handling")
+		b.omit("payload_handling", "")
 	}
 	return nil
 }
@@ -154,7 +141,7 @@ func (b *Batch) Render(ctx context.Context) error {
 func (b *Batch) decode(ctx context.Context) error {
 	decoded, err := b.target.codec.decode(ctx, b.payloads)
 	if err != nil {
-		b.omit("decode_failed")
+		b.omit("decode_failed", err.reason)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -164,26 +151,27 @@ func (b *Batch) decode(ctx context.Context) error {
 	for i, p := range decoded {
 		f, ok := field("decoded", p)
 		if !ok {
-			f = omitted("decode_failed", b.payloads[i])
-			err := fmt.Sprintf("the codec server decoded a payload to encoding %s, but its data is not valid UTF-8 JSON", encoding(p))
-			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", err)
+			// The encoding is json/plain or json/protobuf, so it holds no response content.
+			why := fmt.Sprintf("the codec server decoded the payload to encoding %s, but its data is not valid UTF-8 JSON", encoding(p))
+			f = omitted("decode_failed", why, b.payloads[i])
+			b.r.logger.ErrorContext(ctx, "payload not decoded", "target", b.target.name, "error", why)
 		}
 		*b.fields[i] = f
 	}
 	return nil
 }
 
-func (b *Batch) omit(reason string) {
+func (b *Batch) omit(reason, why string) {
 	for i, p := range b.payloads {
-		*b.fields[i] = omitted(reason, p)
+		*b.fields[i] = omitted(reason, why, p)
 	}
 }
 
 // omitted renders p, which a response leaves out for reason, as its encoding and
-// size as stored, without its data.
-func omitted(reason string, p *commonpb.Payload) Field {
+// size as stored, without its data. why says why decoding failed, with reason decode_failed.
+func omitted(reason, why string, p *commonpb.Payload) Field {
 	enc, size := encoding(p), len(p.GetData())
-	return Field{Handling: "omitted", Reason: reason, Encoding: &enc, SizeBytes: &size}
+	return Field{Handling: "omitted", Reason: reason, Error: why, Encoding: &enc, SizeBytes: &size}
 }
 
 // field renders p with the given handling: as JSON if its encoding is binary/null,

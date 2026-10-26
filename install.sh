@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the latest release of temporal-mcp into ~/.temporalio/bin:
 #
-#   curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-mcp/main/install.sh | sh
+#   curl -sSfL https://temporal.download/mcp.sh | sh
 set -eu
 
 repo=https://github.com/temporalio/temporal-mcp

@@ -16,7 +16,7 @@ These steps set up `temporal-mcp` for one developer, whose agent launches it and
 ### Install
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/temporalio/temporal-mcp/main/install.sh | sh
+curl -sSfL https://temporal.download/mcp.sh | sh
 temporal-mcp --version # checks the install
 ```
 

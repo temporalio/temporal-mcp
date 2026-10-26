@@ -435,6 +435,8 @@ func TestToolsOnDevServer(t *testing.T) {
 		"--namespace", handlerNamespace,
 		// Small history pages let a filtered get_workflow_history read reach its page limit on a short history.
 		"--dynamic-config-value", "frontend.historyMaxPageSize=5",
+		// Without this, the server can hand a workflow task to a long poll that a stopped worker has already abandoned.
+		"--dynamic-config-value", "frontend.enableCancelWorkerPollsOnShutdown=true",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -1859,7 +1861,6 @@ func TestToolsOnDevServer(t *testing.T) {
 			})
 		}
 		v1.Stop()
-		worker.PurgeStickyWorkflowCache()
 		v2 := fixture.NewFulfillmentWorker(c, 2)
 		if err := v2.Start(); err != nil {
 			t.Fatal(err)

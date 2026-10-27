@@ -1,4 +1,3 @@
-```yaml
 # The centrally hosted MCP endpoint. Restrict network access according to your
 # internal security model.
 listen: 0.0.0.0:8443
@@ -17,7 +16,7 @@ auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
   issuers:
     - issuer: https://id.example.com/ # Example identity provider issuer.
-      audience: api://temporal-mcp # Example access token aud claim.
+      audience: https://temporal-mcp.example.com/mcp # Example token aud claim.
   scopes_supported:
     - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
@@ -25,7 +24,7 @@ auth:
 # file defines what that profile can use inside this MCP server.
 authorization:
   profiles:
-    mcp-user: # Example profile name.
+    example-user: # Example profile name.
       tools:
         - list_available_targets
         - check_connection
@@ -36,27 +35,30 @@ authorization:
         - count_workflows
         - list_search_attributes
       targets:
-        - payments-production # Example target name.
+        - example-cloud-namespace # Example target name.
 
   rules:
     - claim_name: groups # Example group claim in the access token.
-      claim_value: engineering # Example existing group name or ID.
-      profile: mcp-user # Refers to the profile above.
+      claim_value: example-group # Example existing group name or ID.
+      profile: example-user # Refers to the profile above.
 
-# MCP-to-Temporal authentication. Each target uses a certificate available only
-# on the server host. End users never receive these files.
+# This target uses mTLS for a Temporal Cloud namespace that cannot use API keys.
+# Where API keys are available, prefer one from a read-only service account:
+# Cloud client certificates cannot be limited to Read, and mTLS targets do not
+# get Cloud Ops API enrichment. See docs/config.md#targets.
 targets:
-  - name: payments-production # Example target name.
-    description: Production namespace of the payments service.
-    address: payments-production.a1b2c.tmprl.cloud:7233 # Example endpoint.
-    namespace: payments-production.a1b2c # Example namespace.
+  - name: example-cloud-namespace # Example target name.
+    description: Example Temporal Cloud namespace.
+    address: example.a1b2c.tmprl.cloud:7233 # Example endpoint.
+    namespace: example.a1b2c # Example namespace.
     tls:
-      cert_file: /etc/temporal-mcp/targets/payments-production.crt # Example certificate path.
-      key_file: /etc/temporal-mcp/targets/payments-production.key # Example key path.
+      cert_file: /etc/temporal-mcp/targets/example.crt # Example certificate path.
+      key_file: /etc/temporal-mcp/targets/example.key # Example key path.
+    # Return payloads as Temporal stores them. Use omit to hide payload data, or
+    # decode for codec-encrypted payloads.
     payload_handling: passthrough
 
 # Keep audit records separate from diagnostic logs and collect both according
-# to your organization's retention policy.
+# to your organization's retention policy. Rotate them with copytruncate.
 audit_log_file: /var/log/temporal-mcp/audit.jsonl
 error_log_file: /var/log/temporal-mcp/server.log
-```

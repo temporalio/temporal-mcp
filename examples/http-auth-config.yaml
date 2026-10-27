@@ -16,8 +16,8 @@ auth:
 
 authorization:
   profiles:
+    # No tools list: every read-only tool, including ones later versions add.
     oncall:
-      tools: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_task_queues, search_workflows, count_workflows, list_search_attributes]
       targets: [payments-prod, payments-staging, orders-prod]
     payments-dev:
       tools: [list_available_targets, get_workflows, get_workflow_history]

@@ -89,6 +89,8 @@ authorization:
     dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
     orders: {tools: [get_workflows], targets: [orders-prod]}
     search: {tools: [search_workflows], targets: [payments-staging]}
+    all: {targets: [payments-staging]}
+    no-history: {tools_deny: [get_workflow_history], targets: [payments-staging]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Dev, profile: dev}
@@ -97,6 +99,8 @@ authorization:
     - {claim_name: email, claim_value: alice@acme.example, issuer: %[2]q, profile: oncall}
     - {claim_name: scope, claim_value: temporal.orders, profile: orders}
     - {claim_name: scp, claim_value: temporal.orders, profile: orders}
+    - {claim_name: "https://acme.example/roles", claim_value: Temporal.All, profile: all}
+    - {claim_name: "https://acme.example/roles", claim_value: Temporal.NoHistory, profile: no-history}
 `, closed, idpA, idpB, staging.Addr().String())
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -237,6 +241,18 @@ authorization:
 			token: signA(map[string]any{"https://acme.example/roles": "Temporal.Admin Temporal.Dev"}),
 			tools: []string{},
 		},
+		{
+			name:    "profile without tools or tools_deny",
+			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.All"}}),
+			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
+			targets: []string{"payments-staging"},
+		},
+		{
+			name:    "profile with tools_deny",
+			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}}),
+			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
+			targets: []string{"payments-staging"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -300,6 +316,7 @@ authorization:
 		session := connectAs(t, tests[1].token)
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging", "extra": true})
+		unknownTool(t, connectAs(t, tests[13].token), "get_workflow_history", map[string]any{"target": "payments-staging", "workflow_id": "wf"})
 	})
 
 	t.Run("invalid cursor", func(t *testing.T) {
@@ -449,6 +466,28 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		}
 		if err := <-errs; serviceerror.ToStatus(err).Code() != codes.PermissionDenied {
 			t.Errorf("%s: err = %v, want PermissionDenied", name, err)
+		}
+	}
+}
+
+func TestProfileWithoutToolsGetsReadOnlyToolsOnly(t *testing.T) {
+	a := &config.Authorization{Profiles: map[string]config.Profile{
+		"all":  {Targets: []string{"t"}},
+		"deny": {ToolsDeny: []string{"get_workflows"}, Targets: []string{"t"}},
+	}}
+	s, tools := newServer(t.Context(), t.Context(), "temporal", "0", &config.Config{Authorization: a}, nil, nil, io.Discard, slog.New(slog.DiscardHandler))
+	noop := func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
+		return nil, struct{}{}, nil
+	}
+	addTool(s, &mcp.Tool{Name: "read_tool", Annotations: readOnlyAnnotations}, nil, noop)
+	addTool(s, &mcp.Tool{Name: "write_tool"}, nil, noop)
+	if err := resolveProfileTools(a, append(tools, "read_tool", "write_tool"), s.access); err != nil {
+		t.Fatal(err)
+	}
+	for name, excluded := range map[string][]string{"all": {"write_tool"}, "deny": {"write_tool", "get_workflows"}} {
+		got := a.Profiles[name].Tools
+		if !slices.Contains(got, "read_tool") || slices.ContainsFunc(excluded, func(tool string) bool { return slices.Contains(got, tool) }) {
+			t.Errorf("profile %q: tools = %v, want read_tool and none of %v", name, got, excluded)
 		}
 	}
 }

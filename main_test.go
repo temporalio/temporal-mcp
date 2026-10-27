@@ -347,7 +347,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	noTargets := writeConfig("listen: 0.0.0.0:0\ntargets: []\n")
 	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n" +
-		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
+		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}, q: {tools_deny: [terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
 		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
@@ -395,6 +395,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unopenable audit log", []string{"--config", unopenableAuditLog}, 1, "invalid config " + unopenableAuditLog + ": audit_log_file: open " + missingLog},
 		{"unopenable error log", []string{"--config", unopenableErrorLog}, 1, "invalid config " + unopenableErrorLog + ": error_log_file: open " + missingLog},
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
+		{"unknown tool in a profile's tools_deny", []string{"--config", unknownTool}, 1, `authorization: profiles: "q": tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

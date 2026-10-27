@@ -1,4 +1,4 @@
-# Request for Comment: Temporal Ops MCP Server
+# Request for Comment: Temporal MCP Server
 
 > [!WARNING]
 > This is a proposal. The final product may change based on feedback. Please send comments to your Temporal account team.
@@ -61,11 +61,35 @@ A few things to know about this architectural model:
 
 When the config file has an `auth` section, the server requires sign-in. Every request must include a JWT access token from an issuer listed in that section. Once the MCP server is registered with your identity provider, users should be automatically redirected to sign in to it.
 
+The MCP client asks the identity provider for a token by sending the canonical
+MCP URL as the OAuth `resource`. The access token's `aud` claim identifies the
+MCP API but may differ from that resource URL.
+
 In your identity provider:
 
-1. Register the MCP server as an API in your identity provider. Give it an audience, such as `api://temporal-ops-mcp`. Access tokens must include it in the `aud` claim.
-2. Allow your MCP client (Codex, Claude Code) or MCP gateway to request tokens with that audience. If the client or gateway isn't set up as an app in your identity provider yet, add it first.
-3. Assign groups or app roles to the people who should have access, and include them in the access token.
+1. Register the MCP server as an API. Configure the authorization server to
+   accept the exact canonical MCP URL, such as
+   `https://temporal-mcp.example.com/mcp`, as the resource identifier for that
+   API.
+2. Expose a delegated scope for the same API, such as
+   `https://temporal-mcp.example.com/mcp/access`.
+3. Allow your MCP client (Codex, Claude Code) or MCP gateway to request that
+   exact resource and scope. If it isn't set up as an application in your
+   identity provider yet, add it first.
+4. Ensure the resulting access token has an `aud` claim that identifies the MCP
+   API, and include the existing group or role used to grant access.
+
+In your Temporal MCP config:
+
+1. Set `auth.resource` to the same canonical MCP URL registered with the
+   identity provider and sent by the client.
+2. Set the issuer and audience to the exact `iss` and `aud` values in the access
+   token.
+3. Add the exact delegated scope to `auth.scopes_supported`.
+4. Map the group or role claim to the appropriate MCP profile.
+
+If the identity provider rejects the token request, first verify that the
+requested resource and scope exactly match values registered for the same API.
 
 > [!NOTE]
 > **If you use an MCP gateway**

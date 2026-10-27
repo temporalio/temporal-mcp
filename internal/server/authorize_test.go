@@ -316,7 +316,7 @@ authorization:
 		session := connectAs(t, tests[1].token)
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging", "extra": true})
-		unknownTool(t, connectAs(t, tests[13].token), "get_workflow_history", map[string]any{"target": "payments-staging", "workflow_id": "wf"})
+		unknownTool(t, connectAs(t, signA(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}})), "get_workflow_history", map[string]any{"target": "payments-staging", "workflow_id": "wf"})
 	})
 
 	t.Run("invalid cursor", func(t *testing.T) {

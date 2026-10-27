@@ -134,6 +134,9 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 		}
 		if p.Tools == nil {
 			p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return access[t] != "read" || slices.Contains(p.ToolsDeny, t) })
+			if len(p.Tools) == 0 {
+				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools_deny: leaves the profile no tools", name))
+			}
 			a.Profiles[name] = p
 		}
 	}

@@ -148,7 +148,7 @@ Decides which tools each caller may use on which targets. It is HTTP mode only, 
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
-  - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, and each name must be one that `tools` accepts.
+  - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.

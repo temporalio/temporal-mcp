@@ -39,8 +39,10 @@ For each trusted identity provider, the server needs:
 - An OAuth **scope** for the MCP API. The exact scope advertised by Temporal MCP
   must be registered with the identity provider and requested by the client.
 - OIDC discovery and signing-key endpoints reachable from the server.
-- A signed JWT **access token**. An ID token describes a sign-in to the client
-  and must not be used as the API bearer token.
+- A signed JWT **access token** with a `sub` claim, using one of the signature
+  algorithms supported by the server. An ID token describes a sign-in to the
+  client and must not be used as the API bearer token. The
+  [config reference](config.md#auth) lists the supported algorithms.
 - An existing group-membership claim configured to appear in access tokens for
   the MCP API.
 
@@ -104,7 +106,7 @@ auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
   issuers:
     - issuer: https://id.example.com/ # Example identity provider.
-      audience: api://temporal-mcp # Example API audience.
+      audience: https://temporal-mcp.example.com/mcp # Example API audience.
   scopes_supported:
     - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
@@ -130,7 +132,11 @@ token; depending on the provider, that may be a name or an ID.
 - **The identity provider rejects the token request:** the requested resource
   or scope may not exactly match the values registered for the same API
   resource.
-- **No token or an invalid token:** the request receives 401 Unauthorized.
+- **Identity-provider metadata or signing keys are unavailable:** the request
+  receives 500 Internal Server Error. Check the server log and its network
+  access to the identity provider.
+- **No token or an invalid token:** the request receives 401 Unauthorized with
+  a generic error. The detailed reason is in the server log.
 - **Valid token, no matching rule:** authentication succeeds, but the caller
   sees no tools or targets.
 - **Matching group, missing tool:** the caller does not see or cannot invoke that
@@ -173,6 +179,8 @@ repository. Confirm:
 
 - `iss` exactly equals an `auth.issuers[].issuer` value.
 - `aud` contains the configured `audience`.
+- `sub` is present and identifies the caller.
+- The token header's `alg` is supported by the server.
 - The token is an access token intended for the MCP API, not an ID token for the
   client.
 - `exp` and `nbf` make the token currently valid.

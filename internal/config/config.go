@@ -593,7 +593,7 @@ func (a *Auth) validate() []error {
 		}
 	}
 	if len(a.RequiredScopes) == 0 {
-		errs = append(errs, errors.New("auth: required_scopes: at least one scope is required"))
+		errs = append(errs, errors.New("auth: required_scopes: at least one scope is required; use your API's scope as it appears in the scope or scp claim of a decoded access token"))
 	}
 	for _, f := range []struct {
 		name   string

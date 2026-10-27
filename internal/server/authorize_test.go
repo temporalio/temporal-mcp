@@ -49,6 +49,9 @@ func newTestIssuer(t *testing.T) (string, func(claims map[string]any) string) {
 	t.Cleanup(srv.Close)
 	return srv.URL, func(claims map[string]any) string {
 		claims = maps.Clone(claims)
+		if _, ok := claims["scope"]; !ok {
+			claims["scope"] = "temporal.read"
+		}
 		claims["iss"], claims["sub"], claims["aud"], claims["exp"] = srv.URL, "alice", "operator", time.Now().Add(time.Hour).Unix()
 		b, err := json.Marshal(claims)
 		if err != nil {
@@ -59,8 +62,7 @@ func newTestIssuer(t *testing.T) (string, func(claims map[string]any) string) {
 }
 
 func TestAuthorization(t *testing.T) {
-	idpA, signA := newTestIssuer(t)
-	idpB, signB := newTestIssuer(t)
+	idp, sign := newTestIssuer(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -78,11 +80,13 @@ func TestAuthorization(t *testing.T) {
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
-  - {name: payments-staging, description: x, address: %[4]q, namespace: b}
+  - {name: payments-staging, description: x, address: %[3]q, namespace: b}
   - {name: orders-prod, description: x, address: %[1]q, namespace: c}
 auth:
   resource: https://mcp.example.com/mcp
-  issuers: [{issuer: %[2]q, audience: operator}, {issuer: %[3]q, audience: operator}]
+  issuer: %[2]q
+  audience: operator
+  required_scopes: [temporal.read]
 authorization:
   profiles:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
@@ -96,12 +100,12 @@ authorization:
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Dev, profile: dev}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Orders, profile: orders}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.Search, profile: search}
-    - {claim_name: email, claim_value: alice@acme.example, issuer: %[2]q, profile: oncall}
+    - {claim_name: email, claim_value: alice@acme.example, profile: oncall}
     - {claim_name: scope, claim_value: temporal.orders, profile: orders}
     - {claim_name: scp, claim_value: temporal.orders, profile: orders}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.All, profile: all}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.NoHistory, profile: no-history}
-`, closed, idpA, idpB, staging.Addr().String())
+`, closed, idp, staging.Addr().String())
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -174,36 +178,31 @@ authorization:
 	}{
 		{
 			name:    "two profiles",
-			token:   signA(map[string]any{"cognito:groups": []any{"other", "temporal-oncall"}, "https://acme.example/roles": []any{"Temporal.Dev"}}),
+			token:   sign(map[string]any{"cognito:groups": []any{"other", "temporal-oncall"}, "https://acme.example/roles": []any{"Temporal.Dev"}}),
 			tools:   []string{"check_connection", "count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-prod", "payments-staging"},
 		},
 		{
 			name:    "one profile",
-			token:   signB(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev"}}),
+			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev"}}),
 			tools:   []string{"count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "target granted only through another tool",
-			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev", "Temporal.Orders"}}),
+			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.Dev", "Temporal.Orders"}}),
 			tools:   []string{"count_workflows", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging", "orders-prod"},
 		},
 		{
-			name:    "issuer-scoped rule, matching issuer",
-			token:   signA(map[string]any{"email": "alice@acme.example"}),
+			name:    "string claim",
+			token:   sign(map[string]any{"email": "alice@acme.example"}),
 			tools:   []string{"check_connection", "list_available_targets"},
 			targets: []string{"payments-prod"},
 		},
 		{
-			name:  "issuer-scoped rule, other issuer",
-			token: signB(map[string]any{"email": "alice@acme.example"}),
-			tools: []string{},
-		},
-		{
 			name: "no matching rule, including claims of the wrong type",
-			token: signA(map[string]any{
+			token: sign(map[string]any{
 				"cognito:groups":             map[string]any{"temporal-oncall": true},
 				"https://acme.example/roles": []any{[]any{"Temporal.Dev"}, map[string]any{"role": "Temporal.Dev"}},
 				"email":                      true,
@@ -213,43 +212,43 @@ authorization:
 		},
 		{
 			name:  "tools without list_available_targets",
-			token: signA(map[string]any{"https://acme.example/roles": []any{"Temporal.Orders"}}),
+			token: sign(map[string]any{"https://acme.example/roles": []any{"Temporal.Orders"}}),
 			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "value differing only in case",
-			token: signA(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev", "scope": "openid Temporal.Orders"}),
+			token: sign(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev", "scope": "openid temporal.read Temporal.Orders"}),
 			tools: []string{},
 		},
 		{
 			name:  "substring or superstring of a value",
-			token: signA(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin", "scope": "openid temporal.orders.admin temporal"}),
+			token: sign(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin", "scope": "openid temporal.read temporal.orders.admin temporal"}),
 			tools: []string{},
 		},
 		{
 			name:  "scope string holding several scopes",
-			token: signA(map[string]any{"scope": "openid temporal.orders email"}),
+			token: sign(map[string]any{"scope": "openid temporal.read temporal.orders email"}),
 			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "scp string holding several scopes",
-			token: signA(map[string]any{"scp": "openid temporal.orders email"}),
+			token: sign(map[string]any{"scp": "openid temporal.orders email"}),
 			tools: []string{"get_workflows"},
 		},
 		{
 			name:  "space-separated string in a claim other than scope",
-			token: signA(map[string]any{"https://acme.example/roles": "Temporal.Admin Temporal.Dev"}),
+			token: sign(map[string]any{"https://acme.example/roles": "Temporal.Admin Temporal.Dev"}),
 			tools: []string{},
 		},
 		{
 			name:    "profile without tools or tools_deny",
-			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.All"}}),
+			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.All"}}),
 			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "profile with tools_deny",
-			token:   signA(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}}),
+			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}}),
 			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
@@ -303,7 +302,7 @@ authorization:
 
 	t.Run("unknown field", func(t *testing.T) {
 		for role, mayList := range map[string]bool{"Temporal.Dev": true, "Temporal.Search": false} {
-			session := connectAs(t, signB(map[string]any{"https://acme.example/roles": []any{role}}))
+			session := connectAs(t, sign(map[string]any{"https://acme.example/roles": []any{role}}))
 			res, _ := call(t, session, "search_workflows", map[string]any{"target": "payments-staging", "fields": []any{"status", "customerId"}})
 			got := errorContent(t, res)
 			if msg, _ := got["message"].(string); got["code"] != "invalid_argument" || !strings.Contains(msg, `"status", "customerId"`) || strings.Contains(msg, "list_search_attributes") != mayList {
@@ -316,11 +315,11 @@ authorization:
 		session := connectAs(t, tests[1].token)
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging"})
 		unknownTool(t, session, "check_connection", map[string]any{"target": "payments-staging", "extra": true})
-		unknownTool(t, connectAs(t, signA(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}})), "get_workflow_history", map[string]any{"target": "payments-staging", "workflow_id": "wf"})
+		unknownTool(t, connectAs(t, sign(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}})), "get_workflow_history", map[string]any{"target": "payments-staging", "workflow_id": "wf"})
 	})
 
 	t.Run("invalid cursor", func(t *testing.T) {
-		session := connectAs(t, tests[5].token)
+		session := connectAs(t, tests[4].token)
 		_, err := session.ListTools(t.Context(), &mcp.ListToolsParams{Cursor: "x"})
 		var wire *jsonrpc.Error
 		if !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInvalidParams {
@@ -353,52 +352,9 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 }
 
 func TestNewServerRequiresAuthorizationWithAuth(t *testing.T) {
-	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}}}
+	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example.com", Audience: "operator"}}
 	if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("NewServer with auth and no authorization succeeded, want an error")
-	}
-}
-
-func TestRuleWithoutIssuerWarnsWithSeveralIssuers(t *testing.T) {
-	one := []config.Issuer{{Issuer: "https://a.example.com", Audience: "operator"}}
-	two := []config.Issuer{one[0], {Issuer: "https://b.example.com", Audience: "operator"}}
-	const warning = `level=WARN msg="rule has no issuer, so it matches tokens from every issuer in auth: issuers; set issuer to limit it" rule="authorization: rules[%d]" profile=p` + "\n"
-	noTime := &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey {
-			return slog.Attr{}
-		}
-		return a
-	}}
-	for _, tc := range []struct {
-		name    string
-		issuers []config.Issuer
-		issuer  string
-		want    string
-	}{
-		{"two issuers, rules without issuer", two, "", fmt.Sprintf(warning, 1) + fmt.Sprintf(warning, 2)},
-		{"one issuer, rules without issuer", one, "", ""},
-		{"two issuers, rules with issuer", two, "https://b.example.com", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{
-				Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: tc.issuers},
-				Authorization: &config.Authorization{
-					Profiles: map[string]config.Profile{"p": {Tools: []string{"get_workflows"}, Targets: []string{"t"}}},
-					Rules: []config.Rule{
-						{ClaimName: "sub", ClaimValue: "alice", Issuer: "https://a.example.com", Profile: "p"},
-						{ClaimName: "sub", ClaimValue: "bob", Issuer: tc.issuer, Profile: "p"},
-						{ClaimName: "sub", ClaimValue: "carol", Issuer: tc.issuer, Profile: "p"},
-					},
-				},
-			}
-			var logs strings.Builder
-			if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.NewTextHandler(&logs, noTime))); err != nil {
-				t.Fatal(err)
-			}
-			if got := logs.String(); got != tc.want {
-				t.Errorf("startup log = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -415,7 +371,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 			{Name: "granted", Description: "x", Address: closed, Namespace: "a"},
 			{Name: "ungranted", Description: "x", Address: closed, Namespace: "b"},
 		},
-		Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: idp, Audience: "operator"}}},
+		Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: idp, Audience: "operator"},
 		Authorization: &config.Authorization{
 			Profiles: map[string]config.Profile{"p": {Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
@@ -494,7 +450,7 @@ func TestProfileWithoutToolsGetsReadOnlyToolsOnly(t *testing.T) {
 
 func TestToolsListFailsClosedOnUnexpectedResult(t *testing.T) {
 	cfg := &config.Config{
-		Auth:          &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: "https://idp.example.com", Audience: "operator"}}},
+		Auth:          &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example.com", Audience: "operator"},
 		Authorization: &config.Authorization{},
 	}
 	for _, result := range []mcp.Result{&mcp.ListPromptsResult{}, (*mcp.ListToolsResult)(nil)} {

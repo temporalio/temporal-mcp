@@ -1,0 +1,64 @@
+# The centrally hosted MCP endpoint. Restrict network access according to your
+# internal security model.
+listen: 0.0.0.0:8443
+
+# Serve the MCP endpoint over HTTPS.
+listen_tls:
+  cert_file: /etc/temporal-mcp/server/tls.crt # Example certificate path.
+  key_file: /etc/temporal-mcp/server/tls.key # Example key path.
+
+# User-to-MCP authentication. The resource must match the canonical MCP URL
+# registered with the identity provider and sent by the client. The issuer and
+# audience must match the access token exactly; the audience may differ from
+# the resource URL. Clients request each required scope, which must be
+# registered with the identity provider and appear exactly in every access
+# token.
+auth:
+  resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
+  issuer: https://id.example.com/ # Example identity provider issuer.
+  audience: https://temporal-mcp.example.com/mcp # Example token aud claim.
+  required_scopes:
+    - https://temporal-mcp.example.com/mcp/access # Example API scope.
+
+# User-to-tool-and-target authorization. A token claim assigns a profile; this
+# file defines what that profile can use inside this MCP server.
+authorization:
+  profiles:
+    example-user: # Example profile name.
+      tools:
+        - list_available_targets
+        - check_connection
+        - get_workflows
+        - get_workflow_history
+        - get_task_queues
+        - search_workflows
+        - count_workflows
+        - list_search_attributes
+      targets:
+        - example-cloud-namespace # Example target name.
+
+  rules:
+    - claim_name: groups # Example group claim in the access token.
+      claim_value: example-group # Example existing group name or ID.
+      profile: example-user # Refers to the profile above.
+
+# This target uses mTLS for a Temporal Cloud namespace that cannot use API keys.
+# Where API keys are available, prefer one from a read-only service account:
+# Cloud client certificates cannot be limited to Read, and mTLS targets do not
+# get Cloud Ops API enrichment. See docs/config.md#targets.
+targets:
+  - name: example-cloud-namespace # Example target name.
+    description: Example Temporal Cloud namespace.
+    address: example.a1b2c.tmprl.cloud:7233 # Example endpoint.
+    namespace: example.a1b2c # Example namespace.
+    tls:
+      cert_file: /etc/temporal-mcp/targets/example.crt # Example certificate path.
+      key_file: /etc/temporal-mcp/targets/example.key # Example key path.
+    # Return payloads as Temporal stores them. Use omit to hide payload data, or
+    # decode for codec-encrypted payloads.
+    payload_handling: passthrough
+
+# Keep audit records separate from diagnostic logs and collect both according
+# to your organization's retention policy. Rotate them with copytruncate.
+audit_log_file: /var/log/temporal-mcp/audit.jsonl
+error_log_file: /var/log/temporal-mcp/server.log

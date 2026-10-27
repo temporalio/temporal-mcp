@@ -96,35 +96,27 @@ type Profile struct {
 // Rule gives Profile to callers whose access token has the top-level claim
 // named ClaimName as a string equal to ClaimValue, or as an array with a string
 // element equal to it. A string claim named scope or scp counts as an array of
-// its space-separated entries. With Issuer set, the token must also come from
-// that issuer.
+// its space-separated entries.
 type Rule struct {
 	ClaimName  string `yaml:"claim_name"`
 	ClaimValue string `yaml:"claim_value"`
-	Issuer     string `yaml:"issuer"`
 	Profile    string `yaml:"profile"`
 }
 
-// Auth configures the server as an OAuth resource server that accepts JWT access tokens from the configured issuers.
+// Auth configures the server as an OAuth resource server that accepts JWT access tokens from one identity provider.
 type Auth struct {
 	// Resource is the URL at which clients reach this server's MCP endpoint.
-	Resource string   `yaml:"resource"`
-	Issuers  []Issuer `yaml:"issuers"`
-	// AuthorizationServers are the authorization servers advertised to clients; the issuers if empty.
-	AuthorizationServers []string `yaml:"authorization_servers"`
-	// ScopesSupported are the scopes advertised to clients. They do not grant or deny access.
-	ScopesSupported []string `yaml:"scopes_supported"`
-}
-
-// Issuer is an identity provider whose access tokens the server accepts.
-type Issuer struct {
-	// Issuer is the exact iss claim of the provider's tokens.
+	Resource string `yaml:"resource"`
+	// Issuer is the exact iss claim of the identity provider's tokens.
 	Issuer string `yaml:"issuer"`
-	// Audience is the value the aud claim of a token for this server must contain.
-	// It must identify this server as an API, such as its resource URL or API
-	// identifier, never the client app users sign in with: ID tokens issued to
-	// that app have the same aud and would pass as access tokens.
+	// Audience must identify this server's API, never the client app, whose ID tokens carry the client's aud.
 	Audience string `yaml:"audience"`
+	// RequiredScopes are the scopes every access token must have in its scope or scp claim.
+	RequiredScopes []string `yaml:"required_scopes"`
+	// ScopesSupported are the scopes advertised to clients; RequiredScopes if empty. They do not grant or deny access.
+	ScopesSupported []string `yaml:"scopes_supported"`
+	// AuthorizationServer is the authorization server advertised to clients; Issuer if empty.
+	AuthorizationServer string `yaml:"authorization_server"`
 }
 
 // Target is a named Temporal namespace at an address that the server can read from.
@@ -524,9 +516,6 @@ func (a *Authorization) validate(c *Config) []error {
 		} else if (r.ClaimName == "scope" || r.ClaimName == "scp") && strings.Contains(r.ClaimValue, " ") {
 			errs = append(errs, fmt.Errorf("%s: claim_value %q contains a space, which no %s entry does; write one scope per rule", label, r.ClaimValue, r.ClaimName))
 		}
-		if r.Issuer != "" && !slices.ContainsFunc(c.Auth.Issuers, func(iss Issuer) bool { return iss.Issuer == r.Issuer }) {
-			errs = append(errs, fmt.Errorf("%s: issuer %q is not one of auth: issuers", label, r.Issuer))
-		}
 		if r.Profile == "" {
 			errs = append(errs, fmt.Errorf("%s: profile is required", label))
 		} else if _, ok := a.Profiles[r.Profile]; !ok {
@@ -601,31 +590,28 @@ func (a *Auth) validate() []error {
 	if err := validateURL("auth: resource", a.Resource, false, false); err != nil {
 		errs = append(errs, err)
 	}
-	if len(a.Issuers) == 0 {
-		errs = append(errs, errors.New("auth: issuers: at least one issuer is required"))
+	if err := validateURL("auth: issuer", a.Issuer, false, false); err != nil {
+		errs = append(errs, err)
 	}
-	seen := map[string]int{}
-	for i, iss := range a.Issuers {
-		label := fmt.Sprintf("auth: issuers[%d]", i)
-		if err := validateURL(label+": issuer", iss.Issuer, false, false); err != nil {
-			errs = append(errs, err)
-		} else if j, ok := seen[iss.Issuer]; ok {
-			errs = append(errs, fmt.Errorf("%s: issuer %q conflicts with the issuer of issuers[%d]", label, iss.Issuer, j))
-		} else {
-			seen[iss.Issuer] = i
-		}
-		if strings.TrimSpace(iss.Audience) == "" {
-			errs = append(errs, fmt.Errorf("%s: audience is required", label))
-		}
+	if strings.TrimSpace(a.Audience) == "" {
+		errs = append(errs, errors.New("auth: audience is required"))
 	}
-	for i, s := range a.AuthorizationServers {
-		if err := validateURL(fmt.Sprintf("auth: authorization_servers[%d]", i), s, false, false); err != nil {
+	if a.AuthorizationServer != "" {
+		if err := validateURL("auth: authorization_server", a.AuthorizationServer, false, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	for i, s := range a.ScopesSupported {
-		if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
-			errs = append(errs, fmt.Errorf(`auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, i, s))
+	if len(a.RequiredScopes) == 0 {
+		errs = append(errs, errors.New("auth: required_scopes: at least one scope is required; use your API's scope as it appears in the scope or scp claim of a decoded access token"))
+	}
+	for _, f := range []struct {
+		name   string
+		scopes []string
+	}{{"required_scopes", a.RequiredScopes}, {"scopes_supported", a.ScopesSupported}} {
+		for i, s := range f.scopes {
+			if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+				errs = append(errs, fmt.Errorf(`auth: %s[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, f.name, i, s))
+			}
 		}
 	}
 	return errs

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -108,9 +109,9 @@ func (f *fakeIssuer) rotate(t *testing.T, kid string) {
 	f.oidc.PublicKeys = []oidctest.PublicKey{{PublicKey: &key.PublicKey, KeyID: kid, Algorithm: "RS256"}}
 }
 
-func (f *fakeIssuer) claims(audience string) map[string]any {
+func (f *fakeIssuer) claims() map[string]any {
 	now := time.Now()
-	return map[string]any{"iss": f.URL, "sub": "alice", "aud": audience, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix()}
+	return map[string]any{"iss": f.URL, "sub": "alice", "aud": "operator", "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "scope": "temporal.read"}
 }
 
 func (f *fakeIssuer) sign(t *testing.T, claims map[string]any) string {
@@ -178,21 +179,16 @@ func setInterval(t *testing.T, v *time.Duration, d time.Duration) {
 	t.Cleanup(func() { *v = old })
 }
 
-func authConfig(issuers ...string) *config.Auth {
-	a := &config.Auth{Resource: "https://mcp.example.com/mcp"}
-	for _, iss := range issuers {
-		a.Issuers = append(a.Issuers, config.Issuer{Issuer: iss, Audience: "operator"})
-	}
-	return a
+func authConfig(issuer string) *config.Auth {
+	return &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: issuer, Audience: "operator", RequiredScopes: []string{"temporal.read"}}
 }
 
 func TestRequireToken(t *testing.T) {
-	idp, second := newIssuer(t), newIssuer(t)
-	a := authConfig(idp.URL, second.URL)
-	a.Issuers[1].Audience = "second-audience"
+	idp := newIssuer(t)
+	a := authConfig(idp.URL)
 
 	with := func(changes map[string]any) map[string]any {
-		claims := idp.claims("operator")
+		claims := idp.claims()
 		for k, v := range changes {
 			if v == nil {
 				delete(claims, k)
@@ -216,8 +212,7 @@ func TestRequireToken(t *testing.T) {
 		{"not a JWT", "opaque-token", "", "malformed token"},
 		{"no exp", idp.sign(t, with(map[string]any{"exp": nil})), idp.URL, "token has no exp claim"},
 		{"no sub", idp.sign(t, with(map[string]any{"sub": nil})), idp.URL, "token has no sub claim"},
-		{"another issuer's audience", idp.sign(t, with(map[string]any{"aud": "second-audience"})), idp.URL, `expected audience "operator"`},
-		{"another issuer's iss", idp.sign(t, second.claims("second-audience")), second.URL, ""},
+		{"another audience", idp.sign(t, with(map[string]any{"aud": "other-audience"})), idp.URL, `expected audience "operator"`},
 		{"alg the key does not allow", oidctest.SignIDToken(idp.key, idp.kid, "PS256", marshal(t, with(nil))), idp.URL, "no signing key matches the token"},
 		{"unknown issuer", idp.sign(t, with(map[string]any{"iss": "https://unknown.example/" + strings.Repeat("a", 100000)})), "", "unknown issuer"},
 		{"alg HS256", oidctest.SignIDToken([]byte("0123456789abcdef0123456789abcdef"), "k1", "HS256", marshal(t, with(nil))), "", "unsupported signature algorithm"},
@@ -232,7 +227,7 @@ func TestRequireToken(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || info != nil || w.Body.String() != "invalid token\n" {
 				t.Errorf("status = %d, body %q; want 401 and %q", w.Code, w.Body, "invalid token\n")
 			}
-			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`; got != want {
+			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="temporal.read", error="invalid_token"`; got != want {
 				t.Errorf("WWW-Authenticate = %q, want %q", got, want)
 			}
 			logged := `level=DEBUG msg="rejected access token" reason=`
@@ -248,23 +243,18 @@ func TestRequireToken(t *testing.T) {
 		})
 	}
 
-	for _, iss := range []struct {
-		idp      *fakeIssuer
-		audience string
-	}{{idp, "operator"}, {second, "second-audience"}} {
-		claims := iss.idp.claims(iss.audience)
-		claims["groups"] = []any{"ops"}
-		w, info, _ := serve(a, iss.idp.sign(t, claims))
-		if w.Code != http.StatusOK || info == nil {
-			t.Fatalf("%s: status = %d, want 200; body %q", iss.idp.URL, w.Code, w.Body)
-		}
-		var extra map[string]any
-		if err := json.Unmarshal([]byte(marshal(t, claims)), &extra); err != nil {
-			t.Fatal(err)
-		}
-		if exp, c := time.Unix(claims["exp"].(int64), 0), CallerFromTokenInfo(info); c.Issuer != iss.idp.URL || c.Subject != "alice" || !info.Expiration.Equal(exp) || !reflect.DeepEqual(info.Extra, extra) {
-			t.Errorf("token info = %+v, want caller %s alice, Expiration %v and Extra %#v", info, iss.idp.URL, exp, extra)
-		}
+	claims := idp.claims()
+	claims["groups"] = []any{"ops"}
+	w, info, _ := serve(a, idp.sign(t, claims))
+	if w.Code != http.StatusOK || info == nil {
+		t.Fatalf("status = %d, want 200; body %q", w.Code, w.Body)
+	}
+	var extra map[string]any
+	if err := json.Unmarshal([]byte(marshal(t, claims)), &extra); err != nil {
+		t.Fatal(err)
+	}
+	if exp, c := time.Unix(claims["exp"].(int64), 0), CallerFromTokenInfo(info); c.Issuer != idp.URL || c.Subject != "alice" || !info.Expiration.Equal(exp) || !reflect.DeepEqual(info.Extra, extra) {
+		t.Errorf("token info = %+v, want caller %s alice, Expiration %v and Extra %#v", info, idp.URL, exp, extra)
 	}
 }
 
@@ -279,7 +269,7 @@ func TestRequireTokenDiscoversIssuerOnUse(t *testing.T) {
 
 	token := func(f *fakeIssuer) string {
 		now := time.Now()
-		return f.sign(t, map[string]any{"iss": "http://" + addr, "sub": "alice", "aud": "operator", "exp": now.Add(time.Hour).Unix()})
+		return f.sign(t, map[string]any{"iss": "http://" + addr, "sub": "alice", "aud": "operator", "exp": now.Add(time.Hour).Unix(), "scope": "temporal.read"})
 	}
 
 	down := &fakeIssuer{}
@@ -314,7 +304,7 @@ func TestRequireTokenDiscoversIssuerOnUse(t *testing.T) {
 }
 
 func TestRequireTokenSharesDiscovery(t *testing.T) {
-	blocked, other := newIssuer(t), newIssuer(t)
+	blocked := newIssuer(t)
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	t.Cleanup(release)
@@ -322,12 +312,12 @@ func TestRequireTokenSharesDiscovery(t *testing.T) {
 		<-gate
 		blocked.serveOIDC(w, r)
 	})
-	h, logs := newHandler(authConfig(blocked.URL, other.URL), nop)
+	h, logs := newHandler(authConfig(blocked.URL), nop)
 
 	const waiters = 5
 	codes := make(chan int, waiters)
 	for range waiters {
-		token := blocked.sign(t, blocked.claims("operator"))
+		token := blocked.sign(t, blocked.claims())
 		go func() { codes <- request(context.Background(), h, token).Code }()
 	}
 	for deadline := time.Now().Add(5 * time.Second); blocked.count(discoveryPath) == 0; time.Sleep(10 * time.Millisecond) {
@@ -338,7 +328,7 @@ func TestRequireTokenSharesDiscovery(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelled := make(chan int, 1)
-	token := blocked.sign(t, blocked.claims("operator"))
+	token := blocked.sign(t, blocked.claims())
 	go func() { cancelled <- request(ctx, h, token).Code }()
 	cancel()
 	select {
@@ -351,10 +341,6 @@ func TestRequireTokenSharesDiscovery(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelled request still waiting on discovery")
-	}
-
-	if w := request(context.Background(), h, other.sign(t, other.claims("operator"))); w.Code != http.StatusOK {
-		t.Errorf("other issuer: status = %d, want 200; body %q", w.Code, w.Body)
 	}
 
 	release()
@@ -371,11 +357,11 @@ func TestRequireTokenSharesDiscovery(t *testing.T) {
 func TestRequireTokenKeyRefresh(t *testing.T) {
 	idp := newIssuer(t)
 	h, logs := newHandler(authConfig(idp.URL), nop)
-	k1 := idp.sign(t, idp.claims("operator"))
-	expiredClaims := idp.claims("operator")
+	k1 := idp.sign(t, idp.claims())
+	expiredClaims := idp.claims()
 	expiredClaims["exp"] = time.Now().Add(-time.Hour).Unix()
 	expiredK1 := idp.sign(t, expiredClaims)
-	claims, other := marshal(t, idp.claims("operator")), newKey(t)
+	claims, other := marshal(t, idp.claims()), newKey(t)
 	forged, unknownKey := oidctest.SignIDToken(other, "k1", "RS256", claims), oidctest.SignIDToken(other, "unknown", "RS256", claims)
 	check := func(name, token string, want, fetches int) {
 		t.Helper()
@@ -397,7 +383,7 @@ func TestRequireTokenKeyRefresh(t *testing.T) {
 	}
 
 	idp.rotate(t, "k2")
-	k2 := idp.sign(t, idp.claims("operator"))
+	k2 := idp.sign(t, idp.claims())
 	check("rotated key within the interval", k2, http.StatusInternalServerError, 1)
 	setInterval(t, &keyRefreshInterval, 0)
 	check("removed key", k1, http.StatusUnauthorized, 2)
@@ -410,7 +396,7 @@ func TestRequireTokenKeyRefresh(t *testing.T) {
 func TestRequireTokenKeyFetchFailure(t *testing.T) {
 	idp := newIssuer(t)
 	h, logs := newHandler(authConfig(idp.URL), nop)
-	cached := idp.sign(t, idp.claims("operator"))
+	cached := idp.sign(t, idp.claims())
 	if w := request(context.Background(), h, cached); w.Code != http.StatusOK {
 		t.Fatalf("before the failure: status = %d, want 200; body %q", w.Code, w.Body)
 	}
@@ -424,7 +410,7 @@ func TestRequireTokenKeyFetchFailure(t *testing.T) {
 	}{{0, "ERROR"}, {time.Hour, "WARN"}} {
 		setInterval(t, &keyRefreshInterval, tt.interval)
 		logged := len(logs.String())
-		w := request(context.Background(), h, idp.sign(t, idp.claims("operator")))
+		w := request(context.Background(), h, idp.sign(t, idp.claims()))
 		if w.Code != http.StatusInternalServerError || w.Body.String() != "cannot verify access tokens\n" {
 			t.Errorf("refresh interval %v: status = %d, body %q; want 500 and %q", tt.interval, w.Code, w.Body, "cannot verify access tokens\n")
 		}
@@ -469,7 +455,7 @@ func TestRequireTokenSkipsUnusableKeys(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, set)
 		})
-		if w, _, _ := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator"))); w.Code != tt.want {
+		if w, _, _ := serve(authConfig(idp.URL), idp.sign(t, idp.claims())); w.Code != tt.want {
 			t.Errorf("%s: status = %d, want %d; body %q", tt.name, w.Code, tt.want, w.Body)
 		}
 	}
@@ -516,7 +502,7 @@ func TestRequireTokenLimitsIssuerResponses(t *testing.T) {
 				})
 			}
 			idp.override("/moved", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, keySet(t, idp)) })
-			claims := idp.claims("operator")
+			claims := idp.claims()
 			claims["iss"] = remote
 			if w, _, logs := serve(authConfig(remote), idp.sign(t, claims)); w.Code != http.StatusInternalServerError {
 				t.Errorf("status = %d, want 500; body %q, log %.300q", w.Code, w.Body, logs)
@@ -560,7 +546,7 @@ func TestRequireTokenLimitsIssuerResponses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			idp := newIssuer(t)
 			idp.override(tt.path, func(w http.ResponseWriter, _ *http.Request) { tt.respond(w, idp) })
-			w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims("operator")))
+			w, _, logs := serve(authConfig(idp.URL), idp.sign(t, idp.claims()))
 			if w.Code != http.StatusInternalServerError || strings.Contains(logs, strings.Repeat("x", 513)) || !strings.Contains(logs, tt.reason) {
 				t.Errorf("status = %d, log %.1000q; want 500 and a log with %q and at most 512 bytes of each value from the issuer", w.Code, logs, tt.reason)
 			}
@@ -581,17 +567,63 @@ func keySet(t *testing.T, idp *fakeIssuer) string {
 func TestRequireTokenWithScopes(t *testing.T) {
 	idp := newIssuer(t)
 	a := authConfig(idp.URL)
-	a.ScopesSupported = []string{"openid", "temporal.read"}
-	for token, want := range map[string]string{
-		"":             `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`,
-		"opaque-token": `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read", error="invalid_token"`,
-	} {
-		if w, _, _ := serve(a, token); w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != want {
-			t.Errorf("token %q: status = %d, WWW-Authenticate = %q; want 401 and %q", token, w.Code, w.Header().Get("WWW-Authenticate"), want)
-		}
+	a.RequiredScopes = []string{"temporal.read", "temporal.list"}
+	token := func(scopes map[string]any) string {
+		claims := idp.claims()
+		delete(claims, "scope")
+		maps.Copy(claims, scopes)
+		return idp.sign(t, claims)
 	}
-	if w, info, _ := serve(a, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK || info == nil {
-		t.Errorf("valid token: status = %d, token info %+v; want 200 and the token's info", w.Code, info)
+	tests := []struct {
+		name   string
+		scopes map[string]any
+		want   int
+	}{
+		{"scope string", map[string]any{"scope": "openid temporal.list temporal.read"}, http.StatusOK},
+		{"scp string", map[string]any{"scp": "temporal.read temporal.list"}, http.StatusOK},
+		{"scope array", map[string]any{"scope": []any{"temporal.read", "temporal.list"}}, http.StatusOK},
+		{"scope and scp together", map[string]any{"scope": "temporal.read", "scp": []any{"temporal.list"}}, http.StatusOK},
+		{"no scope claim", nil, http.StatusForbidden},
+		{"some of the scopes", map[string]any{"scope": "openid temporal.read"}, http.StatusForbidden},
+		{"scopes differing only in case", map[string]any{"scp": "Temporal.Read temporal.LIST"}, http.StatusForbidden},
+		{"scopes in a claim of another type", map[string]any{"scope": map[string]any{"temporal.read": true, "temporal.list": true}}, http.StatusForbidden},
+		{"scope nested in an array", map[string]any{"scope": "temporal.read", "scp": []any{[]any{"temporal.list"}}}, http.StatusForbidden},
+		{"scopes in one array element", map[string]any{"scp": []any{"temporal.read temporal.list"}}, http.StatusForbidden},
+		{"scopes in another claim", map[string]any{"scopes": "temporal.read temporal.list"}, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if w, info, _ := serve(a, token(tt.scopes)); w.Code != tt.want || (info != nil) != (tt.want == http.StatusOK) {
+				t.Errorf("status = %d, token info %+v; want %d, and the token's info only with 200", w.Code, info, tt.want)
+			}
+		})
+	}
+
+	const challengePrefix = `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope=`
+	for _, advertised := range []struct {
+		scopesSupported []string
+		scope           string
+	}{
+		{nil, `"temporal.read temporal.list"`},
+		{[]string{"api://operator/temporal.read"}, `"api://operator/temporal.read"`},
+	} {
+		a.ScopesSupported = advertised.scopesSupported
+		for _, tt := range []struct {
+			name, token, body, challenge string
+			want                         int
+		}{
+			{"no token", "", "no bearer token\n", challengePrefix + advertised.scope, http.StatusUnauthorized},
+			{"invalid token", "opaque-token", "invalid token\n", challengePrefix + advertised.scope + `, error="invalid_token"`, http.StatusUnauthorized},
+			{"missing scope", token(map[string]any{"scope": "temporal.read"}), "insufficient scope\n", challengePrefix + advertised.scope + `, error="insufficient_scope"`, http.StatusForbidden},
+		} {
+			w, _, logs := serve(a, tt.token)
+			if got := w.Header().Get("WWW-Authenticate"); w.Code != tt.want || w.Body.String() != tt.body || got != tt.challenge {
+				t.Errorf("scopes_supported %v, %s: status = %d, body %q, WWW-Authenticate = %q; want %d, %q and %q", advertised.scopesSupported, tt.name, w.Code, w.Body, got, tt.want, tt.body, tt.challenge)
+			}
+			if logged := `level=WARN msg="rejected access token" issuer=` + idp.URL + ` reason="token lacks required scope \"temporal.list\""`; tt.want == http.StatusForbidden && !strings.Contains(logs, logged) {
+				t.Errorf("log %q does not contain %q", logs, logged)
+			}
+		}
 	}
 }
 
@@ -611,7 +643,7 @@ func TestRequireTokenClockSkew(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			claims := idp.claims("operator")
+			claims := idp.claims()
 			claims[tt.claim] = tt.at.Unix()
 			if w, _, _ := serve(a, idp.sign(t, claims)); w.Code != tt.want {
 				t.Errorf("status = %d, want %d; body %q", w.Code, tt.want, w.Body)
@@ -633,7 +665,6 @@ func TestMetadataPath(t *testing.T) {
 }
 
 func TestMetadataHandler(t *testing.T) {
-	issuers := []config.Issuer{{Issuer: "https://a.example", Audience: "x"}, {Issuer: "https://b.example/tenant", Audience: "y"}}
 	tests := []struct {
 		name string
 		auth config.Auth
@@ -641,13 +672,13 @@ func TestMetadataHandler(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers},
-			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://a.example", "https://b.example/tenant"}},
+			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example/tenant", Audience: "x", RequiredScopes: []string{"temporal.read", "temporal.list"}},
+			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://idp.example/tenant"}, "scopes_supported": []any{"temporal.read", "temporal.list"}},
 		},
 		{
-			name: "authorization servers and scopes",
-			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers, AuthorizationServers: []string{"https://as.example"}, ScopesSupported: []string{"temporal.read"}},
-			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://as.example"}, "scopes_supported": []any{"temporal.read"}},
+			name: "authorization server and scopes",
+			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example/tenant", Audience: "x", RequiredScopes: []string{"temporal.read", "temporal.list"}, AuthorizationServer: "https://as.example", ScopesSupported: []string{"api://operator/temporal.read"}},
+			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://as.example"}, "scopes_supported": []any{"api://operator/temporal.read"}},
 		},
 	}
 	for _, tt := range tests {
@@ -684,7 +715,7 @@ func TestRequireTokenFetchPanic(t *testing.T) {
 	for _, path := range []string{discoveryPath, keysPath} {
 		httpClient = &http.Client{Transport: panicOn(path)}
 		logged := len(logs.String())
-		if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusInternalServerError || w.Body.String() != "cannot verify access tokens\n" {
+		if w := request(context.Background(), h, idp.sign(t, idp.claims())); w.Code != http.StatusInternalServerError || w.Body.String() != "cannot verify access tokens\n" {
 			t.Errorf("panic fetching %s: status = %d, body %q; want 500 and %q", path, w.Code, w.Body, "cannot verify access tokens\n")
 		}
 		if want := `level=ERROR msg="fetch from issuer panicked" issuer=` + idp.URL + ` error="panic: boom-value\ngoroutine `; !strings.Contains(logs.String()[logged:], want) {
@@ -692,7 +723,7 @@ func TestRequireTokenFetchPanic(t *testing.T) {
 		}
 	}
 	httpClient = client
-	if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK {
+	if w := request(context.Background(), h, idp.sign(t, idp.claims())); w.Code != http.StatusOK {
 		t.Errorf("after the panics: status = %d, want 200; body %q", w.Code, w.Body)
 	}
 	setInterval(t, &discoveryRetryInterval, time.Hour)
@@ -700,10 +731,10 @@ func TestRequireTokenFetchPanic(t *testing.T) {
 	for _, path := range []string{discoveryPath, keysPath} {
 		h, _ := newHandler(authConfig(idp.URL), nop)
 		httpClient = &http.Client{Transport: panicOn(path)}
-		request(context.Background(), h, idp.sign(t, idp.claims("operator")))
+		request(context.Background(), h, idp.sign(t, idp.claims()))
 		httpClient = client
 		fetches := idp.count(path)
-		if w := request(context.Background(), h, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusInternalServerError || idp.count(path) != fetches {
+		if w := request(context.Background(), h, idp.sign(t, idp.claims())); w.Code != http.StatusInternalServerError || idp.count(path) != fetches {
 			t.Errorf("request within the retry interval after a panic fetching %s: status = %d, %d new fetches; want 500 and none", path, w.Code, idp.count(path)-fetches)
 		}
 	}

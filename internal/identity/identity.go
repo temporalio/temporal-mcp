@@ -5,6 +5,7 @@
 package identity
 
 import (
+	"cmp"
 	"context"
 	"crypto"
 	"encoding/json"
@@ -85,51 +86,78 @@ func CallerFromTokenInfo(ti *auth.TokenInfo) *Caller {
 	return &Caller{Issuer: iss, Subject: sub, Claims: ti.Extra}
 }
 
+// Scopes returns the scopes in the caller's claim named claim, such as scope or
+// scp, read as a space-separated string or an array of strings.
+func (c *Caller) Scopes(claim string) []string {
+	switch v := c.Claims[claim].(type) {
+	case string:
+		return strings.Split(v, " ")
+	case []any:
+		var scopes []string
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				scopes = append(scopes, s)
+			}
+		}
+		return scopes
+	}
+	return nil
+}
+
 // MetadataHandler serves the protected resource metadata (RFC 9728) for a.
 func MetadataHandler(a *config.Auth) http.Handler {
-	servers := a.AuthorizationServers
-	if len(servers) == 0 {
-		for _, iss := range a.Issuers {
-			servers = append(servers, iss.Issuer)
-		}
-	}
 	return auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
 		Resource:             a.Resource,
-		AuthorizationServers: servers,
-		ScopesSupported:      a.ScopesSupported,
+		AuthorizationServers: []string{cmp.Or(a.AuthorizationServer, a.Issuer)},
+		ScopesSupported:      scopesSupported(a),
 	})
 }
 
-// RequireToken returns a handler that serves a request with next only if it
-// carries a valid access token from one of a's issuers. A missing or invalid
-// token gets a 401 with a WWW-Authenticate challenge that points to the
-// protected resource metadata and lists a's scopes, and for an invalid token
-// also has error="invalid_token". A token that cannot be checked yet gets a
-// 500 with no challenge: when the issuer's discovery or signing keys are
-// unavailable, or when the token's key is unknown and the request skipped
-// fetching the keys because they were last fetched less than a minute before
-// it, since the key may be newer than that fetch. When the request skipped
-// fetching, an expired token gets a 401 instead, whether that last fetch
-// succeeded or failed. Response bodies are fixed ("no bearer token",
-// "invalid token", "cannot verify access tokens"); the reason for a rejected
-// token or a 500 goes to logger.
-func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.Handler {
-	verify := newVerifier(a.Issuers, logger)
-	opts := &auth.RequireBearerTokenOptions{
-		ResourceMetadataURL: metadataURL(a.Resource),
-		ClockSkew:           jwt.DefaultLeeway,
-	}
-	var scope string
+func scopesSupported(a *config.Auth) []string {
 	if len(a.ScopesSupported) > 0 {
-		scope = fmt.Sprintf(", scope=%q", strings.Join(a.ScopesSupported, " "))
+		return a.ScopesSupported
 	}
+	return a.RequiredScopes
+}
+
+// RequireToken returns a handler that serves a request with next only if it
+// carries a valid access token from a's issuer that has each of a's
+// required scopes in its scope or scp claim. A missing or invalid token gets a
+// 401, and a valid token without a required scope a 403. Both get a
+// WWW-Authenticate challenge that points to the protected resource metadata
+// and lists the advertised scopes, with error="invalid_token" for an invalid
+// token and error="insufficient_scope" for a missing scope. A token that
+// cannot be checked yet gets a 500 with no challenge: when the issuer's
+// discovery or signing keys are unavailable, or when the token's key is
+// unknown and the request skipped fetching the keys because they were last
+// fetched less than a minute before it, since the key may be newer than that
+// fetch. When the request skipped fetching, an expired token gets a 401
+// instead, whether that last fetch succeeded or failed. Response bodies are
+// fixed ("no bearer token", "invalid token", "insufficient scope", "cannot
+// verify access tokens"); the reason for a rejected token or a 500 goes to
+// logger.
+func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.Handler {
+	verify := newVerifier(a, logger)
+	opts := &auth.RequireBearerTokenOptions{ClockSkew: jwt.DefaultLeeway}
+	header := fmt.Sprintf("Bearer resource_metadata=%q, scope=%q", metadataURL(a.Resource), strings.Join(scopesSupported(a), " "))
 	unwrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w.(*challenge).ResponseWriter, r)
+		c := w.(*challenge)
+		caller := CallerFromTokenInfo(auth.TokenInfoFromContext(r.Context()))
+		scopes := slices.Concat(caller.Scopes("scope"), caller.Scopes("scp"))
+		for _, s := range a.RequiredScopes {
+			if !slices.Contains(scopes, s) {
+				logger.WarnContext(r.Context(), "rejected access token", "issuer", caller.Issuer, "reason", fmt.Sprintf("token lacks required scope %q", s))
+				c.header = header + `, error="insufficient_scope"`
+				http.Error(c, "insufficient scope", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(c.ResponseWriter, r)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := &challenge{ResponseWriter: w, params: scope}
+		c := &challenge{ResponseWriter: w, header: header}
 		auth.RequireBearerToken(func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
-			c.params += `, error="invalid_token"`
+			c.header = header + `, error="invalid_token"`
 			return verify(ctx, token, r)
 		}, opts)(unwrapped).ServeHTTP(c, r)
 	})
@@ -137,13 +165,12 @@ func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.H
 
 type challenge struct {
 	http.ResponseWriter
-	params string
+	header string
 }
 
 func (w *challenge) WriteHeader(code int) {
-	if code == http.StatusUnauthorized {
-		h := w.Header()
-		h.Set("WWW-Authenticate", h.Get("WWW-Authenticate")+w.params)
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		w.Header().Set("WWW-Authenticate", w.header)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
@@ -461,65 +488,57 @@ func expired(payload []byte) bool {
 	return json.Unmarshal(payload, &claims) == nil && errors.Is(claims.Validate(jwt.Expected{}), jwt.ErrExpired)
 }
 
-func unverifiedIssuer(payload []byte) (string, error) {
+// parse returns the signed token if its alg is allowed, none of its claim names
+// is duplicated or differs only in case from a registered one, and its iss is issuer.
+func parse(token, issuer string) (*jose.JSONWebSignature, error) {
+	jws, err := jose.ParseSignedCompact(token, signingAlgorithms)
+	if errors.As(err, new(*jose.ErrUnexpectedSignatureAlgorithm)) {
+		return nil, errors.New("unsupported signature algorithm")
+	} else if err != nil {
+		return nil, errors.New("malformed token")
+	}
 	var claims map[string]jsontext.Value
-	if err := jsonv2.Unmarshal(payload, &claims); errors.Is(err, jsontext.ErrDuplicateName) {
-		return "", errors.New("duplicate claim name")
+	if err := jsonv2.Unmarshal(jws.UnsafePayloadWithoutVerification(), &claims); errors.Is(err, jsontext.ErrDuplicateName) {
+		return nil, errors.New("duplicate claim name")
 	} else if err != nil || claims == nil {
-		return "", errors.New("malformed claims")
+		return nil, errors.New("malformed claims")
 	}
 	for name := range claims {
 		for _, registered := range registeredClaims {
 			if name != registered && strings.EqualFold(name, registered) {
-				return "", fmt.Errorf("claim name differs only in case from %q", registered)
+				return nil, fmt.Errorf("claim name differs only in case from %q", registered)
 			}
 		}
 	}
 	raw, ok := claims["iss"]
 	if !ok {
-		return "", errors.New("token has no iss claim")
+		return nil, errors.New("token has no iss claim")
 	}
 	var iss string
 	if err := jsonv2.Unmarshal(raw, &iss); err != nil {
-		return "", errors.New("malformed claims")
+		return nil, errors.New("malformed claims")
 	}
-	return iss, nil
+	if iss != issuer {
+		return nil, errors.New("unknown issuer")
+	}
+	return jws, nil
 }
 
-func newVerifier(issuers []config.Issuer, logger *slog.Logger) auth.TokenVerifier {
+func newVerifier(a *config.Auth, logger *slog.Logger) auth.TokenVerifier {
 	algs := make([]string, len(signingAlgorithms))
 	for k, alg := range signingAlgorithms {
 		algs[k] = string(alg)
 	}
-	byIssuer := map[string]*issuer{}
-	for _, iss := range issuers {
-		u, err := url.Parse(iss.Issuer)
-		byIssuer[iss.Issuer] = &issuer{url: iss.Issuer, loopback: err == nil && config.LoopbackHost(u.Hostname()), verifyConfig: &oidc.Config{ClientID: iss.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
-	}
-	verify := func(ctx context.Context, token string) (string, *auth.TokenInfo, error) {
-		jws, err := jose.ParseSignedCompact(token, signingAlgorithms)
-		if errors.As(err, new(*jose.ErrUnexpectedSignatureAlgorithm)) {
-			return "", nil, errors.New("unsupported signature algorithm")
-		} else if err != nil {
-			return "", nil, errors.New("malformed token")
-		}
-		name, err := unverifiedIssuer(jws.UnsafePayloadWithoutVerification())
+	u, err := url.Parse(a.Issuer)
+	iss := &issuer{url: a.Issuer, loopback: err == nil && config.LoopbackHost(u.Hostname()), verifyConfig: &oidc.Config{ClientID: a.Audience, SupportedSigningAlgs: algs, SkipExpiryCheck: true}, logger: logger}
+	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+		jws, err := parse(token, iss.url)
 		if err != nil {
-			return "", nil, err
-		}
-		iss, ok := byIssuer[name]
-		if !ok {
-			return "", nil, errors.New("unknown issuer")
+			// A token rejected before the issuer checked it may come from anyone, so it logs at debug.
+			logger.DebugContext(ctx, "rejected access token", "reason", err)
+			return nil, auth.ErrInvalidToken
 		}
 		info, err := iss.verify(ctx, token, jws)
-		return iss.url, info, err
-	}
-	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
-		iss, info, err := verify(ctx, token)
-		var attrs []any
-		if iss != "" {
-			attrs = append(attrs, "issuer", iss)
-		}
 		var unavailable unavailableError
 		switch {
 		case errors.As(err, &unavailable):
@@ -531,15 +550,10 @@ func newVerifier(issuers []config.Issuer, logger *slog.Logger) auth.TokenVerifie
 				// Keeps tokens with made-up key IDs from flooding the log with errors.
 				level = slog.LevelWarn
 			}
-			logger.Log(ctx, level, "cannot verify access token", append(attrs, "error", unavailable.error)...)
+			logger.Log(ctx, level, "cannot verify access token", "issuer", iss.url, "error", unavailable.error)
 			return nil, errCannotVerify
 		case err != nil:
-			// A token rejected before a configured issuer checked it may come from anyone, so it logs at debug.
-			level := slog.LevelWarn
-			if iss == "" {
-				level = slog.LevelDebug
-			}
-			logger.Log(ctx, level, "rejected access token", append(attrs, "reason", err)...)
+			logger.WarnContext(ctx, "rejected access token", "issuer", iss.url, "reason", err)
 			return nil, auth.ErrInvalidToken
 		}
 		return info, nil

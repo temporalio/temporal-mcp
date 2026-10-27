@@ -72,7 +72,7 @@ func TestAudit(t *testing.T) {
 	}
 	authCfg := &config.Config{
 		Targets: targets,
-		Auth:    &config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: []config.Issuer{{Issuer: issuer, Audience: "operator"}}},
+		Auth:    &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: issuer, Audience: "operator"},
 		Authorization: &config.Authorization{
 			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},

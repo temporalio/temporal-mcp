@@ -519,7 +519,7 @@ func parse(token, issuer string) (*jose.JSONWebSignature, error) {
 		return nil, errors.New("malformed claims")
 	}
 	if iss != issuer {
-		return nil, errors.New("unknown issuer")
+		return nil, fmt.Errorf("unknown issuer %.*q", maxLoggedChars, iss)
 	}
 	return jws, nil
 }
@@ -534,8 +534,7 @@ func newVerifier(a *config.Auth, logger *slog.Logger) auth.TokenVerifier {
 	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		jws, err := parse(token, iss.url)
 		if err != nil {
-			// A token rejected before the issuer checked it may come from anyone, so it logs at debug.
-			logger.DebugContext(ctx, "rejected access token", "reason", err)
+			logger.WarnContext(ctx, "rejected access token", "reason", err)
 			return nil, auth.ErrInvalidToken
 		}
 		info, err := iss.verify(ctx, token, jws)

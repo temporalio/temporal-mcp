@@ -49,6 +49,9 @@ func newTestIssuer(t *testing.T) (string, func(claims map[string]any) string) {
 	t.Cleanup(srv.Close)
 	return srv.URL, func(claims map[string]any) string {
 		claims = maps.Clone(claims)
+		if _, ok := claims["scope"]; !ok {
+			claims["scope"] = "temporal.read"
+		}
 		claims["iss"], claims["sub"], claims["aud"], claims["exp"] = srv.URL, "alice", "operator", time.Now().Add(time.Hour).Unix()
 		b, err := json.Marshal(claims)
 		if err != nil {
@@ -83,6 +86,7 @@ targets:
 auth:
   resource: https://mcp.example.com/mcp
   issuers: [{issuer: %[2]q, audience: operator}, {issuer: %[3]q, audience: operator}]
+  required_scopes: [temporal.read]
 authorization:
   profiles:
     oncall: {tools: [list_available_targets, check_connection], targets: [payments-prod]}
@@ -214,17 +218,17 @@ authorization:
 		},
 		{
 			name:  "value differing only in case",
-			token: signA(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev", "scope": "openid Temporal.Orders"}),
+			token: signA(map[string]any{"cognito:groups": []any{"Temporal-Oncall"}, "https://acme.example/roles": "temporal.dev", "scope": "openid temporal.read Temporal.Orders"}),
 			tools: []string{},
 		},
 		{
 			name:  "substring or superstring of a value",
-			token: signA(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin", "scope": "openid temporal.orders.admin temporal"}),
+			token: signA(map[string]any{"cognito:groups": []any{"temporal-oncall-2", "oncall"}, "https://acme.example/roles": "Temporal.Dev.Admin", "scope": "openid temporal.read temporal.orders.admin temporal"}),
 			tools: []string{},
 		},
 		{
 			name:  "scope string holding several scopes",
-			token: signA(map[string]any{"scope": "openid temporal.orders email"}),
+			token: signA(map[string]any{"scope": "openid temporal.read temporal.orders email"}),
 			tools: []string{"get_workflows"},
 		},
 		{

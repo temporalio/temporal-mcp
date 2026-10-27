@@ -13,6 +13,8 @@ auth:
     - issuer: https://login.example.com/
       # Identifies this server as an API, never the app users sign in with.
       audience: https://temporal-mcp.example.com/mcp
+  # The scope you gave this server's API, as access tokens carry it in their scope or scp claim.
+  required_scopes: [temporal.read]
 
 authorization:
   profiles:

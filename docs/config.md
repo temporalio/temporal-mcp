@@ -42,8 +42,9 @@ listen: <host:port>
     issuers:
       - issuer: <url>
         audience: <string>
+    required_scopes: [ <string>, ... ]
     [ authorization_servers: [ <url>, ... ] | default = each issuer ]
-    [ scopes_supported: [ <string>, ... ] ] ]
+    [ scopes_supported: [ <string>, ... ] | default = required_scopes ] ]
 
 # HTTP mode only. Required with auth, not allowed without it.
 [ authorization:
@@ -126,9 +127,9 @@ Optional in both modes, default `8s`; zero uses the default and negative values 
 
 Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from one of the `issuers`, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
 
-An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, and carrying this server's `audience` in their `aud` claim.
+An agent gets its access token by signing the user in to an identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, carrying this server's `audience` in their `aud` claim and each of `required_scopes` in their `scope` or `scp` claim.
 
-When the agent signs the user in, it asks for the scopes in `scopes_supported` and sends the `resource` URL as the OAuth `resource` parameter. Register this server as an API with the provider, with `resource` as its identifier where the provider allows it, list that API's scope in `scopes_supported`, and copy `audience` from a decoded access token.
+When the agent signs the user in, it asks for the scopes in `scopes_supported`, which defaults to `required_scopes`, and sends the `resource` URL as the OAuth `resource` parameter. Register this server as an API with the provider, with `resource` as its identifier where the provider allows it, and give the API a scope that grants access to it, which goes in `required_scopes`. Some providers pick a token's `aud` from the requested scopes rather than from `resource`. Copy `audience` and `required_scopes` from a decoded access token.
 
 The agent also needs a client ID the provider accepts, either a URL from which the provider reads the agent's details (a client ID metadata document) or one the agent registers for itself (dynamic client registration), if the provider and the agent both support it. Otherwise, register a public client (one with no secret) with the provider that uses PKCE, and have users enter its client ID in their agent. Its redirect URI is usually a loopback URL on a port the agent picks at random, so the provider must accept any port there.
 
@@ -136,10 +137,11 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 - `issuers` (list, required): The identity providers whose access tokens the server accepts, at least one.
   - `issuer` (url, required): The exact `iss` claim of the provider's tokens, including any trailing slash. Each must be unique. When the server first verifies a token from an issuer, it fetches the `issuer` URL, without any trailing slash, followed by `/.well-known/openid-configuration`, and the `issuer` in that document must equal this value exactly.
   - `audience` (string, required): A value the `aud` claim of a token for this server must contain. It must identify this server as an API, such as its resource URL or API identifier, and never the client app users sign in with, because ID tokens issued to that app carry the same `aud` and would pass as access tokens. Copy it from the `aud` claim of a decoded access token for this server.
+- `required_scopes` (list of strings, required): The scopes every access token must carry, at least one. A token carries a scope when it is an entry of the token's `scope` or `scp` claim, where a string claim counts as a list of its space-separated entries, and matching is exact and case-sensitive. A valid token missing any of them gets a 403 with `error="insufficient_scope"` in the response's `WWW-Authenticate` challenge, before any [`authorization`](#authorization) rule is checked. Use the scope you gave this server's API, as it appears in the `scope` or `scp` claim of a decoded access token for this server, never one every token carries, such as `openid`.
 - `authorization_servers` (list of urls, default each `issuer`): Where agents are told to get tokens. Set it only if that differs from the `issuer` URLs.
-- `scopes_supported` (list of strings, optional): The scopes advertised to agents, in the metadata and in the `WWW-Authenticate` challenge. The server does not use them to grant or deny access, but with some providers they decide the token's `aud`, as described above. Each must be non-empty and contain only printable ASCII characters other than space, `"` and `\`.
+- `scopes_supported` (list of strings, default `required_scopes`): The scopes agents request, advertised in the metadata and in the `WWW-Authenticate` challenge in place of `required_scopes`. Set it only when agents must request a scope by a different name than the one tokens carry, as in Microsoft Entra ID: agents request `api://<app-id>/Temporal.Read`, which goes here, and the token's `scp` claim holds `Temporal.Read`, which goes in `required_scopes`. The server does not use these to grant or deny access, but with some providers they decide the token's `aud`, as described above.
 
-`resource`, each `issuer` and each `authorization_servers` entry must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address, with a host and no user info, query or fragment.
+`resource`, each `issuer` and each `authorization_servers` entry must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address, with a host and no user info, query or fragment. Each `required_scopes` and `scopes_supported` entry must be non-empty and contain only printable ASCII characters other than space, `"` and `\`.
 
 ## `authorization`
 

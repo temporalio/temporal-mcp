@@ -63,8 +63,8 @@ When the config file has an `auth` section, the server requires sign-in. Every r
 
 In your identity provider:
 
-1. Register the MCP server as an API in your identity provider. Give it an audience, such as `api://temporal-ops-mcp`. Access tokens must include it in the `aud` claim.
-2. Allow your MCP client (Codex, Claude Code) or MCP gateway to request tokens with that audience. If the client or gateway isn't set up as an app in your identity provider yet, add it first.
+1. Register the MCP server as an API in your identity provider. Give it an audience, such as `api://temporal-ops-mcp`, and a scope, such as `temporal.read`. Access tokens must include the audience in the `aud` claim and the scope in the `scope` or `scp` claim.
+2. Allow your MCP client (Codex, Claude Code) or MCP gateway to request tokens with that audience and scope. If the client or gateway isn't set up as an app in your identity provider yet, add it first.
 3. Assign groups or app roles to the people who should have access, and include them in the access token.
 
 > [!NOTE]

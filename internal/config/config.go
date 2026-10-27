@@ -108,9 +108,11 @@ type Auth struct {
 	// Resource is the URL at which clients reach this server's MCP endpoint.
 	Resource string   `yaml:"resource"`
 	Issuers  []Issuer `yaml:"issuers"`
+	// RequiredScopes are the scopes every access token must have in its scope or scp claim.
+	RequiredScopes []string `yaml:"required_scopes"`
 	// AuthorizationServers are the authorization servers advertised to clients; the issuers if empty.
 	AuthorizationServers []string `yaml:"authorization_servers"`
-	// ScopesSupported are the scopes advertised to clients. They do not grant or deny access.
+	// ScopesSupported are the scopes advertised to clients; RequiredScopes if empty. They do not grant or deny access.
 	ScopesSupported []string `yaml:"scopes_supported"`
 }
 
@@ -590,9 +592,17 @@ func (a *Auth) validate() []error {
 			errs = append(errs, err)
 		}
 	}
-	for i, s := range a.ScopesSupported {
-		if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
-			errs = append(errs, fmt.Errorf(`auth: scopes_supported[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, i, s))
+	if len(a.RequiredScopes) == 0 {
+		errs = append(errs, errors.New("auth: required_scopes: at least one scope is required"))
+	}
+	for _, f := range []struct {
+		name   string
+		scopes []string
+	}{{"required_scopes", a.RequiredScopes}, {"scopes_supported", a.ScopesSupported}} {
+		for i, s := range f.scopes {
+			if s == "" || strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == '"' || r == '\\' || r > '~' }) {
+				errs = append(errs, fmt.Errorf(`auth: %s[%d]: %q is not a scope; scopes are non-empty and contain only printable ASCII characters other than space, " and \`, f.name, i, s))
+			}
 		}
 	}
 	return errs

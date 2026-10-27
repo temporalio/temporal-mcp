@@ -85,6 +85,24 @@ func CallerFromTokenInfo(ti *auth.TokenInfo) *Caller {
 	return &Caller{Issuer: iss, Subject: sub, Claims: ti.Extra}
 }
 
+// Scopes returns the scopes in the caller's claim named claim, such as scope or
+// scp, read as a space-separated string or an array of strings.
+func (c *Caller) Scopes(claim string) []string {
+	switch v := c.Claims[claim].(type) {
+	case string:
+		return strings.Split(v, " ")
+	case []any:
+		var scopes []string
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				scopes = append(scopes, s)
+			}
+		}
+		return scopes
+	}
+	return nil
+}
+
 // MetadataHandler serves the protected resource metadata (RFC 9728) for a.
 func MetadataHandler(a *config.Auth) http.Handler {
 	servers := a.AuthorizationServers
@@ -96,40 +114,55 @@ func MetadataHandler(a *config.Auth) http.Handler {
 	return auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
 		Resource:             a.Resource,
 		AuthorizationServers: servers,
-		ScopesSupported:      a.ScopesSupported,
+		ScopesSupported:      scopesSupported(a),
 	})
 }
 
+func scopesSupported(a *config.Auth) []string {
+	if len(a.ScopesSupported) > 0 {
+		return a.ScopesSupported
+	}
+	return a.RequiredScopes
+}
+
 // RequireToken returns a handler that serves a request with next only if it
-// carries a valid access token from one of a's issuers. A missing or invalid
-// token gets a 401 with a WWW-Authenticate challenge that points to the
-// protected resource metadata and lists a's scopes, and for an invalid token
-// also has error="invalid_token". A token that cannot be checked yet gets a
-// 500 with no challenge: when the issuer's discovery or signing keys are
-// unavailable, or when the token's key is unknown and the request skipped
-// fetching the keys because they were last fetched less than a minute before
-// it, since the key may be newer than that fetch. When the request skipped
-// fetching, an expired token gets a 401 instead, whether that last fetch
-// succeeded or failed. Response bodies are fixed ("no bearer token",
-// "invalid token", "cannot verify access tokens"); the reason for a rejected
-// token or a 500 goes to logger.
+// carries a valid access token from one of a's issuers that has each of a's
+// required scopes in its scope or scp claim. A missing or invalid token gets a
+// 401, and a valid token without a required scope a 403. Both get a
+// WWW-Authenticate challenge that points to the protected resource metadata
+// and lists the advertised scopes, with error="invalid_token" for an invalid
+// token and error="insufficient_scope" for a missing scope. A token that
+// cannot be checked yet gets a 500 with no challenge: when the issuer's
+// discovery or signing keys are unavailable, or when the token's key is
+// unknown and the request skipped fetching the keys because they were last
+// fetched less than a minute before it, since the key may be newer than that
+// fetch. When the request skipped fetching, an expired token gets a 401
+// instead, whether that last fetch succeeded or failed. Response bodies are
+// fixed ("no bearer token", "invalid token", "insufficient scope", "cannot
+// verify access tokens"); the reason for a rejected token or a 500 goes to
+// logger.
 func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.Handler {
 	verify := newVerifier(a.Issuers, logger)
-	opts := &auth.RequireBearerTokenOptions{
-		ResourceMetadataURL: metadataURL(a.Resource),
-		ClockSkew:           jwt.DefaultLeeway,
-	}
-	var scope string
-	if len(a.ScopesSupported) > 0 {
-		scope = fmt.Sprintf(", scope=%q", strings.Join(a.ScopesSupported, " "))
-	}
+	opts := &auth.RequireBearerTokenOptions{ClockSkew: jwt.DefaultLeeway}
+	header := fmt.Sprintf("Bearer resource_metadata=%q, scope=%q", metadataURL(a.Resource), strings.Join(scopesSupported(a), " "))
 	unwrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w.(*challenge).ResponseWriter, r)
+		c := w.(*challenge)
+		caller := CallerFromTokenInfo(auth.TokenInfoFromContext(r.Context()))
+		scopes := slices.Concat(caller.Scopes("scope"), caller.Scopes("scp"))
+		for _, s := range a.RequiredScopes {
+			if !slices.Contains(scopes, s) {
+				logger.WarnContext(r.Context(), "rejected access token", "issuer", caller.Issuer, "reason", fmt.Sprintf("token lacks required scope %q", s))
+				c.header = header + `, error="insufficient_scope"`
+				http.Error(c, "insufficient scope", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(c.ResponseWriter, r)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := &challenge{ResponseWriter: w, params: scope}
+		c := &challenge{ResponseWriter: w, header: header}
 		auth.RequireBearerToken(func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
-			c.params += `, error="invalid_token"`
+			c.header = header + `, error="invalid_token"`
 			return verify(ctx, token, r)
 		}, opts)(unwrapped).ServeHTTP(c, r)
 	})
@@ -137,13 +170,12 @@ func RequireToken(a *config.Auth, logger *slog.Logger, next http.Handler) http.H
 
 type challenge struct {
 	http.ResponseWriter
-	params string
+	header string
 }
 
 func (w *challenge) WriteHeader(code int) {
-	if code == http.StatusUnauthorized {
-		h := w.Header()
-		h.Set("WWW-Authenticate", h.Get("WWW-Authenticate")+w.params)
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		w.Header().Set("WWW-Authenticate", w.header)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }

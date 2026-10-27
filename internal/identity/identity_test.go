@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -110,7 +111,7 @@ func (f *fakeIssuer) rotate(t *testing.T, kid string) {
 
 func (f *fakeIssuer) claims(audience string) map[string]any {
 	now := time.Now()
-	return map[string]any{"iss": f.URL, "sub": "alice", "aud": audience, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix()}
+	return map[string]any{"iss": f.URL, "sub": "alice", "aud": audience, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "scope": "temporal.read"}
 }
 
 func (f *fakeIssuer) sign(t *testing.T, claims map[string]any) string {
@@ -179,7 +180,7 @@ func setInterval(t *testing.T, v *time.Duration, d time.Duration) {
 }
 
 func authConfig(issuers ...string) *config.Auth {
-	a := &config.Auth{Resource: "https://mcp.example.com/mcp"}
+	a := &config.Auth{Resource: "https://mcp.example.com/mcp", RequiredScopes: []string{"temporal.read"}}
 	for _, iss := range issuers {
 		a.Issuers = append(a.Issuers, config.Issuer{Issuer: iss, Audience: "operator"})
 	}
@@ -232,7 +233,7 @@ func TestRequireToken(t *testing.T) {
 			if w.Code != http.StatusUnauthorized || info != nil || w.Body.String() != "invalid token\n" {
 				t.Errorf("status = %d, body %q; want 401 and %q", w.Code, w.Body, "invalid token\n")
 			}
-			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"`; got != want {
+			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="temporal.read", error="invalid_token"`; got != want {
 				t.Errorf("WWW-Authenticate = %q, want %q", got, want)
 			}
 			logged := `level=DEBUG msg="rejected access token" reason=`
@@ -279,7 +280,7 @@ func TestRequireTokenDiscoversIssuerOnUse(t *testing.T) {
 
 	token := func(f *fakeIssuer) string {
 		now := time.Now()
-		return f.sign(t, map[string]any{"iss": "http://" + addr, "sub": "alice", "aud": "operator", "exp": now.Add(time.Hour).Unix()})
+		return f.sign(t, map[string]any{"iss": "http://" + addr, "sub": "alice", "aud": "operator", "exp": now.Add(time.Hour).Unix(), "scope": "temporal.read"})
 	}
 
 	down := &fakeIssuer{}
@@ -581,17 +582,63 @@ func keySet(t *testing.T, idp *fakeIssuer) string {
 func TestRequireTokenWithScopes(t *testing.T) {
 	idp := newIssuer(t)
 	a := authConfig(idp.URL)
-	a.ScopesSupported = []string{"openid", "temporal.read"}
-	for token, want := range map[string]string{
-		"":             `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read"`,
-		"opaque-token": `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid temporal.read", error="invalid_token"`,
-	} {
-		if w, _, _ := serve(a, token); w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != want {
-			t.Errorf("token %q: status = %d, WWW-Authenticate = %q; want 401 and %q", token, w.Code, w.Header().Get("WWW-Authenticate"), want)
-		}
+	a.RequiredScopes = []string{"temporal.read", "temporal.list"}
+	token := func(scopes map[string]any) string {
+		claims := idp.claims("operator")
+		delete(claims, "scope")
+		maps.Copy(claims, scopes)
+		return idp.sign(t, claims)
 	}
-	if w, info, _ := serve(a, idp.sign(t, idp.claims("operator"))); w.Code != http.StatusOK || info == nil {
-		t.Errorf("valid token: status = %d, token info %+v; want 200 and the token's info", w.Code, info)
+	tests := []struct {
+		name   string
+		scopes map[string]any
+		want   int
+	}{
+		{"scope string", map[string]any{"scope": "openid temporal.list temporal.read"}, http.StatusOK},
+		{"scp string", map[string]any{"scp": "temporal.read temporal.list"}, http.StatusOK},
+		{"scope array", map[string]any{"scope": []any{"temporal.read", "temporal.list"}}, http.StatusOK},
+		{"scope and scp together", map[string]any{"scope": "temporal.read", "scp": []any{"temporal.list"}}, http.StatusOK},
+		{"no scope claim", nil, http.StatusForbidden},
+		{"some of the scopes", map[string]any{"scope": "openid temporal.read"}, http.StatusForbidden},
+		{"scopes differing only in case", map[string]any{"scp": "Temporal.Read temporal.LIST"}, http.StatusForbidden},
+		{"scopes in a claim of another type", map[string]any{"scope": map[string]any{"temporal.read": true, "temporal.list": true}}, http.StatusForbidden},
+		{"scope nested in an array", map[string]any{"scope": "temporal.read", "scp": []any{[]any{"temporal.list"}}}, http.StatusForbidden},
+		{"scopes in one array element", map[string]any{"scp": []any{"temporal.read temporal.list"}}, http.StatusForbidden},
+		{"scopes in another claim", map[string]any{"scopes": "temporal.read temporal.list"}, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if w, info, _ := serve(a, token(tt.scopes)); w.Code != tt.want || (info != nil) != (tt.want == http.StatusOK) {
+				t.Errorf("status = %d, token info %+v; want %d, and the token's info only with 200", w.Code, info, tt.want)
+			}
+		})
+	}
+
+	const challengePrefix = `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope=`
+	for _, advertised := range []struct {
+		scopesSupported []string
+		scope           string
+	}{
+		{nil, `"temporal.read temporal.list"`},
+		{[]string{"api://operator/temporal.read"}, `"api://operator/temporal.read"`},
+	} {
+		a.ScopesSupported = advertised.scopesSupported
+		for _, tt := range []struct {
+			name, token, body, challenge string
+			want                         int
+		}{
+			{"no token", "", "no bearer token\n", challengePrefix + advertised.scope, http.StatusUnauthorized},
+			{"invalid token", "opaque-token", "invalid token\n", challengePrefix + advertised.scope + `, error="invalid_token"`, http.StatusUnauthorized},
+			{"missing scope", token(map[string]any{"scope": "temporal.read"}), "insufficient scope\n", challengePrefix + advertised.scope + `, error="insufficient_scope"`, http.StatusForbidden},
+		} {
+			w, _, logs := serve(a, tt.token)
+			if got := w.Header().Get("WWW-Authenticate"); w.Code != tt.want || w.Body.String() != tt.body || got != tt.challenge {
+				t.Errorf("scopes_supported %v, %s: status = %d, body %q, WWW-Authenticate = %q; want %d, %q and %q", advertised.scopesSupported, tt.name, w.Code, w.Body, got, tt.want, tt.body, tt.challenge)
+			}
+			if logged := `level=WARN msg="rejected access token" issuer=` + idp.URL + ` reason="token lacks required scope \"temporal.list\""`; tt.want == http.StatusForbidden && !strings.Contains(logs, logged) {
+				t.Errorf("log %q does not contain %q", logs, logged)
+			}
+		}
 	}
 }
 
@@ -641,13 +688,13 @@ func TestMetadataHandler(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers},
-			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://a.example", "https://b.example/tenant"}},
+			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers, RequiredScopes: []string{"temporal.read", "temporal.list"}},
+			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://a.example", "https://b.example/tenant"}, "scopes_supported": []any{"temporal.read", "temporal.list"}},
 		},
 		{
 			name: "authorization servers and scopes",
-			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers, AuthorizationServers: []string{"https://as.example"}, ScopesSupported: []string{"temporal.read"}},
-			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://as.example"}, "scopes_supported": []any{"temporal.read"}},
+			auth: config.Auth{Resource: "https://mcp.example.com/mcp", Issuers: issuers, RequiredScopes: []string{"temporal.read", "temporal.list"}, AuthorizationServers: []string{"https://as.example"}, ScopesSupported: []string{"api://operator/temporal.read"}},
+			want: map[string]any{"resource": "https://mcp.example.com/mcp", "authorization_servers": []any{"https://as.example"}, "scopes_supported": []any{"api://operator/temporal.read"}},
 		},
 	}
 	for _, tt := range tests {

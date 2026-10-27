@@ -253,7 +253,7 @@ func TestNewMux(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	authCfg := &config.Config{
-		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuerURL, Audience: "operator"}}},
+		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuerURL, Audience: "operator"}}, RequiredScopes: []string{"temporal.read"}},
 		Authorization: &config.Authorization{
 			Profiles: map[string]config.Profile{"p": {Tools: []string{"whoami"}, Targets: []string{"prod"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
@@ -285,7 +285,8 @@ func TestNewMux(t *testing.T) {
 		want                      int
 		challenge                 string
 	}{
-		{"no token", withAuth, http.MethodPost, "/mcp", "", "", http.StatusUnauthorized, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp/"`},
+		{"no token", withAuth, http.MethodPost, "/mcp", "", "", http.StatusUnauthorized, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp/", scope="temporal.read"`},
+		{"token matching a rule without a required scope", withAuth, http.MethodPost, "/mcp", "", sign(map[string]any{"scope": "openid"}), http.StatusForbidden, `Bearer resource_metadata="https://mcp.example.com:8443/.well-known/oauth-protected-resource/team/mcp/", scope="temporal.read", error="insufficient_scope"`},
 		{"metadata at the challenged path", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp/", "", "", http.StatusOK, ""},
 		{"metadata without the trailing slash", withAuth, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp", "", "", http.StatusOK, ""},
 		{"no metadata with a slash the resource lacks", noSlash, http.MethodGet, "/.well-known/oauth-protected-resource/team/mcp/", "", "", http.StatusNotFound, ""},

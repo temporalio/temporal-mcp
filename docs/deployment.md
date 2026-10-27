@@ -67,18 +67,20 @@ These are independent trust relationships:
    namespace name, and API key or mTLS certificate. Keep file-backed credentials
    in protected paths on the host and use least-privileged credentials.
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
-   audience for Temporal MCP. In the identity provider, expose a scope for the
-   MCP API and include the chosen existing group in its access tokens. In the
-   MCP config, advertise that scope and map the group claim to a profile. See
-   [Identity and access](identity-and-access.md).
+   audience for Temporal MCP. Register the canonical MCP URL as the API resource
+   in the identity provider and expose a scope for it. In the MCP config, set
+   `auth.resource` to the same URL, advertise the same scope, and map the chosen
+   existing group claim to a profile. See [Identity and
+   access](identity-and-access.md).
 5. **Configure payload access.** Use `passthrough` when workflow payloads are
    readable as stored. If the application encrypts payloads with a codec,
    configure that codec and use `decode` so the MCP client can read them. Use
    `omit`, the default, only when payload contents should not be returned.
 6. **Create the config and start the server.** The
-   [centrally hosted OIDC and mTLS example](central-oidc-mtls.example.md) shows
-   the complete YAML. Start it with `temporal-mcp --config <path>` and capture
-   the audit records and error logs.
+   [centrally hosted OIDC and mTLS
+   example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
+   Start it with `temporal-mcp --config <path>` and capture the audit records and
+   error logs.
 7. **Test from an MCP client.** Sign in as a user with the intended access, then
    call `list_available_targets`, `check_connection`, and one read tool.
 8. **Verify access.** Confirm that users see the tools and targets assigned to

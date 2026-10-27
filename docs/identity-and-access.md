@@ -7,7 +7,7 @@ the server needs the same small set of token properties from each one.
 
 For server placement and target credentials, see [Deployment](deployment.md).
 For a complete configuration, see the
-[centrally hosted OIDC and mTLS example](central-oidc-mtls.example.md).
+[centrally hosted OIDC and mTLS example](../examples/http-oidc-mtls-config.yaml).
 
 ## Components
 

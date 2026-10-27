@@ -105,7 +105,7 @@ func TestParseTargetAddress(t *testing.T) {
 
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
-		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuers: [{issuer: \"" + u + "\", audience: a}]\n  authorization_servers: [\"" + u + "\"]\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n" + validAuthorization
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
 		if _, err := parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
@@ -113,7 +113,7 @@ func TestParseAuth(t *testing.T) {
 }
 
 func TestParseStdio(t *testing.T) {
-	const auth = "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n"
+	const auth = "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n"
 	for _, tt := range []struct {
 		name, yaml string
 		want       []string
@@ -548,52 +548,44 @@ func TestParseInvalid(t *testing.T) {
 		{
 			name: "auth with no value",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n",
-			want: []string{"auth: resource is required", "auth: issuers: at least one issuer is required", "auth: required_scopes: at least one scope is required"},
+			want: []string{"auth: resource is required", "auth: issuer is required", "auth: audience is required", "auth: required_scopes: at least one scope is required"},
 		},
 		{
-			name: "bad auth URLs",
+			name: "bad auth URLs and a blank audience",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `auth:
   resource: http://mcp.example.com/mcp
-  issuers:
-    - {issuer: "https://idp.example.com?tenant=1", audience: a}
-    - {issuer: "https://user@idp.example.com", audience: a}
-    - {issuer: "https://", audience: a}
-    - {audience: a}
-    - {issuer: "https://idp.example.com/#tenant", audience: a}
-  authorization_servers: ["not a url"]
+  issuer: "https://idp.example.com?tenant=1"
+  audience: " "
+  authorization_server: "https://user@idp.example.com"
 `,
 			want: []string{
 				`auth: resource: "http://mcp.example.com/mcp" must be an https URL (http only for a loopback host)`,
-				`auth: issuers[0]: issuer: "https://idp.example.com?tenant=1" must be`,
-				`auth: issuers[1]: issuer: "https://user@idp.example.com" must be`,
-				`auth: issuers[2]: issuer: "https://" must be`,
-				"auth: issuers[3]: issuer is required",
-				`auth: issuers[4]: issuer: "https://idp.example.com/#tenant" must be`,
-				`auth: authorization_servers[0]: "not a url" must be`,
+				`auth: issuer: "https://idp.example.com?tenant=1" must be`,
+				"auth: audience is required",
+				`auth: authorization_server: "https://user@idp.example.com" must be`,
 			},
 		},
 		{
-			name: "duplicate issuers and missing audiences",
+			name: "more bad auth URLs",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `auth:
-  resource: https://mcp.example.com/mcp
-  issuers:
-    - {issuer: https://idp.example.com, audience: a}
-    - {issuer: https://idp.example.com, audience: b}
-    - {issuer: https://other.example.com, audience: " "}
+  resource: "https://"
+  issuer: "https://idp.example.com/#tenant"
+  authorization_server: "not a url"
 `,
 			want: []string{
-				`auth: issuers[1]: issuer "https://idp.example.com" conflicts with the issuer of issuers[0]`,
-				"auth: issuers[2]: audience is required",
+				`auth: resource: "https://" must be`,
+				`auth: issuer: "https://idp.example.com/#tenant" must be`,
+				`auth: authorization_server: "not a url" must be`,
 			},
 		},
 		{
 			name: "empty required scopes",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n  required_scopes: []\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n  required_scopes: []\n",
 			want: []string{"auth: required_scopes: at least one scope is required"},
 		},
 		{
 			name: "bad scopes",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n  required_scopes: [Temporal.Read, 'Temporal Read']\n  scopes_supported: ['', 'a b', 'a\"b', 'a\\b', 'é']\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n  required_scopes: [Temporal.Read, 'Temporal Read']\n  scopes_supported: ['', 'a b', 'a\"b', 'a\\b', 'é']\n",
 			want: []string{
 				`auth: required_scopes[1]: "Temporal Read" is not a scope`,
 				`auth: scopes_supported[0]: "" is not a scope`,
@@ -605,7 +597,7 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "auth without authorization",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n",
 			want: []string{"authorization: required with an auth section"},
 		},
 		{
@@ -620,19 +612,18 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "authorization with no value",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\nauthorization:\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\nauthorization:\n",
 			want: []string{"authorization: rules: at least one rule is required"},
 		},
 		{
 			name: "bad profiles and rules",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: a}]\n" + `authorization:
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n" + `authorization:
   profiles:
     empty: {}
     bad-targets: {tools: [get_workflows], targets: [production, staging]}
   rules:
     - {claim_name: groups, profile: empty}
     - {claim_name: " ", claim_value: a, profile: empty}
-    - {claim_name: email, claim_value: a, issuer: https://other.example.com, profile: empty}
     - {claim_name: groups, claim_value: a, profile: missing}
     - {claim_name: groups, claim_value: a}
     - {claim_name: " groups ", claim_value: a, profile: empty}
@@ -646,12 +637,11 @@ func TestParseInvalid(t *testing.T) {
 				`authorization: profiles: "empty": targets: at least one target is required`,
 				"authorization: rules[0]: claim_value is required",
 				"authorization: rules[1]: claim_name is required",
-				`authorization: rules[2]: issuer "https://other.example.com" is not one of auth: issuers`,
-				`authorization: rules[3]: profile "missing" is not one of authorization: profiles`,
-				"authorization: rules[4]: profile is required",
-				`authorization: rules[5]: claim_name " groups " has leading or trailing whitespace, which no claim name matches`,
-				`authorization: rules[6]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
-				`authorization: rules[7]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
+				`authorization: rules[2]: profile "missing" is not one of authorization: profiles`,
+				"authorization: rules[3]: profile is required",
+				`authorization: rules[4]: claim_name " groups " has leading or trailing whitespace, which no claim name matches`,
+				`authorization: rules[5]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
+				`authorization: rules[6]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
 			},
 		},
 		{

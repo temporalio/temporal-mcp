@@ -15,9 +15,8 @@ listen_tls:
 # token.
 auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
-  issuers:
-    - issuer: https://id.example.com/ # Example identity provider issuer.
-      audience: https://temporal-mcp.example.com/mcp # Example token aud claim.
+  issuer: https://id.example.com/ # Example identity provider issuer.
+  audience: https://temporal-mcp.example.com/mcp # Example token aud claim.
   required_scopes:
     - https://temporal-mcp.example.com/mcp/access # Example API scope.
 

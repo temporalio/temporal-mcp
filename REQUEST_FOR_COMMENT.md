@@ -59,7 +59,7 @@ A few things to know about this architectural model:
 
 ### 3. Register the server in your identity provider
 
-When the config file has an `auth` section, the server requires sign-in. Every request must include a JWT access token from an issuer listed in that section. Once the MCP server is registered with your identity provider, users should be automatically redirected to sign in to it.
+When the config file has an `auth` section, the server requires sign-in. Every request must include a JWT access token from the issuer that section names. Once the MCP server is registered with your identity provider, users should be automatically redirected to sign in to it.
 
 Register the MCP server as an API in your identity provider. The MCP client sends the canonical MCP URL as the OAuth `resource`, so the identity provider must accept that exact URL and a scope for the same API. The token's `aud` claim must identify the MCP API but may differ from the resource URL.
 

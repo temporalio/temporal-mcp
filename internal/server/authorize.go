@@ -100,9 +100,6 @@ func grants(a *config.Authorization, req mcp.Request) map[string][]string {
 }
 
 func matches(r config.Rule, caller *identity.Caller) bool {
-	if r.Issuer != "" && r.Issuer != caller.Issuer {
-		return false
-	}
 	if r.ClaimName == "scope" || r.ClaimName == "scp" {
 		return slices.Contains(caller.Scopes(r.ClaimName), r.ClaimValue)
 	}

@@ -346,7 +346,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	}
 	noTargets := writeConfig("listen: 0.0.0.0:0\ntargets: []\n")
 	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
-		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: https://idp.example.com, audience: operator}]\n  required_scopes: [temporal.read]\n" +
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
@@ -428,7 +428,7 @@ func TestAuthIssuerDownAtStartup(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	config := fmt.Sprintf("listen: 127.0.0.1:0\n"+
 		"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"+
-		"auth:\n  resource: https://mcp.example.com/mcp\n  issuers: [{issuer: %q, audience: operator}]\n  required_scopes: [temporal.read]\n"+
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: %q\n  audience: operator\n  required_scopes: [temporal.read]\n"+
 		"authorization:\n  profiles: {p: {tools: [get_workflows], targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n", issuer)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)

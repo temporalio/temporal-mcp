@@ -26,7 +26,7 @@ credential is never sent to the MCP client.
 
 ## Requirements
 
-For each trusted identity provider, the server needs:
+The server trusts one identity provider and needs:
 
 - A canonical HTTPS **resource** URI for the MCP endpoint. The same URI must be
   configured as `auth.resource`, registered with the identity provider, and
@@ -89,7 +89,7 @@ The identity provider and MCP configuration answer different questions:
 
 | Question | Where it is answered |
 | --- | --- |
-| Is this token authentic and intended for the MCP API? | `auth.issuers` validates issuer, signature, time, and audience |
+| Is this token authentic and intended for the MCP API? | `auth.issuer` and `auth.audience` validate issuer, signature, time, and audience |
 | Was this token granted the MCP API's scope? | `auth.required_scopes` checks the token's `scope` or `scp` claim |
 | Which users belong to a group? | Identity-provider group membership |
 | What may that group do in MCP? | `authorization.profiles` lists tools and targets |
@@ -106,9 +106,8 @@ For example:
 ```yaml
 auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
-  issuers:
-    - issuer: https://id.example.com/ # Example identity provider.
-      audience: https://temporal-mcp.example.com/mcp # Example API audience.
+  issuer: https://id.example.com/ # Example identity provider.
+  audience: https://temporal-mcp.example.com/mcp # Example API audience.
   required_scopes:
     - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
@@ -181,8 +180,9 @@ authorization rule matches it.
 Decode a test access token locally without sharing it or committing it to the
 repository. Confirm:
 
-- `iss` exactly equals an `auth.issuers[].issuer` value.
+- `iss` exactly equals `auth.issuer`.
 - `aud` contains the configured `audience`.
+- `scope` or `scp` contains each `auth.required_scopes` entry with exact case.
 - `sub` is present and identifies the caller.
 - The token header's `alg` is supported by the server.
 - The token is an access token intended for the MCP API, not an ID token for the
@@ -197,11 +197,9 @@ diagnostic step, not a substitute for verification.
 
 ### Security
 
-- Trust only issuers controlled for the intended user population.
-- Give every issuer a specific audience for this API.
+- Use an issuer that issues tokens only to the intended user population.
+- Use an audience specific to this API.
 - Match centrally assigned claims rather than user-editable values.
-- When several issuers are configured, put `issuer` on authorization rules that
-  should apply to only one of them.
 - Grant each profile only the tools and targets it needs.
 - Do not place access tokens, API keys, or private keys in the YAML or
   documentation.

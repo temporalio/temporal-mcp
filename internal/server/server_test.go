@@ -253,7 +253,7 @@ func TestNewMux(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	authCfg := &config.Config{
-		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuers: []config.Issuer{{Issuer: issuerURL, Audience: "operator"}}, RequiredScopes: []string{"temporal.read"}},
+		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuer: issuerURL, Audience: "operator", RequiredScopes: []string{"temporal.read"}},
 		Authorization: &config.Authorization{
 			Profiles: map[string]config.Profile{"p": {Tools: []string{"whoami"}, Targets: []string{"prod"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
@@ -268,7 +268,7 @@ func TestNewMux(t *testing.T) {
 	withAuth := httptest.NewServer(NewMux(s.Server, authCfg, logger))
 	t.Cleanup(withAuth.Close)
 	noSlashCfg := *authCfg
-	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuers: authCfg.Auth.Issuers}
+	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuer: issuerURL, Audience: "operator"}
 	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
 	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)

@@ -184,8 +184,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // with it, each caller may use only what cfg's authorization gives it.
 // records gets an audit record of each tool call, as a line of JSON; a call
 // whose record cannot be written fails. logger gets the cause of each internal
-// error. When auth has more than one issuer, it also gets a warning for each
-// rule without an issuer.
+// error.
 // Cancelling subscriptions ends subscription listeners without cancelling tool calls.
 // Once ctx is done, the server cancels each request in progress and each
 // request it gets, whatever its MCP protocol version, so tool calls end with
@@ -199,13 +198,6 @@ func NewServer(ctx, subscriptions context.Context, name, version string, cfg *co
 	s, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
 	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
 		return nil, err
-	}
-	if cfg.Auth != nil && len(cfg.Auth.Issuers) > 1 {
-		for i, r := range cfg.Authorization.Rules {
-			if r.Issuer == "" {
-				logger.Warn("rule has no issuer, so it matches tokens from every issuer in auth: issuers; set issuer to limit it", "rule", fmt.Sprintf("authorization: rules[%d]", i), "profile", r.Profile)
-			}
-		}
 	}
 	return s.Server, nil
 }

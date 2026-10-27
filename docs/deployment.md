@@ -110,7 +110,7 @@ and restarting the process.
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-issuers, profiles, or rules require a restart.
+identity provider settings, profiles, or rules require a restart.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The
@@ -126,6 +126,11 @@ require a restart to change.
 - **The request receives 401 Unauthorized:** check token acquisition, token type,
   issuer, audience, and expiration. The response is intentionally generic; the
   server log records the detailed reason.
+- **The request receives 403 Forbidden with `insufficient_scope`:** the token
+  is valid but lacks a required scope; the server log names the missing scope.
+  Check that the MCP client requests the scope and that each
+  `auth.required_scopes` entry appears, with exact case, in the `scope` or `scp`
+  claim of a decoded access token.
 - **The token is accepted but the user sees no tools:** inspect the actual
   access-token claims and compare them exactly, including case, with the
   authorization rules.

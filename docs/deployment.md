@@ -124,8 +124,9 @@ require a restart to change.
   receives a 500 response. Check network access from the server to the identity
   provider and review the server log.
 - **The request receives 401 Unauthorized:** check token acquisition, token type,
-  issuer, audience, and expiration. The response is intentionally generic; the
-  server log records the detailed reason.
+  issuer, audience, and expiration. The response is intentionally generic; for
+  an invalid token, the server log records the detailed reason. A 401 with no
+  log line means the request carried no bearer token.
 - **The request receives 403 Forbidden with `insufficient_scope`:** the token
   is valid but lacks a required scope; the server log names the missing scope.
   Check that the MCP client requests the scope and that each

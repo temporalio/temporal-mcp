@@ -136,8 +136,9 @@ token; depending on the provider, that may be a name or an ID.
 - **Identity-provider metadata or signing keys are unavailable:** the request
   receives 500 Internal Server Error. Check the server log and its network
   access to the identity provider.
-- **No token or an invalid token:** the request receives 401 Unauthorized with
-  a generic error. The detailed reason is in the server log.
+- **No bearer token or an invalid token:** the request receives 401 Unauthorized
+  with a generic error. For an invalid token, the detailed reason is in the
+  server log. A 401 with no log line means the request carried no bearer token.
 - **Valid token, missing a required scope:** the request receives 403 Forbidden
   with `insufficient_scope`. The server log names the missing scope.
 - **Valid token, no matching rule:** authentication succeeds, but the caller

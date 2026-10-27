@@ -72,9 +72,9 @@ These are independent trust relationships:
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
-   `auth.resource` to the same URL, advertise the same scope, and map the chosen
-   existing group claim to a profile. See [Identity and
-   access](identity-and-access.md).
+   `auth.resource` to the same URL, require the same scope with
+   `auth.required_scopes`, and map the chosen existing group claim to a profile.
+   See [Identity and access](identity-and-access.md).
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
    or `omit` when payload contents should not be returned.

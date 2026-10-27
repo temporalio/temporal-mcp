@@ -8,15 +8,18 @@ listen_tls:
   cert_file: /etc/temporal-mcp/server/tls.crt # Example certificate path.
   key_file: /etc/temporal-mcp/server/tls.key # Example key path.
 
-# User-to-MCP authentication. The issuer and audience must match the access
-# token exactly. The audience identifies this API, not the MCP client app.
+# User-to-MCP authentication. The resource must match the canonical MCP URL
+# registered with the identity provider and sent by the client. The issuer and
+# audience must match the access token exactly; the audience may differ from
+# the resource URL. Each advertised scope must exactly match the scope
+# registered with the identity provider and requested by the client.
 auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
   issuers:
-    - issuer: https://id.example.com/ # Example identity provider.
-      audience: api://temporal-mcp # Example API audience.
+    - issuer: https://id.example.com/ # Example identity provider issuer.
+      audience: api://temporal-mcp # Example access token aud claim.
   scopes_supported:
-    - temporal-mcp.access # Example scope configured in the identity provider.
+    - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
 # User-to-tool-and-target authorization. A token claim assigns a profile; this
 # file defines what that profile can use inside this MCP server.

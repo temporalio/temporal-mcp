@@ -11,7 +11,7 @@
 
 ## Get started
 
-These steps set up `temporal-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces. When you're ready, go to [Run a shared server](#run-a-shared-server) to set up this MCP server for a broader audience.
+These steps set up `temporal-mcp` for one developer, whose agent launches it and talks to it over stdio. You try it on a local Temporal dev server first, then add your own namespaces. When you're ready, go to [Run a centrally hosted server](#run-a-centrally-hosted-server) to set up this MCP server for a broader audience.
 
 ### Install
 
@@ -66,9 +66,16 @@ For each environment variable your config reads with `env:`, add `-e KEY=value` 
 
 The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
 
-## Run a shared server
+## Run a centrally hosted server
 
-For a team, run `temporal-mcp` as one HTTP server whose users sign in with an OpenID Connect (OIDC) identity provider. Start from [examples/http-auth-config.yaml](examples/http-auth-config.yaml). The [`auth`](docs/config.md#auth) and [`authorization`](docs/config.md#authorization) sections of docs/config.md cover how users sign in and which tools and targets each one gets.
+For a team or an entire organization, run `temporal-mcp` as one HTTPS server
+whose users sign in with an OpenID Connect (OIDC) identity provider. Start with
+the [deployment guide](docs/deployment.md). The
+[identity and access guide](docs/identity-and-access.md) explains the identity
+provider and authorization setup, the
+[central OIDC and mTLS example](examples/http-oidc-mtls-config.yaml) shows a
+complete config, and the [config reference](docs/config.md) documents every
+field.
 
 Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` address:
 

@@ -72,9 +72,9 @@ These are independent trust relationships:
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
-   `auth.resource` to the same URL, advertise the same scope, and map the chosen
-   existing group claim to a profile. See [Identity and
-   access](identity-and-access.md).
+   `auth.resource` to the same URL, require the same scope with
+   `auth.required_scopes`, and map the chosen existing group claim to a profile.
+   See [Identity and access](identity-and-access.md).
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
    or `omit` when payload contents should not be returned.
@@ -110,7 +110,7 @@ and restarting the process.
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-issuers, profiles, or rules require a restart.
+identity provider settings, profiles, or rules require a restart.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The
@@ -126,6 +126,11 @@ require a restart to change.
 - **The request receives 401 Unauthorized:** check token acquisition, token type,
   issuer, audience, and expiration. The response is intentionally generic; the
   server log records the detailed reason.
+- **The request receives 403 Forbidden with `insufficient_scope`:** the token
+  is valid but lacks a required scope; the server log names the missing scope.
+  Check that the MCP client requests the scope and that each
+  `auth.required_scopes` entry appears, with exact case, in the `scope` or `scp`
+  claim of a decoded access token.
 - **The token is accepted but the user sees no tools:** inspect the actual
   access-token claims and compare them exactly, including case, with the
   authorization rules.

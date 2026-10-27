@@ -26,7 +26,7 @@ credential is never sent to the MCP client.
 
 ## Requirements
 
-For each trusted identity provider, the server needs:
+The server trusts one identity provider and needs:
 
 - A canonical HTTPS **resource** URI for the MCP endpoint. The same URI must be
   configured as `auth.resource`, registered with the identity provider, and
@@ -36,8 +36,9 @@ For each trusted identity provider, the server needs:
 - An **audience** contained in the access token's `aud` claim. It must identify
   the MCP API, not the client application in which the user signs in. The
   audience may differ from the resource URI.
-- An OAuth **scope** for the MCP API. The exact scope advertised by Temporal MCP
-  must be registered with the identity provider and requested by the client.
+- An OAuth **scope** for the MCP API. It must be registered with the identity
+  provider, requested by the client, and present in the `scope` or `scp` claim
+  of every access token.
 - OIDC discovery and signing-key endpoints reachable from the server.
 - A signed JWT **access token** with a `sub` claim, using one of the signature
   algorithms supported by the server. An ID token describes a sign-in to the
@@ -73,10 +74,10 @@ to request it, grant any required consent, and include the chosen existing group
 in the access token.
 
 **In the Temporal MCP config:** set `auth.resource` to that same canonical URL,
-enter the provider's issuer and the MCP API audience, and advertise the exact
-scope registered with the identity provider. Then map the group claim to a
-profile. The scope lets the client obtain a token for Temporal MCP; the profile
-controls its tools and Temporal targets.
+enter the provider's issuer and the MCP API audience, and set
+`auth.required_scopes` to that scope as it appears in a decoded access token.
+Then map the group claim to a profile. The scope lets the client obtain a token
+that Temporal MCP accepts; the profile controls its tools and Temporal targets.
 
 The Temporal Cloud Web UI is a separate relying party. Its SSO configuration does not
 provide an access token for Temporal MCP. The identity provider must issue a
@@ -88,7 +89,8 @@ The identity provider and MCP configuration answer different questions:
 
 | Question | Where it is answered |
 | --- | --- |
-| Is this token authentic and intended for the MCP API? | `auth.issuers` validates issuer, signature, time, and audience |
+| Is this token authentic and intended for the MCP API? | `auth.issuer` and `auth.audience` validate issuer, signature, time, and audience |
+| Was this token granted the MCP API's scope? | `auth.required_scopes` checks the token's `scope` or `scp` claim |
 | Which users belong to a group? | Identity-provider group membership |
 | What may that group do in MCP? | `authorization.profiles` lists tools and targets |
 | Which token claim grants which MCP profile? | `authorization.rules` maps a claim value to a profile |
@@ -104,10 +106,9 @@ For example:
 ```yaml
 auth:
   resource: https://temporal-mcp.example.com/mcp # Example MCP URL.
-  issuers:
-    - issuer: https://id.example.com/ # Example identity provider.
-      audience: https://temporal-mcp.example.com/mcp # Example API audience.
-  scopes_supported:
+  issuer: https://id.example.com/ # Example identity provider.
+  audience: https://temporal-mcp.example.com/mcp # Example API audience.
+  required_scopes:
     - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
 authorization:
@@ -137,6 +138,8 @@ token; depending on the provider, that may be a name or an ID.
   access to the identity provider.
 - **No token or an invalid token:** the request receives 401 Unauthorized with
   a generic error. The detailed reason is in the server log.
+- **Valid token, missing a required scope:** the request receives 403 Forbidden
+  with `insufficient_scope`. The server log names the missing scope.
 - **Valid token, no matching rule:** authentication succeeds, but the caller
   sees no tools or targets.
 - **Matching group, missing tool:** the caller does not see or cannot invoke that
@@ -177,8 +180,9 @@ authorization rule matches it.
 Decode a test access token locally without sharing it or committing it to the
 repository. Confirm:
 
-- `iss` exactly equals an `auth.issuers[].issuer` value.
+- `iss` exactly equals `auth.issuer`.
 - `aud` contains the configured `audience`.
+- `scope` or `scp` contains each `auth.required_scopes` entry with exact case.
 - `sub` is present and identifies the caller.
 - The token header's `alg` is supported by the server.
 - The token is an access token intended for the MCP API, not an ID token for the
@@ -193,11 +197,9 @@ diagnostic step, not a substitute for verification.
 
 ### Security
 
-- Trust only issuers controlled for the intended user population.
-- Give every issuer a specific audience for this API.
+- Use an issuer that issues tokens only to the intended user population.
+- Use an audience specific to this API.
 - Match centrally assigned claims rather than user-editable values.
-- When several issuers are configured, put `issuer` on authorization rules that
-  should apply to only one of them.
 - Grant each profile only the tools and targets it needs.
 - Do not place access tokens, API keys, or private keys in the YAML or
   documentation.

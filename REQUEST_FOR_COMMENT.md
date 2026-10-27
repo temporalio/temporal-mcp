@@ -1,4 +1,4 @@
-# Request for Comment: Temporal Ops MCP Server
+# Request for Comment: Temporal MCP Server
 
 > [!WARNING]
 > This is a proposal. The final product may change based on feedback. Please send comments to your Temporal account team.
@@ -61,11 +61,9 @@ A few things to know about this architectural model:
 
 When the config file has an `auth` section, the server requires sign-in. Every request must include a JWT access token from an issuer listed in that section. Once the MCP server is registered with your identity provider, users should be automatically redirected to sign in to it.
 
-In your identity provider:
+Register the MCP server as an API in your identity provider. The MCP client sends the canonical MCP URL as the OAuth `resource`, so the identity provider must accept that exact URL and a scope for the same API. The token's `aud` claim must identify the MCP API but may differ from the resource URL.
 
-1. Register the MCP server as an API in your identity provider. Give it an audience, such as `api://temporal-ops-mcp`. Access tokens must include it in the `aud` claim.
-2. Allow your MCP client (Codex, Claude Code) or MCP gateway to request tokens with that audience. If the client or gateway isn't set up as an app in your identity provider yet, add it first.
-3. Assign groups or app roles to the people who should have access, and include them in the access token.
+For the identity-provider and Temporal MCP settings that must match, see [Identity and access](docs/identity-and-access.md).
 
 > [!NOTE]
 > **If you use an MCP gateway**

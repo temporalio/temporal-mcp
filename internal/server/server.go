@@ -189,14 +189,17 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // Once ctx is done, the server cancels each request in progress and each
 // request it gets, whatever its MCP protocol version, so tool calls end with
 // outcome cancelled.
-// It fails if cfg has an auth section but no authorization, or if an
-// authorization profile names a tool the server does not have.
+// It fails if cfg has an auth section but no authorization, if an
+// authorization profile names a tool the server does not have, or if a
+// profile's ToolsDeny leaves it no tools. It sets the Tools of each
+// authorization profile without them to the server's read-only tools other
+// than those in the profile's ToolsDeny.
 func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")
 	}
 	s, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
-	if err := checkProfileTools(cfg.Authorization, tools); err != nil {
+	if err := resolveProfileTools(cfg.Authorization, tools, s.access); err != nil {
 		return nil, err
 	}
 	return s.Server, nil

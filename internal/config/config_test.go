@@ -621,6 +621,15 @@ func TestParseInvalid(t *testing.T) {
   profiles:
     empty: {}
     bad-targets: {tools: [get_workflows], targets: [production, staging]}
+    both: {tools: [get_workflows], tools_deny: [count_workflows], targets: [prod]}
+    blank-tools:
+      tools:
+      targets: [prod]
+    empty-tools: {tools: [], targets: [prod]}
+    blank-deny:
+      tools_deny:
+      targets: [prod]
+    empty-deny: {tools_deny: [], targets: [prod]}
   rules:
     - {claim_name: groups, profile: empty}
     - {claim_name: " ", claim_value: a, profile: empty}
@@ -633,8 +642,12 @@ func TestParseInvalid(t *testing.T) {
 			want: []string{
 				`authorization: profiles: "bad-targets": targets[0]: unknown target "production"; profiles name targets by name, not alias`,
 				`authorization: profiles: "bad-targets": targets[1]: unknown target "staging"`,
-				`authorization: profiles: "empty": tools: at least one tool is required`,
 				`authorization: profiles: "empty": targets: at least one target is required`,
+				`authorization: profiles: "both": at most one of tools or tools_deny is allowed`,
+				`authorization: profiles: "blank-tools": tools: at least one tool is required`,
+				`authorization: profiles: "empty-tools": tools: at least one tool is required`,
+				`authorization: profiles: "blank-deny": tools_deny: at least one tool is required`,
+				`authorization: profiles: "empty-deny": tools_deny: at least one tool is required`,
 				"authorization: rules[0]: claim_value is required",
 				"authorization: rules[1]: claim_name is required",
 				`authorization: rules[2]: profile "missing" is not one of authorization: profiles`,

@@ -85,10 +85,12 @@ type Authorization struct {
 	Rules    []Rule             `yaml:"rules"`
 }
 
-// Profile is permission to use each of Tools on each of Targets, which are target names.
+// Profile is permission to use its tools on each of Targets, which are target names.
+// Its tools are Tools, or, if Tools is nil, every read-only tool except those in ToolsDeny.
 type Profile struct {
-	Tools   []string `yaml:"tools"`
-	Targets []string `yaml:"targets"`
+	Tools     []string `yaml:"tools"`
+	ToolsDeny []string `yaml:"tools_deny"`
+	Targets   []string `yaml:"targets"`
 }
 
 // Rule gives Profile to callers whose access token has the top-level claim
@@ -247,7 +249,8 @@ func parseStdio(data []byte) (*Config, error) {
 }
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
-// no value. A missing key's node has Kind 0.
+// no value, except a profile's tools and tools_deny, which decode reads from the
+// authorization node. A missing key's node has Kind 0.
 type keyNodes struct {
 	Listen        yaml.Node `yaml:"listen"`
 	ListenTLS     yaml.Node `yaml:"listen_tls"`
@@ -277,21 +280,37 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("config must contain exactly one YAML document")
 	}
-	// A key with no value decodes to nil; validate it as an empty section rather than ignore it.
+	// A key with no value decodes to nil; validate it as empty rather than ignore it.
 	var keys keyNodes
-	if yaml.Unmarshal(data, &keys) == nil {
-		emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
-		emptyIfPresent(&cfg.Auth, keys.Auth)
-		emptyIfPresent(&cfg.Authorization, keys.Authorization)
-		for i, t := range keys.Targets {
-			emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
-			emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
-		}
-		for name, c := range keys.Codecs {
-			codec := cfg.Codecs[name]
-			emptyIfPresent(&codec.AuthorizationHeader, c.AuthorizationHeader)
-			cfg.Codecs[name] = codec
-		}
+	if err := yaml.Unmarshal(data, &keys); err != nil {
+		return nil, err
+	}
+	emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
+	emptyIfPresent(&cfg.Auth, keys.Auth)
+	emptyIfPresent(&cfg.Authorization, keys.Authorization)
+	var authorization struct {
+		Profiles map[string]struct {
+			Tools     yaml.Node `yaml:"tools"`
+			ToolsDeny yaml.Node `yaml:"tools_deny"`
+		} `yaml:"profiles"`
+	}
+	if err := keys.Authorization.Decode(&authorization); err != nil {
+		return nil, err
+	}
+	for name, k := range authorization.Profiles {
+		p := cfg.Authorization.Profiles[name]
+		emptyListIfPresent(&p.Tools, k.Tools)
+		emptyListIfPresent(&p.ToolsDeny, k.ToolsDeny)
+		cfg.Authorization.Profiles[name] = p
+	}
+	for i, t := range keys.Targets {
+		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
+		emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
+	}
+	for name, c := range keys.Codecs {
+		codec := cfg.Codecs[name]
+		emptyIfPresent(&codec.AuthorizationHeader, c.AuthorizationHeader)
+		cfg.Codecs[name] = codec
 	}
 	var shutdownErr error
 	if cfg.ShutdownTimeout < 0 {
@@ -326,6 +345,12 @@ func nonStringRuleValues(data []byte) error {
 func emptyIfPresent[T any](section **T, key yaml.Node) {
 	if *section == nil && key.Kind != 0 {
 		*section = new(T)
+	}
+}
+
+func emptyListIfPresent(list *[]string, key yaml.Node) {
+	if *list == nil && key.Kind != 0 {
+		*list = []string{}
 	}
 }
 
@@ -456,8 +481,16 @@ func (a *Authorization) validate(c *Config) []error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
 		p, label := a.Profiles[name], fmt.Sprintf("authorization: profiles: %q", name)
-		if len(p.Tools) == 0 {
-			errs = append(errs, fmt.Errorf("%s: tools: at least one tool is required", label))
+		if p.Tools != nil && p.ToolsDeny != nil {
+			errs = append(errs, fmt.Errorf("%s: at most one of tools or tools_deny is allowed", label))
+		}
+		for _, f := range []struct {
+			name  string
+			tools []string
+		}{{"tools", p.Tools}, {"tools_deny", p.ToolsDeny}} {
+			if f.tools != nil && len(f.tools) == 0 {
+				errs = append(errs, fmt.Errorf("%s: %s: at least one tool is required", label, f.name))
+			}
 		}
 		if len(p.Targets) == 0 {
 			errs = append(errs, fmt.Errorf("%s: targets: at least one target is required", label))

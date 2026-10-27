@@ -112,16 +112,29 @@ func matches(r config.Rule, caller *identity.Caller) bool {
 	return false
 }
 
-func checkProfileTools(a *config.Authorization, tools []string) error {
+func resolveProfileTools(a *config.Authorization, tools []string, access map[string]string) error {
 	if a == nil {
 		return nil
 	}
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
-		for k, tool := range a.Profiles[name].Tools {
-			if !slices.Contains(tools, tool) {
-				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools[%d]: unknown tool %q; the tools are %s", name, k, tool, strings.Join(tools, ", ")))
+		p := a.Profiles[name]
+		for _, f := range []struct {
+			key   string
+			tools []string
+		}{{"tools", p.Tools}, {"tools_deny", p.ToolsDeny}} {
+			for k, tool := range f.tools {
+				if !slices.Contains(tools, tool) {
+					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
+				}
 			}
+		}
+		if p.Tools == nil {
+			p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return access[t] != "read" || slices.Contains(p.ToolsDeny, t) })
+			if len(p.Tools) == 0 {
+				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools_deny: leaves the profile no tools", name))
+			}
+			a.Profiles[name] = p
 		}
 	}
 	return errors.Join(errs...)

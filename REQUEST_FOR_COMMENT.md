@@ -61,11 +61,9 @@ A few things to know about this architectural model:
 
 When the config file has an `auth` section, the server requires sign-in. Every request must include a JWT access token from an issuer listed in that section. Once the MCP server is registered with your identity provider, users should be automatically redirected to sign in to it.
 
-Register the MCP server as an API in your identity provider. The MCP client requests a token using the canonical MCP URL, such as `https://temporal-mcp.example.com/mcp`, as the OAuth `resource` and a delegated scope for the same API, such as `https://temporal-mcp.example.com/mcp/access`. The identity provider must accept that exact resource and scope. The token's `aud` claim must identify the MCP API but may differ from the resource URL, and the token must include the existing group or role used to grant access.
+Register the MCP server as an API in your identity provider. The MCP client sends the canonical MCP URL as the OAuth `resource`, so the identity provider must accept that exact URL and a scope for the same API. The token's `aud` claim must identify the MCP API but may differ from the resource URL.
 
-In the Temporal MCP config, set `auth.resource` to the same canonical URL, add the delegated scope to `auth.scopes_supported`, set the issuer to the token's `iss`, and set the audience to the token's `aud` value or one entry if `aud` is a list. Then map the group or role claim to the appropriate MCP profile. See [Identity and access](docs/identity-and-access.md) for the complete setup.
-
-If the identity provider rejects the token request, first verify that the requested resource and scope exactly match values registered for the same API.
+For the identity-provider and Temporal MCP settings that must match, see [Identity and access](docs/identity-and-access.md).
 
 > [!NOTE]
 > **If you use an MCP gateway**

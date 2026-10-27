@@ -3,12 +3,12 @@
 Temporal MCP is a self-hosted gateway between MCP clients and the
 Temporal namespaces named in its configuration. This guide explains the
 infrastructure and security decisions required to run it. For individual YAML
-fields, see the config reference.
+fields, see the [config reference](config.md).
 
 > [!CAUTION]
 >
-> This project is pre-release and evolving quickly. Review the server, identity,
-> and target permissions before connecting it to production namespaces.
+> This project is under active development and evolving quickly. It is not ready
+> for production use.
 
 ## Deployment modes
 
@@ -56,26 +56,28 @@ These are independent trust relationships:
 
 ## Central deployment
 
-1. **Install Temporal MCP.** Download the release for the server host, or build
-   it from source. Run it on an internal host that can reach the Temporal
-   namespaces and the identity provider. MCP clients, typically running on
-   employee laptops, must be able to reach its HTTPS endpoint.
+1. **[Install Temporal MCP](../README.md#install).** Download the release for the
+   server host, or build it from source. Run it on an internal host that can
+   reach the Temporal namespaces and the identity provider. MCP clients,
+   typically running on employee laptops, must be able to reach its HTTPS
+   endpoint.
 2. **Expose the MCP endpoint over HTTPS.** Choose an internal hostname and
    configure TLS in Temporal MCP or an approved colocated proxy. Do not expose
    plain HTTP on the network.
 3. **Add the Temporal targets.** For each namespace, configure its address,
    namespace name, and API key or mTLS certificate. Keep file-backed credentials
-   in protected paths on the host and use least-privileged credentials.
+   in protected paths on the host and use least-privileged credentials. For
+   Temporal Cloud, prefer an API key from a read-only service account when API
+   keys are available; use mTLS when the namespace does not accept API keys.
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
    `auth.resource` to the same URL, advertise the same scope, and map the chosen
    existing group claim to a profile. See [Identity and
    access](identity-and-access.md).
-5. **Configure payload access.** Use `passthrough` when workflow payloads are
-   readable as stored. If the application encrypts payloads with a codec,
-   configure that codec and use `decode` so the MCP client can read them. Use
-   `omit`, the default, only when payload contents should not be returned.
+5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
+   stores them, `decode` with a codec server to return codec-encrypted payloads,
+   or `omit` when payload contents should not be returned.
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
@@ -118,9 +120,12 @@ require a restart to change.
 
 ## Troubleshooting
 
-- **The user cannot sign in or receives 401 Unauthorized:** check token
-  acquisition, token type, issuer, audience, expiration, and signing-key
-  discovery.
+- **Identity-provider metadata or signing keys are unavailable:** the request
+  receives a 500 response. Check network access from the server to the identity
+  provider and review the server log.
+- **The request receives 401 Unauthorized:** check token acquisition, token type,
+  issuer, audience, and expiration. The response is intentionally generic; the
+  server log records the detailed reason.
 - **The token is accepted but the user sees no tools:** inspect the actual
   access-token claims and compare them exactly, including case, with the
   authorization rules.

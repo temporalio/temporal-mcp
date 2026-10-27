@@ -28,10 +28,16 @@ credential is never sent to the MCP client.
 
 For each trusted identity provider, the server needs:
 
+- A canonical HTTPS **resource** URI for the MCP endpoint. The same URI must be
+  configured as `auth.resource`, registered with the identity provider, and
+  sent by the MCP client in its OAuth `resource` parameter.
 - An **issuer** equal to the access token's `iss` claim. The value must match
   exactly, including a trailing slash when the issuer uses one.
 - An **audience** contained in the access token's `aud` claim. It must identify
-  the MCP API, not the client application in which the user signs in.
+  the MCP API, not the client application in which the user signs in. The
+  audience may differ from the resource URI.
+- An OAuth **scope** for the MCP API. The exact scope advertised by Temporal MCP
+  must be registered with the identity provider and requested by the client.
 - OIDC discovery and signing-key endpoints reachable from the server.
 - A signed JWT **access token**. An ID token describes a sign-in to the client
   and must not be used as the API bearer token.
@@ -48,25 +54,27 @@ Identity providers commonly distinguish between an API resource and a client
 application:
 
 1. The **API resource** represents Temporal MCP. It defines the
-   audience used in access tokens and, where the provider requires them,
-   scopes.
+   resource identifier requested by the client, the audience used in access
+   tokens, and, where the provider requires them, scopes.
 2. The **client application** represents the MCP client that signs the user in.
    It has the redirect URI and OAuth flow required by that client and requests
-   a token for the MCP API resource.
+   a token for the MCP API resource using its resource identifier and scope.
 
 The exact objects and names vary by provider and MCP client. Some organizations
 may already have a suitable client registration, while others must create one.
 The durable requirement is that the MCP client can obtain an access token whose
 issuer, audience, and authorization claims satisfy the MCP server config.
 
-**In the identity provider:** expose a delegated scope for the MCP API, allow
-the MCP client to request it, grant any required consent, and include the chosen
-existing group in the access token.
+**In the identity provider:** register the canonical MCP URL as the API's
+resource identifier, expose a delegated scope for that API, allow the MCP client
+to request it, grant any required consent, and include the chosen existing group
+in the access token.
 
-**In the Temporal MCP config:** enter the provider's issuer, the MCP API
-audience, and the same scope. Then map the group claim to a profile. The scope
-lets the client obtain a token for Temporal MCP; the profile controls its tools
-and Temporal targets.
+**In the Temporal MCP config:** set `auth.resource` to that same canonical URL,
+enter the provider's issuer and the MCP API audience, and advertise the exact
+scope registered with the identity provider. Then map the group claim to a
+profile. The scope lets the client obtain a token for Temporal MCP; the profile
+controls its tools and Temporal targets.
 
 The Temporal Cloud Web UI is a separate relying party. Its SSO configuration does not
 provide an access token for Temporal MCP. The identity provider must issue a
@@ -98,7 +106,7 @@ auth:
     - issuer: https://id.example.com/ # Example identity provider.
       audience: api://temporal-mcp # Example API audience.
   scopes_supported:
-    - temporal-mcp.access # Example scope configured in the identity provider.
+    - https://temporal-mcp.example.com/mcp/access # Example API scope.
 
 authorization:
   profiles:
@@ -119,6 +127,9 @@ token; depending on the provider, that may be a name or an ID.
 
 ## Interpreting Failures
 
+- **The identity provider rejects the token request:** the requested resource
+  or scope may not exactly match the values registered for the same API
+  resource.
 - **No token or an invalid token:** the request receives 401 Unauthorized.
 - **Valid token, no matching rule:** authentication succeeds, but the caller
   sees no tools or targets.

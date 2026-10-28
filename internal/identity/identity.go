@@ -534,6 +534,7 @@ func newVerifier(a *config.Auth, logger *slog.Logger) auth.TokenVerifier {
 	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		jws, err := parse(token, iss.url)
 		if err != nil {
+			// Logs at WARN like the rejections below, which any forged token with the configured iss already reaches.
 			logger.WarnContext(ctx, "rejected access token", "reason", err)
 			return nil, auth.ErrInvalidToken
 		}

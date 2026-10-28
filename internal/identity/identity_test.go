@@ -214,7 +214,7 @@ func TestRequireToken(t *testing.T) {
 		{"no sub", idp.sign(t, with(map[string]any{"sub": nil})), idp.URL, "token has no sub claim"},
 		{"another audience", idp.sign(t, with(map[string]any{"aud": "other-audience"})), idp.URL, `expected audience "operator"`},
 		{"alg the key does not allow", oidctest.SignIDToken(idp.key, idp.kid, "PS256", marshal(t, with(nil))), idp.URL, "no signing key matches the token"},
-		{"unknown issuer", idp.sign(t, with(map[string]any{"iss": "https://unknown.example/" + strings.Repeat("a", 100000)})), "", "unknown issuer"},
+		{"unknown issuer", idp.sign(t, with(map[string]any{"iss": "https://unknown.example/" + strings.Repeat("a", 100000)})), "", `unknown issuer "https://unknown.example/a`},
 		{"alg HS256", oidctest.SignIDToken([]byte("0123456789abcdef0123456789abcdef"), "k1", "HS256", marshal(t, with(nil))), "", "unsupported signature algorithm"},
 		{"long alg", unsigned(`{"alg":"`+strings.Repeat("A", 100000)+`","kid":"k1"}`, with(nil)), "", "unsupported signature algorithm"},
 		{"duplicate sub", signRaw(`{"iss":%q,"aud":"operator","exp":%d,"sub":"alice","sub":"mallory"}`), "", "duplicate claim name"},
@@ -230,7 +230,7 @@ func TestRequireToken(t *testing.T) {
 			if got, want := w.Header().Get("WWW-Authenticate"), `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="temporal.read", error="invalid_token"`; got != want {
 				t.Errorf("WWW-Authenticate = %q, want %q", got, want)
 			}
-			logged := `level=DEBUG msg="rejected access token" reason=`
+			logged := `level=WARN msg="rejected access token" reason=`
 			if tt.issuer != "" {
 				logged = `level=WARN msg="rejected access token" issuer=` + tt.issuer + " reason="
 			}
@@ -299,6 +299,19 @@ func TestRequireTokenDiscoversIssuerOnUse(t *testing.T) {
 		t.Errorf("issuer up: status = %d, want 200; body %q", w.Code, w.Body)
 	}
 	if n := up.count(discoveryPath); n != 1 {
+		t.Errorf("discovery requests = %d, want 1", n)
+	}
+}
+
+func TestRequireTokenIssuerWithTrailingSlash(t *testing.T) {
+	idp := newIssuer(t)
+	idp.oidc.SetIssuer(idp.URL + "/")
+	claims := idp.claims()
+	claims["iss"] = idp.URL + "/"
+	if w, _, logs := serve(authConfig(idp.URL+"/"), idp.sign(t, claims)); w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body %q, log %q", w.Code, w.Body, logs)
+	}
+	if n := idp.count(discoveryPath); n != 1 {
 		t.Errorf("discovery requests = %d, want 1", n)
 	}
 }

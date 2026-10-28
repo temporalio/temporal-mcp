@@ -68,7 +68,7 @@ The server reads its config only when it starts, so restart your agent after you
 
 ## Run a centrally hosted server
 
-For a team or an entire organization, run `temporal-mcp` as one HTTPS server whose users sign in with an OpenID Connect (OIDC) identity provider. Start with the [deployment guide](docs/deployment.md). The [identity and access guide](docs/identity-and-access.md) explains the identity provider and authorization setup, the [central OIDC and mTLS example](examples/http-oidc-mtls-config.yaml) shows a complete config, and the [config reference](docs/config.md) documents every field.
+For a team or an entire organization, run `temporal-mcp` as one HTTPS server whose users sign in with an OpenID Connect (OIDC) identity provider. Start with the [deployment guide](docs/deployment.md). The [identity and access guide](docs/identity-and-access.md) explains the identity provider and authorization setup, the [API-key example](examples/http-auth-config.yaml) and [mTLS example](examples/http-oidc-mtls-config.yaml) show complete configs, and the [config reference](docs/config.md) documents every field.
 
 Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` address:
 

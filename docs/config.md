@@ -143,7 +143,7 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. The [centrally hosted OIDC and mTLS example](../examples/http-oidc-mtls-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.

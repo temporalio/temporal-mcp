@@ -88,7 +88,12 @@ With Go 1.27.2 or later:
 go build -o bin/ .
 ```
 
-This writes `bin/temporal-mcp`.
+This writes `bin/temporal-mcp`. To build a container image instead, whose entrypoint is `temporal-mcp`, and run it with your config:
+
+```sh
+docker build -t temporal-mcp .
+docker run -v /path/to/config.yaml:/config.yaml:ro temporal-mcp --config /config.yaml
+```
 
 ## Shutdown
 

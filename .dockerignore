@@ -1,0 +1,6 @@
+# Only the Go sources; the repo root can hold other worktrees and local configs in bin/.
+*
+!go.mod
+!go.sum
+!*.go
+!internal

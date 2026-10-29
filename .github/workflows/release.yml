@@ -32,3 +32,31 @@ jobs:
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ./dist/checksums.txt
+
+  # Publishes the image to Temporal's private ECR for internal deployments,
+  # only after the release job has checked that the tag is on main.
+  image:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ secrets.AWS_ECR_REGISTRY }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: >-
+          docker buildx build --platform linux/amd64,linux/arm64
+          --build-arg VERSION="${GITHUB_REF_NAME#v}"
+          --tag "$REGISTRY/temporal-mcp:${GITHUB_REF_NAME#v}"
+          --push .
+        env:
+          REGISTRY: ${{ secrets.AWS_ECR_REGISTRY }}

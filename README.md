@@ -20,6 +20,8 @@ curl -sSfL https://temporal.download/mcp.sh | sh
 temporal-mcp --version # checks the install
 ```
 
+Each release is also published as the container image `temporalio/temporal-mcp:<version>` on [Docker Hub](https://hub.docker.com/r/temporalio/temporal-mcp).
+
 ### Start a dev server
 
 [Install the Temporal CLI](https://docs.temporal.io/cli/setup-cli) and start a dev server, which serves a `default` namespace at `localhost:7233`:

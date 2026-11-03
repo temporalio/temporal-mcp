@@ -61,9 +61,10 @@ func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 		rt := &target{name: t.Name, handling: t.PayloadHandling}
 		if t.PayloadHandling == config.PayloadDecode {
 			rt.codec = &codec{
-				endpoint:      strings.ReplaceAll(cfg.Codecs[t.Codec].Endpoint, "{namespace}", t.Namespace),
-				namespace:     t.Namespace,
-				authorization: authorization[t.Codec],
+				endpoint:           strings.ReplaceAll(cfg.Codecs[t.Codec].Endpoint, "{namespace}", t.Namespace),
+				namespace:          t.Namespace,
+				authorization:      authorization[t.Codec],
+				passthroughHeaders: cfg.Codecs[t.Codec].PassthroughHeaders,
 			}
 		}
 		r.targets[t.Name] = rt

@@ -128,6 +128,7 @@ func TestParseStdio(t *testing.T) {
 		{"empty auth", "auth:\n" + validTargets, []string{"auth: not allowed with --stdio"}},
 		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
 		{"codec authorization header with no value", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n", []string{`codecs: "c": authorization_header: exactly one of env or file is required`}},
+		{"codec passthrough headers", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    passthrough_headers: [{name: X-Tenant-Id}]\n", []string{`codecs: "c": passthrough_headers: not allowed with --stdio`}},
 		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
 			"listen, listen_tls, auth, authorization: not allowed with --stdio",
 			"targets[0]: address is required",
@@ -544,6 +545,75 @@ func TestParseInvalid(t *testing.T) {
 			name: "codec authorization header with its lines commented out",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n      # env: CODEC_AUTH\n      # file: /keys/codec\n",
 			want: []string{`codecs: "c": authorization_header: exactly one of env or file is required`},
+		},
+		{
+			name: "codec passthrough headers with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    passthrough_headers:\n",
+			want: []string{`codecs: "c": passthrough_headers: at least one header is required`},
+		},
+		{
+			name: "empty codec passthrough headers",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    passthrough_headers: []\n",
+			want: []string{`codecs: "c": passthrough_headers: at least one header is required`},
+		},
+		{
+			name: "bad codec passthrough header names",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `codecs:
+  c:
+    endpoint: https://codec.example.com
+    passthrough_headers:
+      - {name: authorization}
+      - {name: " "}
+      - {send_as: X-A}
+      - {name: "X Tenant"}
+      - {name: X-B, send_as: "X:B"}
+      - {name: X-C, send_as: " "}
+      - name: X-D
+        send_as:
+      - {name: content-type}
+      - {name: X-E, send_as: x-namespace}
+      - {name: Host}
+      - {name: Upgrade, send_as: X-Upgrade}
+      - {name: X-F, send_as: transfer-encoding}
+`,
+			want: []string{
+				`codecs: "c": passthrough_headers[0]: name "authorization" is not allowed, because the server must not pass on the access token that MCP clients send in their Authorization header`,
+				`codecs: "c": passthrough_headers[1]: name is required`,
+				`codecs: "c": passthrough_headers[2]: name is required`,
+				`codecs: "c": passthrough_headers[3]: name "X Tenant" is not a valid HTTP header name`,
+				`codecs: "c": passthrough_headers[4]: send_as "X:B" is not a valid HTTP header name`,
+				`codecs: "c": passthrough_headers[5]: send_as is empty; leave it out to send the header under its name`,
+				`codecs: "c": passthrough_headers[6]: send_as is empty`,
+				`codecs: "c": passthrough_headers[7]: name "content-type" is not allowed, because the server or HTTP sets that header itself`,
+				`codecs: "c": passthrough_headers[8]: send_as "x-namespace" is not allowed, because the server or HTTP sets that header itself`,
+				`codecs: "c": passthrough_headers[9]: name "Host" is not allowed, because the server or HTTP sets that header itself`,
+				`codecs: "c": passthrough_headers[10]: name "Upgrade" is not allowed, because the server or HTTP sets that header itself`,
+				`codecs: "c": passthrough_headers[11]: send_as "transfer-encoding" is not allowed, because the server or HTTP sets that header itself`,
+			},
+		},
+		{
+			name: "codec passthrough header sent as Authorization with authorization_header",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header: {env: CODEC_AUTH}\n    passthrough_headers: [{name: X-Codec-Authorization, send_as: Authorization}]\n",
+			want: []string{`codecs: "c": passthrough_headers[0]: send_as "Authorization" is not allowed with authorization_header, which sets that header`},
+		},
+		{
+			name: "conflicting codec passthrough headers",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + `codecs:
+  c:
+    endpoint: https://codec.example.com
+    passthrough_headers:
+      - {name: X-Tenant}
+      - {name: x-tenant, send_as: X-Other}
+      - {name: X-Org, send_as: X-TENANT}
+      - {name: X-Team, send_as: x-other}
+      - {name: x-org, send_as: ""}
+`,
+			want: []string{
+				`codecs: "c": passthrough_headers[1]: name "x-tenant" conflicts with name "X-Tenant" of passthrough_headers[0]; header names are case-insensitive`,
+				`codecs: "c": passthrough_headers[2]: send_as "X-TENANT" conflicts with name "X-Tenant" of passthrough_headers[0]; header names are case-insensitive`,
+				`codecs: "c": passthrough_headers[3]: send_as "x-other" conflicts with send_as "X-Other" of passthrough_headers[1]; header names are case-insensitive`,
+				`codecs: "c": passthrough_headers[4]: name "x-org" conflicts with name "X-Org" of passthrough_headers[2]; header names are case-insensitive`,
+			},
 		},
 		{
 			name: "auth with no value",

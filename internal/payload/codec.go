@@ -1,7 +1,8 @@
 // The codec server client, which speaks the protocol of the Temporal CLI's
 // --codec-endpoint: a POST to the endpoint's /decode path, with the payloads as
 // temporal.api.common.v1.Payloads in proto JSON, the target's namespace in the
-// X-Namespace header, and the configured Authorization header.
+// X-Namespace header, the configured Authorization header, and the configured
+// passthrough headers of the tool call's HTTP request.
 
 package payload
 
@@ -20,21 +21,32 @@ import (
 
 	commonpb "go.temporal.io/api/common/v1"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/temporalio/temporal-mcp/internal/config"
 )
 
 // codecTimeout bounds a codec request: a tool call's own context ends only when its client goes away.
 var codecTimeout = 10 * time.Second
 
-// codecClient does not follow redirects, which could carry the authorization header to plain HTTP.
+// codecClient does not follow redirects, which could carry the Authorization and passthrough headers to another host or to plain HTTP.
 var codecClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // maxCodecResponse bounds the codec response read into memory, at the Temporal client's limit on a Temporal response.
 const maxCodecResponse = 128 << 20
 
 type codec struct {
-	endpoint      string
-	namespace     string
-	authorization func() (string, error) // nil without an authorization header
+	endpoint           string
+	namespace          string
+	authorization      func() (string, error) // nil without an authorization header
+	passthroughHeaders []config.PassthroughHeader
+}
+
+type requestHeaderKey struct{}
+
+// WithRequestHeader returns ctx carrying h, the header of the tool call's HTTP
+// request, which codec requests copy their codec's passthrough headers from.
+func WithRequestHeader(ctx context.Context, h http.Header) context.Context {
+	return context.WithValue(ctx, requestHeaderKey{}, h)
 }
 
 // A codecError is a failed codec request. Its reason, which check_connection and each
@@ -77,6 +89,12 @@ func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb
 			return nil, &codecError{"the authorization header for the codec server could not be read", err}
 		}
 		req.Header.Set("Authorization", v)
+	}
+	in, _ := ctx.Value(requestHeaderKey{}).(http.Header)
+	for _, h := range c.passthroughHeaders {
+		for _, v := range in.Values(h.Name) {
+			req.Header.Add(h.OutgoingName(), v)
+		}
 	}
 	resp, err := codecClient.Do(req)
 	if err != nil {

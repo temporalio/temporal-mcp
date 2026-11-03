@@ -97,8 +97,11 @@ func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.Too
 	// The handler encodes the output itself: the SDK would re-encode it through float64, corrupting integers above 2^53.
 	mcp.AddTool(s.Server, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		ctx = temporal.WithTool(ctx, def.Name, rpcs, toolTargets(ctx))
-		if req.Extra != nil && req.Extra.TokenInfo != nil {
-			ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
+		if req.Extra != nil {
+			ctx = payload.WithRequestHeader(ctx, req.Extra.Header)
+			if req.Extra.TokenInfo != nil {
+				ctx = identity.WithCaller(ctx, identity.CallerFromTokenInfo(req.Extra.TokenInfo))
+			}
 		}
 		_, out, err := h(ctx, req, in)
 		if err != nil {

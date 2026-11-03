@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/net/http/httpguts"
 )
 
 // DefaultShutdownTimeout is the ShutdownTimeout of a config that does not set one.
@@ -163,6 +164,34 @@ type Codec struct {
 	// header sent to the codec server, such as "Bearer abc". Without one, requests
 	// carry no Authorization header.
 	AuthorizationHeader *Secret `yaml:"authorization_header"`
+	// PassthroughHeaders are the headers of a tool call's HTTP request that the
+	// server copies onto that call's requests to the codec server.
+	PassthroughHeaders []PassthroughHeader `yaml:"passthrough_headers"`
+}
+
+// PassthroughHeader is a header of a tool call's HTTP request that the server
+// forwards to the codec server, with all its values.
+type PassthroughHeader struct {
+	// Name is the header's name on the tool call's request, compared ignoring case.
+	Name string `yaml:"name"`
+	// SendAs is the header's name on the codec request; Name if nil.
+	SendAs *string `yaml:"send_as"`
+}
+
+// OutgoingName returns the name the header is sent under to the codec server.
+func (h PassthroughHeader) OutgoingName() string {
+	if h.SendAs != nil {
+		return *h.SendAs
+	}
+	return h.Name
+}
+
+// outgoingField returns the config field that gives OutgoingName.
+func (h PassthroughHeader) outgoingField() string {
+	if h.SendAs != nil {
+		return "send_as"
+	}
+	return "name"
 }
 
 // Secret says where to read a secret from. Exactly one field is set.
@@ -262,6 +291,7 @@ type keyNodes struct {
 	} `yaml:"targets"`
 	Codecs map[string]struct {
 		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
+		PassthroughHeaders  yaml.Node `yaml:"passthrough_headers"`
 	} `yaml:"codecs"`
 }
 
@@ -310,6 +340,16 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 	for name, c := range keys.Codecs {
 		codec := cfg.Codecs[name]
 		emptyIfPresent(&codec.AuthorizationHeader, c.AuthorizationHeader)
+		emptyListIfPresent(&codec.PassthroughHeaders, c.PassthroughHeaders)
+		var headers []struct {
+			SendAs yaml.Node `yaml:"send_as"`
+		}
+		if err := c.PassthroughHeaders.Decode(&headers); err != nil {
+			return nil, err
+		}
+		for i, h := range headers {
+			emptyIfPresent(&codec.PassthroughHeaders[i].SendAs, h.SendAs)
+		}
 		cfg.Codecs[name] = codec
 	}
 	var shutdownErr error
@@ -348,13 +388,15 @@ func emptyIfPresent[T any](section **T, key yaml.Node) {
 	}
 }
 
-func emptyListIfPresent(list *[]string, key yaml.Node) {
+func emptyListIfPresent[T any](list *[]T, key yaml.Node) {
 	if *list == nil && key.Kind != 0 {
-		*list = []string{}
+		*list = []T{}
 	}
 }
 
-// httpOnlyKeys rejects the sections that configure HTTP, which serving MCP over stdio has no use for.
+// httpOnlyKeys rejects the sections that configure HTTP, and the codecs'
+// passthrough_headers, which copy headers of HTTP requests; serving MCP over
+// stdio has no use for them.
 func httpOnlyKeys(k *keyNodes) error {
 	var keys []string
 	for _, key := range []struct {
@@ -363,6 +405,11 @@ func httpOnlyKeys(k *keyNodes) error {
 	}{{"listen", k.Listen}, {"listen_tls", k.ListenTLS}, {"auth", k.Auth}, {"authorization", k.Authorization}} {
 		if key.node.Kind != 0 {
 			keys = append(keys, key.name)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(k.Codecs)) {
+		if k.Codecs[name].PassthroughHeaders.Kind != 0 {
+			keys = append(keys, fmt.Sprintf("codecs: %q: passthrough_headers", name))
 		}
 	}
 	if len(keys) > 0 {
@@ -473,8 +520,73 @@ func (c *Config) validateTargets() error {
 		if err := validateSecret(label+": authorization_header", codec.AuthorizationHeader); err != nil {
 			errs = append(errs, err)
 		}
+		errs = append(errs, codec.validatePassthroughHeaders(label+": passthrough_headers")...)
 	}
 	return errors.Join(errs...)
+}
+
+// reservedHeaders are the headers that the server or HTTP sets on a codec request
+// itself, which no passthrough header may be named or sent as.
+var reservedHeaders = []string{"Content-Type", "X-Namespace", "Host", "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection", "Transfer-Encoding", "TE", "Trailer", "Upgrade"}
+
+// headerNameProblem says why name cannot be a passthrough header's name or
+// send_as, or returns "" if it can.
+func headerNameProblem(name string) string {
+	switch {
+	case !httpguts.ValidHeaderFieldName(name):
+		return "is not a valid HTTP header name"
+	case slices.ContainsFunc(reservedHeaders, func(r string) bool { return strings.EqualFold(r, name) }):
+		return "is not allowed, because the server or HTTP sets that header itself"
+	}
+	return ""
+}
+
+// validatePassthroughHeaders requires each header to have a name and an outgoing
+// name that are valid, not reserved and not those of another header, a name other
+// than Authorization, and an outgoing name other than Authorization when the codec
+// has an authorization_header.
+func (c *Codec) validatePassthroughHeaders(label string) []error {
+	if c.PassthroughHeaders != nil && len(c.PassthroughHeaders) == 0 {
+		return []error{fmt.Errorf("%s: at least one header is required", label)}
+	}
+	var errs []error
+	for i, h := range c.PassthroughHeaders {
+		label := fmt.Sprintf("%s[%d]", label, i)
+		nameOK := false
+		switch problem := headerNameProblem(h.Name); {
+		case strings.TrimSpace(h.Name) == "":
+			errs = append(errs, fmt.Errorf("%s: name is required", label))
+		case problem != "":
+			errs = append(errs, fmt.Errorf("%s: name %q %s", label, h.Name, problem))
+		case strings.EqualFold(h.Name, "Authorization"):
+			errs = append(errs, fmt.Errorf("%s: name %q is not allowed, because the server must not pass on the access token that MCP clients send in their Authorization header", label, h.Name))
+		default:
+			nameOK = true
+		}
+		outOK := nameOK
+		if h.SendAs != nil {
+			outOK = false
+			switch problem := headerNameProblem(*h.SendAs); {
+			case strings.TrimSpace(*h.SendAs) == "":
+				errs = append(errs, fmt.Errorf("%s: send_as is empty; leave it out to send the header under its name", label))
+			case problem != "":
+				errs = append(errs, fmt.Errorf("%s: send_as %q %s", label, *h.SendAs, problem))
+			case strings.EqualFold(*h.SendAs, "Authorization") && c.AuthorizationHeader != nil:
+				errs = append(errs, fmt.Errorf("%s: send_as %q is not allowed with authorization_header, which sets that header", label, *h.SendAs))
+			default:
+				outOK = true
+			}
+		}
+		for k, prev := range c.PassthroughHeaders[:i] {
+			switch {
+			case nameOK && strings.EqualFold(h.Name, prev.Name):
+				errs = append(errs, fmt.Errorf("%s: name %q conflicts with name %q of passthrough_headers[%d]; header names are case-insensitive", label, h.Name, prev.Name, k))
+			case outOK && strings.EqualFold(h.OutgoingName(), prev.OutgoingName()):
+				errs = append(errs, fmt.Errorf("%s: %s %q conflicts with %s %q of passthrough_headers[%d]; header names are case-insensitive", label, h.outgoingField(), h.OutgoingName(), prev.outgoingField(), prev.OutgoingName(), k))
+			}
+		}
+	}
+	return errs
 }
 
 func (a *Authorization) validate(c *Config) []error {

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -81,17 +80,6 @@ func TestAudit(t *testing.T) {
 	records := &recordWriter{writes: make(chan string, 10)}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	connectTo := func(h http.Handler, transport http.RoundTripper) *mcp.ClientSession {
-		srv := httptest.NewServer(h)
-		t.Cleanup(srv.Close)
-		session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: transport}}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { session.Close() })
-		return session
-	}
-
 	s, _ := newServer(t.Context(), t.Context(), "temporal", "0", authCfg, clients, newRenderer(t, authCfg, logger), records, logger)
 	addTool(s, &mcp.Tool{Name: "fail"}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 		return nil, struct{}{}, errors.New("dial tcp 10.0.0.1:7233: connection refused")
@@ -115,10 +103,10 @@ func TestAudit(t *testing.T) {
 	token := sign(map[string]any{})
 	var callToken atomic.Pointer[string]
 	callToken.Store(&token)
-	authed := connectTo(NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
+	authed := connectTo(t, NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
 	openCfg := &config.Config{Targets: targets}
 	open, _ := newServer(t.Context(), t.Context(), "temporal", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
-	unauthed := connectTo(NewMux(open.Server, openCfg, logger), http.DefaultTransport)
+	unauthed := connectTo(t, NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}

@@ -11,14 +11,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	commonpb "go.temporal.io/api/common/v1"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/api/workflowservice/v1"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -52,6 +57,19 @@ func serveTools(t *testing.T, cfg *config.Config, clients *temporal.Clients, out
 	srv := httptest.NewServer(newHandler(s.Server, cfg))
 	t.Cleanup(srv.Close)
 	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	return session
+}
+
+// connectTo serves h and returns a session connected to its /mcp endpoint, sending requests through transport.
+func connectTo(t *testing.T, h http.Handler, transport http.RoundTripper) *mcp.ClientSession {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: transport}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,6 +348,115 @@ func TestNewMux(t *testing.T) {
 	}
 	if got := <-callers; !reflect.DeepEqual(got, want) {
 		t.Errorf("caller = %+v, want %+v", got, want)
+	}
+}
+
+// memoWorkflowService describes each workflow as a running run with a JSON memo.
+type memoWorkflowService struct{ fakeWorkflowService }
+
+func (memoWorkflowService) DescribeWorkflowExecution(_ context.Context, req *workflowservice.DescribeWorkflowExecutionRequest) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	memo := map[string]*commonpb.Payload{"note": {Metadata: map[string][]byte{"encoding": []byte("json/plain")}, Data: []byte(`"gift"`)}}
+	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+		Execution: req.GetExecution(),
+		Memo:      &commonpb.Memo{Fields: memo},
+	}}, nil
+}
+
+func TestCodecPassthroughHeaders(t *testing.T) {
+	received := make(chan http.Header, 10)
+	codecServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Clone()
+		body, _ := io.ReadAll(r.Body)
+		// check_connection's check sends no payloads; failing it puts a codec failure in the log.
+		if string(body) == `{"payloads":[]}` {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Write(body)
+	}))
+	t.Cleanup(codecServer.Close)
+	temporalServer := listen(t)
+	serve(t, temporalServer, memoWorkflowService{})
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+		"targets:\n  - {name: orders, description: x, address: %q, namespace: orders, payload_handling: decode, codec: orders}\n"+
+		"codecs:\n  orders:\n    endpoint: %q\n    passthrough_headers:\n"+
+		"      - {name: x-tenant-id}\n"+
+		"      - {name: X-Codec-Authorization, send_as: Authorization}\n"+
+		"      - {name: X-Roles}\n"+
+		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&out, nil))
+	s, _ := newServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), &out, logger)
+	sent := http.Header{
+		"X-Tenant-Id":           {"tenant-7f3a"},
+		"X-Codec-Authorization": {"Bearer caller-codec-token"},
+		"X-Roles":               {"role-a", "role-b"},
+		"X-Unlisted":            {"unlisted-value"},
+	}
+	session := connectTo(t, NewMux(s.Server, cfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		r = r.Clone(r.Context())
+		for name, values := range sent {
+			r.Header[name] = values
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	}))
+
+	var results []string
+	for _, tt := range []struct {
+		params *mcp.CallToolParams
+		want   string
+	}{
+		{&mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "orders"}}, `{"name":"codec","status":"failed","latency_ms":`},
+		{&mcp.CallToolParams{Name: "get_workflows", Arguments: map[string]any{"target": "orders", "workflows": []any{map[string]any{"workflow_id": "order-1"}}}}, `"memo":{"note":{"handling":"decoded","value":"gift"}}`},
+	} {
+		t.Run(tt.params.Name, func(t *testing.T) {
+			res, err := session.CallTool(t.Context(), tt.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := res.Content[0].(*mcp.TextContent).Text
+			results = append(results, text)
+			if res.IsError || !strings.Contains(text, tt.want) {
+				t.Fatalf("result %s, want one containing %s", text, tt.want)
+			}
+			h := <-received
+			for name, want := range map[string][]string{
+				"X-Tenant-Id":   {"tenant-7f3a"},
+				"Authorization": {"Bearer caller-codec-token"},
+				"X-Roles":       {"role-a", "role-b"},
+				"X-Namespace":   {"orders"},
+			} {
+				if got := h.Values(name); !slices.Equal(got, want) {
+					t.Errorf("codec request header %s = %q, want %q", name, got, want)
+				}
+			}
+			for _, name := range []string{"X-Codec-Authorization", "X-Unlisted", "X-Region"} {
+				if got := h.Values(name); got != nil {
+					t.Errorf("codec request header %s = %q, want none", name, got)
+				}
+			}
+		})
+	}
+	if !strings.Contains(out.String(), `"msg":"codec check failed"`) {
+		t.Errorf("log and audit records %s, want the codec check failure", &out)
+	}
+	for _, values := range sent {
+		for _, v := range values {
+			if leaked := slices.ContainsFunc(append(results, out.String()), func(s string) bool { return strings.Contains(s, v) }); leaked {
+				t.Errorf("a result, log line or audit record contains the header value %q", v)
+			}
+		}
 	}
 }
 

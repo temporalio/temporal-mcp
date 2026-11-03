@@ -22,7 +22,11 @@ targets:
     <string>:
       endpoint: <url>
       [ allow_plain_http: <boolean> | default = false ]
-      [ authorization_header: <secret> ] ]
+      [ authorization_header: <secret> ]
+      # HTTP mode only.
+      [ passthrough_headers:
+          - name: <string>
+            [ send_as: <string> | default = name ] ] ]
 
 [ audit_log_file: <filename> ]
 [ error_log_file: <filename> ]
@@ -93,8 +97,11 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
 
 - `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address (or for any host with `allow_plain_http: true`), with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header. The server does not follow redirects, so the endpoint must be the codec server's final URL.
-- `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads and the `Authorization` header travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
+- `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads, the `Authorization` header and any `passthrough_headers` travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
 - `authorization_header` (secret, optional): Where to read the whole `Authorization` header value sent to the codec server, such as `Bearer abc`, like the CLI's `--codec-auth`. Without one, requests carry no `Authorization` header. The codec server must accept this value from `temporal-mcp`, which cannot pass on a user's Temporal Cloud login as the Temporal UI does. `authorization_header:` with no value is an error.
+- `passthrough_headers` (list, optional): Headers that the server copies from the HTTP request of each tool call, as it reaches the server from the agent or a reverse proxy, onto that call's requests to the codec server, including `check_connection`'s. A header with several values is sent with all of them, and one missing from the request is not sent. The server does not check the values, so a codec server that relies on a header to identify the user needs a reverse proxy in front of this server that sets the header and drops any copy the agent sends. The server never writes the values to its logs or audit records, or to any `error` it returns. Header names are compared ignoring case. No two headers may share a `name` or a `send_as`, and no `name` or `send_as` may be `Content-Type`, `X-Namespace`, `Host`, `Content-Length`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`, `TE`, `Trailer` or `Upgrade`, which the server or HTTP sets itself. It is HTTP mode only, and `passthrough_headers:` with no value or `[]` is an error.
+  - `name` (string, required): The header's name on the tool call's request. It must be a valid HTTP header name other than `Authorization`, so that the agent's access token is never passed on.
+  - `send_as` (string, default `name`): The header's name on requests to the codec server. It must be a valid HTTP header name other than `Authorization` on a codec with `authorization_header`. `send_as:` with no value is an error.
 
 An `https` codec server's certificate must chain to a [trusted CA](#trusted-cas).
 
@@ -160,7 +167,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth` and `authorization` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 

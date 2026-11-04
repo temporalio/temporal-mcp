@@ -34,7 +34,7 @@ changelog:
 
 release:
   header: |
-    `temporal-mcp` is a read-only MCP server that gives AI agents access to Temporal namespaces. To install it, follow [Get started](https://github.com/temporalio/temporal-mcp#get-started) in the README.
+    `temporal-mcp` is an MCP server that gives AI agents access to Temporal namespaces. To install it, follow [Get started](https://github.com/temporalio/temporal-mcp#get-started) in the README.
   draft: true
   replace_existing_draft: true
   prerelease: auto

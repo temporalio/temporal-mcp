@@ -28,8 +28,10 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
+	historypb "go.temporal.io/api/history/v1"
 	nexuspb "go.temporal.io/api/nexus/v1"
 	"go.temporal.io/api/operatorservice/v1"
+	"go.temporal.io/api/serviceerror"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -42,6 +44,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 	"go.temporal.io/server/common/searchattribute/sadefs"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
@@ -591,7 +594,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		"  unauthorized: {endpoint: %[1]q}\n"+
 		"targets:\n"+
 		"  - {name: dev, aliases: [local], description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: test}\n"+
-		"  - {name: dev-passthrough, description: x, address: %[3]q, namespace: default, payload_handling: passthrough}\n"+
+		"  - {name: dev-passthrough, description: x, address: %[3]q, namespace: default, payload_handling: passthrough, codec: test}\n"+
 		"  - {name: dev-omit, description: x, address: %[3]q, namespace: default}\n"+
 		"  - {name: dev-unauthorized, description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: unauthorized}\n"+
 		"  - {name: down, description: x, address: %[4]q, namespace: default}\n"+
@@ -631,13 +634,26 @@ func TestToolsOnDevServer(t *testing.T) {
 				},
 			},
 			{
+				target: "dev-passthrough",
+				want: map[string]any{
+					"target": "dev-passthrough",
+					"result": map[string]any{"stages": []any{
+						map[string]any{"name": "server", "status": "ok", "reason": nil},
+						map[string]any{"name": "namespace", "status": "ok", "reason": nil},
+						map[string]any{"name": "codec", "status": "ok", "reason": nil},
+					}},
+					"complete":  true,
+					"next_call": nil,
+				},
+			},
+			{
 				target: "down",
 				want: map[string]any{
 					"target": "down",
 					"result": map[string]any{"stages": []any{
 						map[string]any{"name": "server", "status": "failed", "reason": "Unavailable: could not connect to the Temporal server"},
 						map[string]any{"name": "namespace", "status": "skipped", "reason": "not run because the server stage failed"},
-						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target does not decode payloads"},
+						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target has no codec"},
 					}},
 					"complete":  true,
 					"next_call": nil,
@@ -650,7 +666,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					"result": map[string]any{"stages": []any{
 						map[string]any{"name": "server", "status": "ok", "reason": nil},
 						map[string]any{"name": "namespace", "status": "failed", "reason": "NotFound: Namespace nosuchns is not found."},
-						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target does not decode payloads"},
+						map[string]any{"name": "codec", "status": "skipped", "reason": "not run because the target has no codec"},
 					}},
 					"complete":  true,
 					"next_call": nil,
@@ -2023,5 +2039,116 @@ func TestToolsOnDevServer(t *testing.T) {
 		if got := attributes(events[0])["failure"].(map[string]any)["application"]; !reflect.DeepEqual(got, map[string]any{"type": "LedgerWriteRejected", "non_retryable": true, "next_retry_delay": nil, "category": "Unspecified"}) {
 			t.Errorf("ActivityTaskFailed application failure = %#v, want the non-retryable LedgerWriteRejected", got)
 		}
+	})
+
+	t.Run("start_workflow", func(t *testing.T) {
+		startedEvent := func(t *testing.T, id, runID string) *historypb.WorkflowExecutionStartedEventAttributes {
+			t.Helper()
+			e, err := c.GetWorkflowHistory(ctx, id, runID, false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT).Next()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return e.GetWorkflowExecutionStartedEventAttributes()
+		}
+		startRun := func(t *testing.T, args map[string]any) string {
+			t.Helper()
+			result := callTool(t, "start_workflow", args)["result"].(map[string]any)
+			runID, _ := result["run_id"].(string)
+			if result["workflow_id"] != args["workflow_id"] || result["started"] != true || runID == "" {
+				t.Fatalf("result = %#v, want a new run of %v", result, args["workflow_id"])
+			}
+			return runID
+		}
+
+		t.Run("input through a codec", func(t *testing.T) {
+			runID := startRun(t, map[string]any{"target": "dev-passthrough", "workflow_id": "start-order", "workflow_type": "OrderWorkflow", "task_queue": fixture.TaskQueue, "input": []any{map[string]any{"order_id": "s1"}}})
+			var result map[string]string
+			if err := c.GetWorkflow(ctx, "start-order", runID).Get(ctx, &result); err != nil {
+				t.Fatal(err)
+			}
+			input := startedEvent(t, "start-order", runID).GetInput().GetPayloads()
+			if len(input) != 1 || string(input[0].GetMetadata()["encoding"]) != "binary/zlib" || result["payment"] != "payment-authorized:s1" {
+				t.Errorf("input = %v, result = %v; want one binary/zlib payload and the payment for order s1", input, result)
+			}
+		})
+
+		t.Run("input without a codec", func(t *testing.T) {
+			runID := startRun(t, map[string]any{"target": "dev-omit", "workflow_id": "start-unpolled", "workflow_type": "OrderWorkflow", "task_queue": "start-unpolled", "input": []any{map[string]any{"order_id": json.Number("9007199254740993")}, nil}})
+			a := startedEvent(t, "start-unpolled", runID)
+			want := &commonpb.Payloads{Payloads: []*commonpb.Payload{
+				{Metadata: map[string][]byte{"encoding": []byte("json/plain")}, Data: []byte(`{"order_id":9007199254740993}`)},
+				{Metadata: map[string][]byte{"encoding": []byte("binary/null")}},
+			}}
+			if !proto.Equal(a.GetInput(), want) || a.GetIdentity() != "test" {
+				t.Errorf("started event = %v, want input %v and identity test", a, want)
+			}
+		})
+
+		t.Run("input the codec server does not encode", func(t *testing.T) {
+			got := callToolError(t, "start_workflow", map[string]any{"target": "dev-unauthorized", "workflow_id": "start-unencoded", "workflow_type": "OrderWorkflow", "task_queue": fixture.TaskQueue, "input": []any{"s2"}})
+			want := map[string]any{"code": "encode_failed", "message": "input was not encoded, so no run was started: the codec server responded HTTP 401 Unauthorized", "retryable": false}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("error = %#v, want %#v", got, want)
+			}
+			if _, err := c.DescribeWorkflowExecution(ctx, "start-unencoded", ""); !errors.As(err, new(*serviceerror.NotFound)) {
+				t.Errorf("describing start-unencoded: err = %v, want NotFound", err)
+			}
+		})
+
+		t.Run("workflow ID policies", func(t *testing.T) {
+			const id, conflict, reuse = "start-policies", "workflow_id_conflict_policy", "workflow_id_reuse_policy"
+			args := func(policy, value string) map[string]any {
+				a := map[string]any{"target": "dev-omit", "workflow_id": id, "workflow_type": "waitForSignal", "task_queue": fixture.TaskQueue}
+				if policy != "" {
+					a[policy] = value
+				}
+				return a
+			}
+			alreadyStarted := func(t *testing.T, policy, value, runID string) {
+				t.Helper()
+				got := callToolError(t, "start_workflow", args(policy, value))
+				if msg, _ := got["message"].(string); got["code"] != "already_started" || got["retryable"] != false || !strings.Contains(msg, runID) {
+					t.Errorf("%s %s: error = %#v, want already_started naming run %s", policy, value, got, runID)
+				}
+			}
+			release := func(t *testing.T, runID string) {
+				t.Helper()
+				if err := c.SignalWorkflow(ctx, id, runID, "release", nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.GetWorkflow(ctx, id, runID).Get(ctx, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Under fail, use_existing and reject_duplicate, a workflow ID with no runs gets a new run.
+			for _, p := range []struct{ policy, value string }{{conflict, "fail"}, {conflict, "use_existing"}, {reuse, "reject_duplicate"}} {
+				a := args(p.policy, p.value)
+				a["workflow_id"] = id + "-" + p.value
+				startRun(t, a)
+			}
+			first := startRun(t, args("", ""))
+			alreadyStarted(t, "", "", first)
+			alreadyStarted(t, conflict, "fail", first)
+			if got := callTool(t, "start_workflow", args(conflict, "use_existing"))["result"]; !reflect.DeepEqual(got, map[string]any{"workflow_id": id, "run_id": first, "started": false}) {
+				t.Errorf("use_existing: result = %#v, want run %s with started false", got, first)
+			}
+			for policy, value := range map[string]string{conflict: "terminate_existing", reuse: "terminate_if_running"} {
+				if got := callToolError(t, "start_workflow", args(policy, value)); got["code"] != "invalid_argument" {
+					t.Errorf("%s %s: error = %#v, want invalid_argument", policy, value, got)
+				}
+			}
+			// The run completes only if no call above terminated it.
+			release(t, first)
+			alreadyStarted(t, reuse, "reject_duplicate", first)
+			alreadyStarted(t, reuse, "allow_duplicate_failed_only", first)
+			second := startRun(t, args(reuse, "allow_duplicate"))
+			if err := c.TerminateWorkflow(ctx, id, second, "stopped by test"); err != nil {
+				t.Fatal(err)
+			}
+			third := startRun(t, args(reuse, "allow_duplicate_failed_only"))
+			release(t, third)
+			startRun(t, args("", ""))
+		})
 	})
 }

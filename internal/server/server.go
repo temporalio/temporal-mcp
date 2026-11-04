@@ -121,11 +121,11 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	names := &searchAttributeNames{}
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
-		Description: "List the Temporal targets you can read from, and how tool responses show each one's payloads.",
+		Description: "List the Temporal targets you can use, and how tool responses show each one's payloads.",
 		Annotations: readOnlyAnnotations,
 	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
-		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it decodes payloads with one.",
+		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it has one.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
@@ -178,7 +178,13 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	}, []string{
 		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,
 		cloudservice.CloudService_GetNamespace_FullMethodName,
-	}, listSearchAttributes(cfg, clients, names))}
+	}, listSearchAttributes(cfg, clients, names)), addTool(s, &mcp.Tool{
+		Name:        "start_workflow",
+		Description: "Start a run of workflow_type on task_queue under workflow_id, with input, an array of JSON values, as the workflow's arguments in order. If a run of workflow_id is running, workflow_id_conflict_policy decides what happens: fail, the default, starts no run and returns error already_started, whose message gives the running run's run_id; use_existing starts no run and returns the running run, with started false. If workflow_id's latest run has closed, workflow_id_reuse_policy decides whether a new run may start: allow_duplicate, the default, always; allow_duplicate_failed_only, only if that run failed, timed out, was canceled or was terminated; reject_duplicate, never. When it may not, no run starts and the call returns error already_started with the closed run's run_id. The run makes no progress until a worker polls task_queue. If a call fails with error timeout, temporal_unavailable or server_shutting_down, the run may have started: check workflow_id with get_workflows before calling again.",
+		InputSchema: startWorkflowInputSchema(),
+	}, []string{
+		workflowservice.WorkflowService_StartWorkflowExecution_FullMethodName,
+	}, startWorkflow(cfg, clients, payloads))}
 }
 
 // NewServer returns the MCP server for the given configuration, making

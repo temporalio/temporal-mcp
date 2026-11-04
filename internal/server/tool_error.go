@@ -57,6 +57,12 @@ func temporalError(err error, t *config.Target, p *peer.Peer, server string) err
 		}
 	case codes.InvalidArgument:
 		e.Code = "invalid_argument"
+	case codes.AlreadyExists:
+		if started := (*serviceerror.WorkflowExecutionAlreadyStarted)(nil); errors.As(err, &started) {
+			e.Code, e.Message = "already_started", fmt.Sprintf("no run was started because this workflow ID already has run %s: %s", started.RunId, e.Message)
+		}
+	case codes.PermissionDenied:
+		e.Code = "permission_denied"
 	case codes.DeadlineExceeded:
 		e.Code, e.Retryable = "timeout", true
 	case codes.ResourceExhausted:

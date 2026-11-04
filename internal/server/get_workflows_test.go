@@ -372,11 +372,15 @@ var rejectOperation = temporalnexus.NewWorkflowRunOperation("reject", rejectRequ
 })
 
 func summarized(ctx workflow.Context) error {
-	if err := workflow.SetUpdateHandler(ctx, "approve", func(_ workflow.Context, ok bool) error {
-		if !ok {
-			return errors.New("not approved")
+	denied := 0
+	if err := workflow.SetUpdateHandler(ctx, "approve", func(ctx workflow.Context, ok bool) error {
+		if ok {
+			return nil
 		}
-		return nil
+		if denied++; denied == 1 {
+			_ = workflow.Await(ctx, func() bool { return denied > 1 })
+		}
+		return errors.New("not approved")
 	}); err != nil {
 		return err
 	}
@@ -2144,11 +2148,17 @@ func TestToolsOnDevServer(t *testing.T) {
 		waitUntil(ctx, t, "the timer to start", func() bool {
 			return summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized"})["timers"].(map[string]any)["started"] == 1.0
 		})
-		for _, ok := range []bool{true, false} {
-			if _, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{WorkflowID: "summarized", UpdateName: "approve", Args: []any{ok}, WaitForStage: client.WorkflowUpdateStageCompleted}); err != nil {
+		approve := func(updateID string, ok bool, stage client.WorkflowUpdateStage) client.WorkflowUpdateHandle {
+			handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{WorkflowID: "summarized", UpdateID: updateID, UpdateName: "approve", Args: []any{ok}, WaitForStage: stage})
+			if err != nil {
 				t.Fatal(err)
 			}
+			return handle
 		}
+		approve("approved", true, client.WorkflowUpdateStageCompleted)
+		held := approve("held", false, client.WorkflowUpdateStageAccepted)
+		approve("denied", false, client.WorkflowUpdateStageCompleted)
+		_ = held.Get(ctx, nil)
 		history := func(t *testing.T, workflowID string) map[enumspb.EventType][]*historypb.HistoryEvent {
 			t.Helper()
 			events := map[enumspb.EventType][]*historypb.HistoryEvent{}
@@ -2184,6 +2194,16 @@ func TestToolsOnDevServer(t *testing.T) {
 				}
 			}
 		}
+		wantUpdates := func(h map[enumspb.EventType][]*historypb.HistoryEvent, message string, unavailable any) map[string]any {
+			completed := h[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED]
+			failedUpdate := func(updateID string, e *historypb.HistoryEvent) map[string]any {
+				return map[string]any{"name": "approve", "update_id": updateID, "message": message, "event_id": id(e), "message_unavailable": unavailable}
+			}
+			return map[string]any{
+				"names":        list(map[string]any{"name": "approve", "accepted": 3.0, "completed": 1.0, "failed": 2.0}),
+				"unsuccessful": list(failedUpdate("held", completed[2]), failedUpdate("denied", completed[1])),
+			}
+		}
 
 		t.Run("running", func(t *testing.T) {
 			h := history(t, "summarized")
@@ -2209,16 +2229,24 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 			timer := h[enumspb.EVENT_TYPE_TIMER_STARTED][0]
 			failedChild := h[enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED][0]
+			failedActivity := h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0]
+			wantActivities := func(message string, unavailable any) map[string]any {
+				return list(activity("rejectEntry", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], failedActivity, map[string]any{
+					"failed": 1.0, "last_failure": map[string]any{"message": message, "event_id": id(failedActivity), "message_unavailable": unavailable},
+				}))
+			}
 			markers := h[enumspb.EVENT_TYPE_MARKER_RECORDED]
+			wantMarkers := func(unavailable any) map[string]any {
+				return map[string]any{
+					"names":        list(map[string]any{"name": "LocalActivity", "count": 2.0, "failed": 1.0, "last_event_id": id(markers[1])}),
+					"unsuccessful": list(map[string]any{"name": "LocalActivity", "message": "entry rejected", "event_id": id(markers[0]), "message_unavailable": unavailable}),
+				}
+			}
 			check(t, got, map[string]any{
 				"workflow_id": "summarized",
 				"run_id":      run.GetRunID(),
-				"activities": list(activity("rejectEntry", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0], map[string]any{
-					"failed": 1.0, "last_failure": map[string]any{"message": "entry rejected", "event_id": id(h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0]), "message_unavailable": nil},
-				})),
-				"markers": list(map[string]any{
-					"name": "LocalActivity", "count": 2.0, "failed": 1.0, "last_failure": map[string]any{"message": "entry rejected", "event_id": id(markers[0]), "message_unavailable": nil}, "last_event_id": id(markers[1]),
-				}),
+				"activities":  wantActivities("entry rejected", nil),
+				"markers":     wantMarkers(nil),
 				"child_workflows": map[string]any{
 					"types": list(child("waitForSignal", map[string]any{"completed": 1.0}), child("rejectWithDetails", map[string]any{"failed": 1.0})),
 					"unsuccessful": list(map[string]any{
@@ -2233,7 +2261,7 @@ func TestToolsOnDevServer(t *testing.T) {
 					map[string]any{"name": "release", "initiated": 2.0, "signaled": 2.0, "failed": 0.0},
 					map[string]any{"name": "ping", "initiated": 1.0, "signaled": 0.0, "failed": 1.0},
 				),
-				"updates": list(map[string]any{"name": "approve", "accepted": 2.0, "completed": 1.0, "failed": 1.0}),
+				"updates": wantUpdates(h, "not approved", nil),
 				"timers": map[string]any{"started": 1.0, "fired": 0.0, "canceled": 0.0, "open": list(map[string]any{
 					"timer_id": timer.GetTimerStartedEventAttributes().GetTimerId(), "fires_at": timer.GetEventTime().AsTime().Add(time.Hour).Format(time.RFC3339Nano), "event_id": id(timer),
 				})},
@@ -2262,16 +2290,14 @@ func TestToolsOnDevServer(t *testing.T) {
 			}
 
 			for target, reason := range map[string]string{"dev-omit": "payload_handling", "dev-passthrough": "payload_handling", "dev-unauthorized": "decode_failed"} {
-				got := summarize(t, map[string]any{"target": target, "workflow_id": "summarized"})
-				for list, want := range map[string]map[string]any{
-					"activities": {"message": "Encoded failure", "event_id": id(h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0]), "message_unavailable": reason},
-					// The Go SDK records a local activity's failure with its message decoded beside the encoded attributes.
-					"markers": {"message": "entry rejected", "event_id": id(markers[0]), "message_unavailable": reason},
-				} {
-					if f := got[list].(map[string]any)["items"].([]any)[0].(map[string]any)["last_failure"]; !reflect.DeepEqual(f, want) {
-						t.Errorf("%s: %s last_failure = %#v, want %#v", target, list, f, want)
-					}
-				}
+				t.Run(target, func(t *testing.T) {
+					check(t, summarize(t, map[string]any{"target": target, "workflow_id": "summarized"}), map[string]any{
+						"activities": wantActivities("Encoded failure", reason),
+						// The Go SDK records a local activity's failure with its message decoded beside the encoded attributes.
+						"markers": wantMarkers(reason),
+						"updates": wantUpdates(h, "Encoded failure", reason),
+					})
+				})
 			}
 		})
 
@@ -2354,11 +2380,11 @@ func TestToolsOnDevServer(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitUntil(ctx, t, "the reapplied updates to complete", func() bool {
-				return len(history(t, "summarized")[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED]) == 2
+				return len(history(t, "summarized")[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED]) == 3
 			})
 			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized"}), map[string]any{
 				"run_id":  reset.GetRunId(),
-				"updates": list(map[string]any{"name": "approve", "accepted": 2.0, "completed": 1.0, "failed": 1.0}),
+				"updates": wantUpdates(history(t, "summarized"), "not approved", nil),
 			})
 			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized", "run_id": run.GetRunID()}), map[string]any{
 				"timers": map[string]any{"started": 1.0, "fired": 0.0, "canceled": 0.0, "open": list()},

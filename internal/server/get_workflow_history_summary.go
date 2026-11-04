@@ -31,12 +31,12 @@ type historySummary struct {
 	WorkflowID      string                            `json:"workflow_id"`
 	RunID           string                            `json:"run_id"`
 	Activities      summaryList[activityCounts]       `json:"activities"`
-	Markers         summaryList[markerCounts]         `json:"markers"`
+	Markers         markers                           `json:"markers"`
 	ChildWorkflows  childWorkflows                    `json:"child_workflows"`
 	NexusOperations nexusOperations                   `json:"nexus_operations"`
 	SignalsReceived summaryList[receivedSignalCounts] `json:"signals_received"`
 	SignalsSent     summaryList[sentSignalCounts]     `json:"signals_sent"`
-	Updates         summaryList[updateCounts]         `json:"updates"`
+	Updates         updates                           `json:"updates"`
 	Timers          timers                            `json:"timers"`
 	WorkflowTasks   workflowTasks                     `json:"workflow_tasks"`
 	Close           *closeEvent                       `json:"close"`
@@ -50,32 +50,41 @@ type summaryList[T any] struct {
 }
 
 type activityCounts struct {
-	Type         string       `json:"type"`
-	Scheduled    int          `json:"scheduled"`
-	Completed    int          `json:"completed"`
-	Failed       int          `json:"failed"`
-	TimedOut     int          `json:"timed_out"`
-	Canceled     int          `json:"canceled"`
-	Open         int          `json:"open"`
-	MaxAttempt   int32        `json:"max_attempt"`
-	LastFailure  *lastFailure `json:"last_failure"`
-	FirstEventID int64        `json:"first_event_id"`
-	LastEventID  int64        `json:"last_event_id"`
+	Type         string          `json:"type"`
+	Scheduled    int             `json:"scheduled"`
+	Completed    int             `json:"completed"`
+	Failed       int             `json:"failed"`
+	TimedOut     int             `json:"timed_out"`
+	Canceled     int             `json:"canceled"`
+	Open         int             `json:"open"`
+	MaxAttempt   int32           `json:"max_attempt"`
+	LastFailure  *failureMessage `json:"last_failure"`
+	FirstEventID int64           `json:"first_event_id"`
+	LastEventID  int64           `json:"last_event_id"`
 }
 
-type lastFailure struct {
+type failureMessage struct {
 	Message            string  `json:"message"`
 	EventID            int64   `json:"event_id"`
 	MessageUnavailable *string `json:"message_unavailable"`
 	encoded            *commonpb.Payload
 }
 
+type markers struct {
+	Names        summaryList[markerCounts]       `json:"names"`
+	Unsuccessful summaryList[unsuccessfulMarker] `json:"unsuccessful"`
+}
+
 type markerCounts struct {
-	Name        string       `json:"name"`
-	Count       int          `json:"count"`
-	Failed      int          `json:"failed"`
-	LastFailure *lastFailure `json:"last_failure"`
-	LastEventID int64        `json:"last_event_id"`
+	Name        string `json:"name"`
+	Count       int    `json:"count"`
+	Failed      int    `json:"failed"`
+	LastEventID int64  `json:"last_event_id"`
+}
+
+type unsuccessfulMarker struct {
+	Name string `json:"name"`
+	failureMessage
 }
 
 type childWorkflows struct {
@@ -145,11 +154,22 @@ type sentSignalCounts struct {
 	Failed    int    `json:"failed"`
 }
 
+type updates struct {
+	Names        summaryList[updateCounts]       `json:"names"`
+	Unsuccessful summaryList[unsuccessfulUpdate] `json:"unsuccessful"`
+}
+
 type updateCounts struct {
 	Name      string `json:"name"`
 	Accepted  int    `json:"accepted"`
 	Completed int    `json:"completed"`
 	Failed    int    `json:"failed"`
+}
+
+type unsuccessfulUpdate struct {
+	Name     string `json:"name"`
+	UpdateID string `json:"update_id"`
+	failureMessage
 }
 
 type timers struct {
@@ -175,7 +195,7 @@ type workflowTasks struct {
 
 type workflowTaskFailure struct {
 	Cause string `json:"cause"`
-	lastFailure
+	failureMessage
 }
 
 type closeEvent struct {
@@ -207,7 +227,7 @@ func getWorkflowHistorySummary(cfg *config.Config, clients *temporal.Clients, pa
 		}
 		execution := &commonpb.WorkflowExecution{WorkflowId: in.WorkflowID, RunId: runID}
 		batch := payloads.Batch(t.Name)
-		s := &summarizer{out: historySummary{WorkflowID: in.WorkflowID, RunID: runID, WorkflowTasks: workflowTasks{FailedByCause: map[string]int{}}}, batch: batch, endings: map[int64]*ending{}, unnamedUpdates: map[string]string{}}
+		s := &summarizer{out: historySummary{WorkflowID: in.WorkflowID, RunID: runID, WorkflowTasks: workflowTasks{FailedByCause: map[string]int{}}}, batch: batch, endings: map[int64]*ending{}, unnamedUpdates: map[string]ending{}}
 		for token := []byte(nil); ; {
 			events, next, err := historyPage(ctx, t, svc, execution, false, 0, token)
 			if err != nil {
@@ -243,10 +263,12 @@ type summarizer struct {
 	signalsReceived      tally[string, receivedSignalCounts]
 	signalsSent          tally[string, sentSignalCounts]
 	updates              tally[string, updateCounts]
+	unsuccessfulMarkers  []unsuccessfulMarker
 	unsuccessfulChildren []unsuccessfulChild
 	unsuccessfulNexus    []unsuccessfulNexusOperation
+	unsuccessfulUpdates  []unsuccessfulUpdate
 	openTimers           []openTimer
-	unnamedUpdates       map[string]string // by update ID, the outcome of each update accepted without its request, which an older UpdateAdmitted event holds
+	unnamedUpdates       map[string]ending // by update ID, the ending of each update accepted without its request, which an older UpdateAdmitted event holds
 }
 
 // An ending holds what later events record about an activity, Nexus operation, sent signal, update or timer; read
@@ -255,7 +277,7 @@ type ending struct {
 	eventID int64  // the latest event's ID
 	outcome string // "" while open
 	attempt int32
-	failure *lastFailure
+	failure *failureMessage
 	started bool
 	links   []map[string]any
 }
@@ -284,12 +306,12 @@ func (s *summarizer) pop(start int64) ending {
 // fail records f, the failure that event eventID records, if it has one and no later event recorded one.
 func (e *ending) fail(f *failurepb.Failure, eventID int64) {
 	if e.failure == nil && f != nil {
-		e.failure = new(newLastFailure(f, eventID))
+		e.failure = new(newFailureMessage(f, eventID))
 	}
 }
 
-func newLastFailure(f *failurepb.Failure, eventID int64) lastFailure {
-	return lastFailure{Message: f.GetMessage(), EventID: eventID, encoded: f.GetEncodedAttributes()}
+func newFailureMessage(f *failurepb.Failure, eventID int64) failureMessage {
+	return failureMessage{Message: f.GetMessage(), EventID: eventID, encoded: f.GetEncodedAttributes()}
 }
 
 func (s *summarizer) add(e *historypb.HistoryEvent) error {
@@ -316,7 +338,7 @@ func (s *summarizer) add(e *historypb.HistoryEvent) error {
 		w.Failed++
 		w.FailedByCause[a.GetCause().String()]++
 		if w.LastFailure == nil {
-			w.LastFailure = &workflowTaskFailure{Cause: a.GetCause().String(), lastFailure: newLastFailure(a.GetFailure(), id)}
+			w.LastFailure = &workflowTaskFailure{Cause: a.GetCause().String(), failureMessage: newFailureMessage(a.GetFailure(), id)}
 		}
 	case enumspb.EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT:
 		s.out.WorkflowTasks.TimedOut++
@@ -370,9 +392,7 @@ func (s *summarizer) add(e *historypb.HistoryEvent) error {
 		g.Count++
 		if f := a.GetFailure(); f != nil {
 			g.Failed++
-			if g.LastFailure == nil {
-				g.LastFailure = new(newLastFailure(f, id))
-			}
+			s.unsuccessfulMarkers = append(s.unsuccessfulMarkers, unsuccessfulMarker{Name: a.GetMarkerName(), failureMessage: newFailureMessage(f, id)})
 		}
 
 	case enumspb.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED:
@@ -462,16 +482,16 @@ func (s *summarizer) add(e *historypb.HistoryEvent) error {
 
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
 		a := e.GetWorkflowExecutionUpdateAcceptedEventAttributes()
-		if outcome := s.pop(id).outcome; a.GetAcceptedRequest() == nil {
-			s.unnamedUpdates[a.GetProtocolInstanceId()] = outcome
+		if end := s.pop(id); a.GetAcceptedRequest() == nil {
+			s.unnamedUpdates[a.GetProtocolInstanceId()] = end
 		} else {
-			s.countUpdate(a.GetAcceptedRequest().GetInput().GetName(), outcome)
+			s.countUpdate(a.GetAcceptedRequest().GetInput().GetName(), a.GetProtocolInstanceId(), end)
 		}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ADMITTED:
 		r := e.GetWorkflowExecutionUpdateAdmittedEventAttributes().GetRequest()
-		if outcome, ok := s.unnamedUpdates[r.GetMeta().GetUpdateId()]; ok {
+		if end, ok := s.unnamedUpdates[r.GetMeta().GetUpdateId()]; ok {
 			delete(s.unnamedUpdates, r.GetMeta().GetUpdateId())
-			s.countUpdate(r.GetInput().GetName(), outcome)
+			s.countUpdate(r.GetInput().GetName(), r.GetMeta().GetUpdateId(), end)
 		}
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED:
 		a := e.GetWorkflowExecutionUpdateCompletedEventAttributes()
@@ -479,7 +499,9 @@ func (s *summarizer) add(e *historypb.HistoryEvent) error {
 		if a.GetOutcome().GetFailure() != nil {
 			outcome = "failed"
 		}
-		s.end(a.GetAcceptedEventId(), id).outcome = outcome
+		end := s.end(a.GetAcceptedEventId(), id)
+		end.outcome = outcome
+		end.fail(a.GetOutcome().GetFailure(), id)
 
 	case enumspb.EVENT_TYPE_TIMER_STARTED:
 		a := e.GetTimerStartedEventAttributes()
@@ -505,14 +527,15 @@ func (s *summarizer) childEnded(child *commonpb.WorkflowExecution, outcome strin
 	s.unsuccessfulChildren = append(s.unsuccessfulChildren, unsuccessfulChild{WorkflowID: child.GetWorkflowId(), RunID: child.GetRunId(), Outcome: outcome, EventID: eventID})
 }
 
-func (s *summarizer) countUpdate(name, outcome string) {
+func (s *summarizer) countUpdate(name, updateID string, end ending) {
 	g := s.updates.at(name, updateCounts{Name: name})
 	g.Accepted++
-	switch outcome {
+	switch end.outcome {
 	case "completed":
 		g.Completed++
 	case "failed":
 		g.Failed++
+		s.unsuccessfulUpdates = append(s.unsuccessfulUpdates, unsuccessfulUpdate{Name: name, UpdateID: updateID, failureMessage: *end.failure})
 	}
 }
 
@@ -523,15 +546,19 @@ func (s *summarizer) summary(cuts *listCuts) historySummary {
 		c.Open = c.Initiated - c.StartFailed - c.Completed - c.Failed - c.TimedOut - c.Canceled - c.Terminated
 	}
 	out.Activities = s.activities.list(cuts, func(a *activityCounts) int { return a.Scheduled }, enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED)
-	out.Markers = s.markers.list(cuts, func(m *markerCounts) int { return m.Count }, enumspb.EVENT_TYPE_MARKER_RECORDED)
+	out.Markers = markers{
+		Names:        s.markers.list(cuts, func(m *markerCounts) int { return m.Count }, enumspb.EVENT_TYPE_MARKER_RECORDED),
+		Unsuccessful: cutList(s.unsuccessfulMarkers, cuts, enumspb.EVENT_TYPE_MARKER_RECORDED),
+	}
 	out.ChildWorkflows = childWorkflows{
 		Types: s.children.list(cuts, func(c *childWorkflowCounts) int { return c.Initiated }, enumspb.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED),
 		Unsuccessful: cutList(s.unsuccessfulChildren, cuts, enumspb.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_FAILED, enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED,
 			enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TIMED_OUT, enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_CANCELED, enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TERMINATED),
 	}
-	// Each unsuccessful Nexus operation was added when the event that scheduled it was read, so sort them newest first by
-	// the event that ended them.
+	// Each unsuccessful Nexus operation and update was added when the event that names it was read, so sort them newest
+	// first by the event that ended them.
 	slices.SortFunc(s.unsuccessfulNexus, func(a, b unsuccessfulNexusOperation) int { return cmp.Compare(b.EventID, a.EventID) })
+	slices.SortFunc(s.unsuccessfulUpdates, func(a, b unsuccessfulUpdate) int { return cmp.Compare(b.EventID, a.EventID) })
 	out.NexusOperations = nexusOperations{
 		Operations: s.nexus.list(cuts, func(n *nexusOperationCounts) int { return n.Scheduled }, enumspb.EVENT_TYPE_NEXUS_OPERATION_SCHEDULED),
 		Unsuccessful: cutList(s.unsuccessfulNexus, cuts, enumspb.EVENT_TYPE_NEXUS_OPERATION_FAILED, enumspb.EVENT_TYPE_NEXUS_OPERATION_CANCELED,
@@ -539,8 +566,12 @@ func (s *summarizer) summary(cuts *listCuts) historySummary {
 	}
 	out.SignalsReceived = s.signalsReceived.list(cuts, func(r *receivedSignalCounts) int { return r.Count }, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
 	out.SignalsSent = s.signalsSent.list(cuts, func(r *sentSignalCounts) int { return r.Initiated }, enumspb.EVENT_TYPE_SIGNAL_EXTERNAL_WORKFLOW_EXECUTION_INITIATED)
-	out.Updates = s.updates.list(cuts, func(u *updateCounts) int { return u.Accepted }, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
-		enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ADMITTED)
+	out.Updates = updates{
+		Names: s.updates.list(cuts, func(u *updateCounts) int { return u.Accepted }, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
+			enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ADMITTED),
+		Unsuccessful: cutList(s.unsuccessfulUpdates, cuts, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED,
+			enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ADMITTED),
+	}
 	out.Timers.Open = cutList(s.openTimers, cuts, enumspb.EVENT_TYPE_TIMER_STARTED)
 	return out
 }
@@ -597,12 +628,12 @@ func cutList[T any](items []T, cuts *listCuts, types ...enumspb.EventType) summa
 	return l
 }
 
-// decodeMessages replaces the message of each last failure in summary whose attributes the SDK encoded with the
+// decodeMessages replaces the message of each failureMessage in summary whose attributes the SDK encoded with the
 // message in those attributes when the target's payload_handling shows them as JSON, and otherwise sets
 // message_unavailable to why it does not.
 func decodeMessages(ctx context.Context, batch *payload.Batch, summary historySummary) error {
-	fields := map[*lastFailure]*payload.Field{}
-	add := func(f *lastFailure) {
+	fields := map[*failureMessage]*payload.Field{}
+	add := func(f *failureMessage) {
 		if f != nil && f.encoded != nil {
 			fields[f] = batch.Add(f.encoded)
 		}
@@ -610,11 +641,14 @@ func decodeMessages(ctx context.Context, batch *payload.Batch, summary historySu
 	for _, a := range summary.Activities.Items {
 		add(a.LastFailure)
 	}
-	for _, m := range summary.Markers.Items {
-		add(m.LastFailure)
+	for i := range summary.Markers.Unsuccessful.Items {
+		add(&summary.Markers.Unsuccessful.Items[i].failureMessage)
+	}
+	for i := range summary.Updates.Unsuccessful.Items {
+		add(&summary.Updates.Unsuccessful.Items[i].failureMessage)
 	}
 	if f := summary.WorkflowTasks.LastFailure; f != nil {
-		add(&f.lastFailure)
+		add(&f.failureMessage)
 	}
 	if err := batch.Render(ctx); err != nil {
 		return err

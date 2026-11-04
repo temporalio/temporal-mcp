@@ -45,9 +45,8 @@ serviceAccountName: ""
 # than the sleep plus config's shutdown_timeout.
 terminationGracePeriodSeconds: null
 # The server container's readiness probe, by default a GET of /healthz on the
-# mcp port, over HTTPS when config sets listen_tls. Set it to null for a config
-# without auth, which the probe can't reach; {} keeps the default, since Helm
-# merges maps.
+# mcp port, over HTTPS when config sets listen_tls. Set it to null to drop it;
+# {} keeps the default, since Helm merges maps.
 readinessProbe:
   httpGet:
     path: /healthz

@@ -127,10 +127,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		Name:        "check_connection",
 		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it decodes payloads with one.",
 		Annotations: readOnlyAnnotations,
-	}, []string{
-		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
-		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-	}, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, checkConnectionRPCs, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:         "get_workflows",
 		Description:  fmt.Sprintf("Get the current state of up to %d workflow runs: for each item of workflows, the run its run_id names, or the workflow's latest run if run_id is omitted. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut. result has an entry for each item of workflows, in the order given. An item that the Temporal server reports not found or invalid, such as an unknown workflow or a malformed run_id, gets an error in its entry and no run, while the other entries are unaffected. Any other error reading an item fails the whole call, and its message starts with the item's path, such as workflows[3].", maxListItems),
 		Annotations:  readOnlyAnnotations,

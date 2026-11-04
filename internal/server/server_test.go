@@ -24,6 +24,9 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
+	"google.golang.org/grpc"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -34,7 +37,7 @@ import (
 // connect writes the server's logs and audit records to out.
 func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +164,82 @@ func TestListAvailableTargets(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.StructuredContent, want) {
 		t.Errorf("structuredContent = %#v\nwant %#v", res.StructuredContent, want)
+	}
+}
+
+func TestTemporalCloudTargets(t *testing.T) {
+	closed := listen(t)
+	closed.Close()
+	namespace := func(name, description string, apiKeys bool) *namespacepb.Namespace {
+		return &namespacepb.Namespace{
+			Namespace: name + ".acct1",
+			Spec:      &namespacepb.NamespaceSpec{Name: name, Description: description, ApiKeyAuth: &namespacepb.ApiKeyAuthSpec{Enabled: apiKeys}},
+			Endpoints: &namespacepb.Endpoints{GrpcAddress: closed.Addr().String()},
+		}
+	}
+	fake := &fakeCloudService{pages: [][]*namespacepb.Namespace{
+		{namespace("payments", "Payments.", true)},
+		{namespace("orders", "", true), namespace("legacy", "Legacy.", false)},
+	}}
+	ln := listen(t)
+	gs := grpc.NewServer()
+	cloudservice.RegisterCloudServiceServer(gs, fake)
+	go gs.Serve(ln)
+	t.Cleanup(gs.Stop)
+
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath, func(apiKey string) ([]*namespacepb.Namespace, error) {
+		return temporal.ListNamespaces(t.Context(), apiKey, "test", "0", temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	if want := []string{" Bearer cloud-key", "1 Bearer cloud-key"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Errorf("GetNamespaces calls = %q, want %q", fake.calls, want)
+	}
+	if want := []bool{true, true}; !reflect.DeepEqual(fake.deadlines, want) {
+		t.Errorf("GetNamespaces calls with a deadline within temporal.CallTimeout = %v, want %v", fake.deadlines, want)
+	}
+	fake.mu.Unlock()
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session := serveTools(t, cfg, clients, t.Output())
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []any{
+		map[string]any{"name": "payments", "aliases": []any{}, "namespace": "payments.acct1", "description": "Payments.", "payload_handling": "omit"},
+		map[string]any{"name": "orders", "aliases": []any{}, "namespace": "orders.acct1", "description": "Temporal Cloud namespace orders.acct1", "payload_handling": "omit"},
+	}
+	if got := res.StructuredContent.(map[string]any)["result"].(map[string]any)["targets"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("targets = %#v\nwant %#v", got, want)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	CheckConnections(t.Context(), cfg, clients, newRenderer(t, cfg, logger), cfg.TemporalCloud.Added, logger)
+	var failed []string
+	for line := range strings.Lines(logs.String()) {
+		var rec struct{ Msg, Target, Stage, Reason string }
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		failed = append(failed, rec.Msg+": "+rec.Target+" "+rec.Stage+": "+rec.Reason)
+	}
+	if want := []string{"connection check failed: payments server: Unavailable: could not connect to the Temporal server", "connection check failed: orders server: Unavailable: could not connect to the Temporal server"}; !reflect.DeepEqual(failed, want) {
+		t.Errorf("log = %q, want %q", failed, want)
+	}
+	if strings.Contains(logs.String(), "cloud-key") {
+		t.Errorf("log contains the API key:\n%s", &logs)
 	}
 }
 
@@ -387,7 +466,7 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

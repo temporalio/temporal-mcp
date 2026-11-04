@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/net/http/httpguts"
 )
@@ -35,6 +38,8 @@ type Config struct {
 	// after SIGINT, SIGTERM or stdin closing before it cancels them. Zero means DefaultShutdownTimeout.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	Targets         []Target      `yaml:"targets"`
+	// TemporalCloud, when set, has Load add targets for the namespaces of a Temporal Cloud account.
+	TemporalCloud *TemporalCloud `yaml:"temporal_cloud"`
 	// Codecs are the codec servers that targets name in their codec field, by name.
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
@@ -141,6 +146,38 @@ type Target struct {
 	Codec string `yaml:"codec"`
 }
 
+// TemporalCloud is a Temporal Cloud account whose namespaces Load adds as
+// targets: those that accept API keys and that Namespaces selects.
+type TemporalCloud struct {
+	// APIKey says where to read the API key that lists the account's namespaces
+	// through the Cloud Ops API, and that each of their targets connects with.
+	APIKey     *Secret         `yaml:"api_key"`
+	Namespaces CloudNamespaces `yaml:"namespaces"`
+	// Added are the names of the targets that Load added for the account's namespaces.
+	Added []string `yaml:"-"`
+	// Report says how many namespaces Load listed, the target it added for each,
+	// and why it added none for the others, one line each.
+	Report []string `yaml:"-"`
+}
+
+// CloudNamespaces says which of a Temporal Cloud account's namespaces get a
+// target, by their names without the account ID, and how those targets show
+// payloads.
+type CloudNamespaces struct {
+	// Include are path.Match patterns, matched ignoring case; a namespace whose
+	// name matches none of them gets no target. Nil means every namespace.
+	Include []string `yaml:"include"`
+	// Exclude are path.Match patterns, matched ignoring case; a namespace whose
+	// name matches one of them gets no target.
+	Exclude []string `yaml:"exclude"`
+	// PayloadHandling is the PayloadHandling of each target, PayloadOmit or
+	// PayloadPassthrough. Empty means PayloadOmit.
+	PayloadHandling string `yaml:"payload_handling"`
+}
+
+// ListNamespacesFunc returns the namespaces that the Temporal Cloud Ops API lists for apiKey.
+type ListNamespacesFunc func(apiKey string) ([]*namespacepb.Namespace, error)
+
 // The values of Target.PayloadHandling.
 const (
 	// PayloadOmit leaves each payload's data out of tool responses, showing only its
@@ -225,14 +262,17 @@ func (s *Secret) Read() (string, error) {
 }
 
 // Load reads the YAML file at path and returns the validated configuration for
-// serving MCP over HTTP.
-func Load(path string) (*Config, error) {
-	return load(path, parse)
+// serving MCP over HTTP. If the file has a temporal_cloud section, Load first
+// adds targets for the account's namespaces that list returns, and says what it
+// did with each in TemporalCloud.Report, whose lines also end its error if the
+// result is invalid.
+func Load(path string, list ListNamespacesFunc) (*Config, error) {
+	return load(path, func(data []byte) (*Config, error) { return parse(data, list) })
 }
 
 // LoadStdio reads the YAML file at path and returns the validated configuration
 // for serving MCP over stdin and stdout, which must not have the sections that
-// configure HTTP.
+// configure HTTP or a temporal_cloud section.
 func LoadStdio(path string) (*Config, error) {
 	return load(path, parseStdio)
 }
@@ -240,8 +280,8 @@ func LoadStdio(path string) (*Config, error) {
 // CheckSecrets reads every secret in c once: each target's api_key and each
 // codec's authorization_header. It fails if an environment variable is unset or
 // empty, or a file cannot be read or is empty, and reports every such secret.
-// Load and LoadStdio read no secrets, so the server calls CheckSecrets after
-// loading its config.
+// Load reads only temporal_cloud's api_key, and LoadStdio no secret, so the
+// server calls CheckSecrets after loading its config.
 func (c *Config) CheckSecrets() error {
 	var errs []error
 	for i, t := range c.Targets {
@@ -269,17 +309,18 @@ func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 	return parse(data)
 }
 
-func parse(data []byte) (*Config, error) {
-	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+func parse(data []byte, list ListNamespacesFunc) (*Config, error) {
+	return decode(data, list, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
 }
 
 func parseStdio(data []byte) (*Config, error) {
-	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
+	return decode(data, nil, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
 }
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
-// no value, except a profile's tools and tools_deny, which decode reads from the
-// authorization node. A missing key's node has Kind 0.
+// no value, except a profile's tools and tools_deny and temporal_cloud's
+// namespaces include, which decode reads from the authorization and
+// temporal_cloud nodes. A missing key's node has Kind 0.
 type keyNodes struct {
 	Listen        yaml.Node `yaml:"listen"`
 	ListenTLS     yaml.Node `yaml:"listen_tls"`
@@ -289,14 +330,16 @@ type keyNodes struct {
 		APIKey yaml.Node `yaml:"api_key"`
 		TLS    yaml.Node `yaml:"tls"`
 	} `yaml:"targets"`
-	Codecs map[string]struct {
+	TemporalCloud yaml.Node `yaml:"temporal_cloud"`
+	Codecs        map[string]struct {
 		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
 		PassthroughHeaders  yaml.Node `yaml:"passthrough_headers"`
 	} `yaml:"codecs"`
 }
 
-// decode decodes data and validates it with validate and validateTargets.
-func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
+// decode decodes data, adds the targets of its temporal_cloud section if list
+// is not nil, and validates the result with validate and validateTargets.
+func decode(data []byte, list ListNamespacesFunc, validate func(*Config, *keyNodes) error) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var cfg Config
@@ -318,6 +361,7 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 	emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
 	emptyIfPresent(&cfg.Auth, keys.Auth)
 	emptyIfPresent(&cfg.Authorization, keys.Authorization)
+	emptyIfPresent(&cfg.TemporalCloud, keys.TemporalCloud)
 	var authorization struct {
 		Profiles map[string]struct {
 			Tools     yaml.Node `yaml:"tools"`
@@ -332,6 +376,17 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		emptyListIfPresent(&p.Tools, k.Tools)
 		emptyListIfPresent(&p.ToolsDeny, k.ToolsDeny)
 		cfg.Authorization.Profiles[name] = p
+	}
+	if cfg.TemporalCloud != nil {
+		var temporalCloud struct {
+			Namespaces struct {
+				Include yaml.Node `yaml:"include"`
+			} `yaml:"namespaces"`
+		}
+		if err := keys.TemporalCloud.Decode(&temporalCloud); err != nil {
+			return nil, err
+		}
+		emptyListIfPresent(&cfg.TemporalCloud.Namespaces.Include, temporalCloud.Namespaces.Include)
 	}
 	for i, t := range keys.Targets {
 		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
@@ -352,11 +407,23 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		}
 		cfg.Codecs[name] = codec
 	}
+	if cfg.TemporalCloud != nil && list != nil {
+		if err := cfg.addCloudTargets(list); err != nil {
+			return nil, err
+		}
+	}
 	var shutdownErr error
 	if cfg.ShutdownTimeout < 0 {
 		shutdownErr = fmt.Errorf("shutdown_timeout: %s is negative", cfg.ShutdownTimeout)
 	}
 	if err := errors.Join(validate(&cfg, &keys), shutdownErr, cfg.validateTargets()); err != nil {
+		if cfg.TemporalCloud != nil && len(cfg.TemporalCloud.Report) > 0 {
+			errs := []error{err}
+			for _, line := range cfg.TemporalCloud.Report {
+				errs = append(errs, errors.New(line))
+			}
+			err = errors.Join(errs...)
+		}
 		return nil, err
 	}
 	return &cfg, nil
@@ -394,15 +461,15 @@ func emptyListIfPresent[T any](list *[]T, key yaml.Node) {
 	}
 }
 
-// httpOnlyKeys rejects the sections that configure HTTP, and the codecs'
-// passthrough_headers, which copy headers of HTTP requests; serving MCP over
-// stdio has no use for them.
+// httpOnlyKeys rejects the sections that configure HTTP, temporal_cloud, and
+// the codecs' passthrough_headers, which copy headers of HTTP requests; serving
+// MCP over stdio supports none of them.
 func httpOnlyKeys(k *keyNodes) error {
 	var keys []string
 	for _, key := range []struct {
 		name string
 		node yaml.Node
-	}{{"listen", k.Listen}, {"listen_tls", k.ListenTLS}, {"auth", k.Auth}, {"authorization", k.Authorization}} {
+	}{{"listen", k.Listen}, {"listen_tls", k.ListenTLS}, {"auth", k.Auth}, {"authorization", k.Authorization}, {"temporal_cloud", k.TemporalCloud}} {
 		if key.node.Kind != 0 {
 			keys = append(keys, key.name)
 		}
@@ -523,6 +590,99 @@ func (c *Config) validateTargets() error {
 		errs = append(errs, codec.validatePassthroughHeaders(label+": passthrough_headers")...)
 	}
 	return errors.Join(errs...)
+}
+
+// addCloudTargets adds the targets of the temporal_cloud section and records each listed namespace's outcome in TemporalCloud.Report.
+func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
+	tc := c.TemporalCloud
+	if err := tc.validate(); err != nil {
+		return err
+	}
+	key, err := tc.APIKey.Read()
+	if err != nil {
+		return fmt.Errorf("temporal_cloud: api_key: %w", err)
+	}
+	namespaces, err := list(key)
+	if err != nil {
+		return fmt.Errorf("temporal_cloud: listing the account's namespaces: %w", err)
+	}
+	taken := func(name string) bool {
+		_, ok := c.Lookup(name)
+		return ok
+	}
+	tc.Report = append(tc.Report, fmt.Sprintf("temporal_cloud: namespaces listed by the API key: %d", len(namespaces)))
+	for _, ns := range namespaces {
+		id, name := ns.GetNamespace(), ns.GetSpec().GetName()
+		var reason string
+		switch i := slices.IndexFunc(c.Targets, func(t Target) bool { return t.Namespace == id }); {
+		case i >= 0:
+			reason = fmt.Sprintf("target %q has this namespace", c.Targets[i].Name)
+		case !tc.Namespaces.selects(name):
+			reason = "temporal_cloud's include and exclude patterns do not select it"
+		case !ns.GetSpec().GetApiKeyAuth().GetEnabled() || ns.GetEndpoints().GetGrpcAddress() == "":
+			reason = "it does not accept API keys"
+		case taken(name) && taken(id):
+			reason = "other targets already have its name and its namespace ID as names or aliases"
+		}
+		if reason != "" {
+			tc.Report = append(tc.Report, fmt.Sprintf("temporal_cloud: namespace %s: added no target, because %s", id, reason))
+			continue
+		}
+		if taken(name) {
+			name = id
+		}
+		c.Targets = append(c.Targets, Target{
+			Name:            name,
+			Description:     cmp.Or(strings.TrimSpace(ns.GetSpec().GetDescription()), "Temporal Cloud namespace "+id),
+			Address:         ns.GetEndpoints().GetGrpcAddress(),
+			Namespace:       id,
+			APIKey:          tc.APIKey,
+			PayloadHandling: tc.Namespaces.PayloadHandling,
+		})
+		tc.Added = append(tc.Added, name)
+		tc.Report = append(tc.Report, fmt.Sprintf("temporal_cloud: namespace %s: added target %q", id, name))
+	}
+	return nil
+}
+
+func (tc *TemporalCloud) validate() error {
+	var errs []error
+	if tc.APIKey == nil {
+		errs = append(errs, errors.New("temporal_cloud: api_key is required"))
+	} else if err := validateSecret("temporal_cloud: api_key", tc.APIKey); err != nil {
+		errs = append(errs, err)
+	}
+	if tc.Namespaces.Include != nil && len(tc.Namespaces.Include) == 0 {
+		errs = append(errs, errors.New("temporal_cloud: namespaces: include: at least one pattern is required; leave include out to select every namespace"))
+	}
+	for _, f := range []struct {
+		name     string
+		patterns []string
+	}{{"include", tc.Namespaces.Include}, {"exclude", tc.Namespaces.Exclude}} {
+		for i, p := range f.patterns {
+			if _, err := path.Match(p, ""); err != nil {
+				errs = append(errs, fmt.Errorf("temporal_cloud: namespaces: %s[%d]: %q is not a valid pattern", f.name, i, p))
+			}
+		}
+	}
+	switch tc.Namespaces.PayloadHandling {
+	case "", PayloadOmit, PayloadPassthrough:
+	default:
+		errs = append(errs, fmt.Errorf("temporal_cloud: namespaces: payload_handling: %q is not one of %s or %s", tc.Namespaces.PayloadHandling, PayloadOmit, PayloadPassthrough))
+	}
+	return errors.Join(errs...)
+}
+
+// selects reports whether include and exclude select the namespace named name, without the account ID, ignoring case.
+func (n *CloudNamespaces) selects(name string) bool {
+	name = strings.ToLower(name)
+	matches := func(patterns []string) bool {
+		return slices.ContainsFunc(patterns, func(p string) bool {
+			ok, _ := path.Match(strings.ToLower(p), name)
+			return ok
+		})
+	}
+	return (len(n.Include) == 0 || matches(n.Include)) && !matches(n.Exclude)
 }
 
 // reservedHeaders are the headers that the server or HTTP sets on a codec request

@@ -69,6 +69,11 @@ These are independent trust relationships:
    in protected paths on the host and use least-privileged credentials. For
    Temporal Cloud, prefer an API key from a read-only service account when API
    keys are available; use mTLS when the namespace does not accept API keys.
+   Instead of listing a Temporal Cloud account's namespaces, a
+   [`temporal_cloud`](config.md#temporal_cloud) section can add a target for
+   each one that accepts API keys. The server then lists them through the
+   Temporal Cloud Ops API at startup, so it must be able to reach that API,
+   and it does not start if it cannot list them.
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
@@ -141,7 +146,9 @@ and restarting the process.
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart.
+identity provider settings, profiles, or rules require a restart. It also lists
+the Temporal Cloud namespaces that `temporal_cloud` adds as targets only at
+startup, so a namespace created later needs a restart to become a target.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The

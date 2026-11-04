@@ -27,7 +27,7 @@ func TestExamplesLoad(t *testing.T) {
 			continue
 		}
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			load := config.Load
+			load := func(path string) (*config.Config, error) { return config.Load(path, nil) }
 			if strings.HasPrefix(filepath.Base(path), "stdio") {
 				load = config.LoadStdio
 			}

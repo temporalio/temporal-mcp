@@ -5,7 +5,8 @@
 ## Config file layout
 
 ```yaml
-targets:
+# Required unless temporal_cloud adds a target.
+[ targets:
   - name: <string>
     [ aliases: [ <string>, ... ] ]
     description: <string>
@@ -16,7 +17,15 @@ targets:
         cert_file: <filename>
         key_file: <filename> ]
     [ payload_handling: <string> | default = omit ]
-    [ codec: <string> ]
+    [ codec: <string> ] ]
+
+# HTTP mode only.
+[ temporal_cloud:
+    api_key: <secret>
+    [ namespaces:
+        [ include: [ <glob>, ... ] | default = every namespace ]
+        [ exclude: [ <glob>, ... ] ]
+        [ payload_handling: <string> | default = omit ] ] ]
 
 [ codecs:
     <string>:
@@ -66,7 +75,7 @@ A value in `< >` is a placeholder for a value of that type, defined under [Types
 
 ## `targets`
 
-Required in both modes, with at least one entry. Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace, description and `payload_handling`.
+The server needs at least one target: in `--stdio` mode in `targets`, and in HTTP mode in `targets` or added by [`temporal_cloud`](#temporal_cloud). Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace, description and `payload_handling`.
 
 - `name` (string, required): The name agents and authorization profiles use for the target. Names must be unique and are compared exactly, so `prod` and `Prod` are two different targets.
 - `aliases` (list of strings, optional): Other names agents may use for the target. A target name in a tool call matches an alias ignoring case, but a `name` only exactly. An alias must not be empty, and must differ from every name and every other alias ignoring case, including its own target's name.
@@ -82,9 +91,25 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 
 With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
-The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use. On Temporal Cloud, a namespace that accepts only client certificates has no read-only option until you turn on API keys for it.
+The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes for a target, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use. On Temporal Cloud, a namespace that accepts only client certificates has no read-only option until you turn on API keys for it.
 
 With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection.
+
+## `temporal_cloud`
+
+Optional, HTTP mode only. With this section, the server adds a target for each namespace of a Temporal Cloud account, so that you need not list each one in `targets`. When it starts, it lists the account's namespaces through the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443`, and adds a target for each one that accepts API keys and that `namespaces` selects. It does not start if it cannot list them. It lists them only at startup, so a namespace created later gets a target when the server restarts. `temporal_cloud:` with no value is an error.
+
+- `api_key` (secret, required): Where to read the API key that the server lists the namespaces with, which is also the `api_key` of each added target. The key needs Read on every namespace the server should read.
+- `namespaces` (optional): Which namespaces get a target, by their name without the account ID, such as `payments` for the namespace ID `payments.a1b2c`, and how those targets show payloads.
+  - `include` (list of globs, default every namespace): A namespace gets a target only if its name matches one of these, ignoring case. `include:` with no value or `[]` is an error, not the same as leaving it out.
+  - `exclude` (list of globs, optional): A namespace whose name matches one of these, ignoring case, gets no target, even if it matches `include`.
+  - `payload_handling` (string, default `omit`): The `payload_handling` of each added target, `omit` or `passthrough`.
+
+Each added target's `namespace` is the namespace ID, its `address` is the namespace's API key endpoint, and its `description` is the namespace's description in Temporal Cloud, or `Temporal Cloud namespace <namespace ID>` if it has none. Its `name` is the namespace's name, such as `payments`, unless another target already has that name, or an alias equal to it ignoring case, and then it is the namespace ID, such as `payments.a1b2c`. A namespace whose ID is taken too gets no target. Authorization profiles name added targets by these names, like any other target.
+
+A target in `targets` whose `namespace` is the ID of one of the account's namespaces replaces that namespace's added target. So to read a namespace differently, for example to decode its payloads with a codec or to give it another name, add it to `targets` with its namespace ID. A namespace that accepts only client certificates gets no target, so add it to `targets` with `tls`.
+
+After listing the namespaces, the server logs how many the API key listed, the target it added for each namespace, and why it added none for the others: a target in `targets` has the namespace, `include` and `exclude` do not select it, it does not accept API keys, or its name and ID are both taken. If the config is then invalid, for example because a profile names a namespace that got no target, the error the server stops with ends with the same lines. At startup it also runs `check_connection` on each added target, in the background so that it does not delay serving, and logs each stage that fails.
 
 ## Payloads and `codecs`
 
@@ -167,7 +192,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization`, `temporal_cloud` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 
@@ -179,6 +204,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
+- `<glob>`: A pattern that must match a whole name, in which `*` matches any run of characters, `?` any one character, `[...]` one character from a set or range such as `[a-c]`, and `\` escapes the character after it, as Go's [`path.Match`](https://pkg.go.dev/path#Match) defines. A malformed pattern, such as `[` alone, is an error.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.

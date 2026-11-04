@@ -57,10 +57,10 @@ These are independent trust relationships:
 ## Central deployment
 
 1. **[Install Temporal MCP](../README.md#install).** Download the release for the
-   server host, install its Helm chart on Kubernetes, or build it from source.
-   Run it on an internal host that can reach the Temporal namespaces and the
-   identity provider. MCP clients, typically running on employee laptops, must
-   be able to reach its HTTPS endpoint.
+   server host, or build it from source. Run it on an internal host that can
+   reach the Temporal namespaces and the identity provider. MCP clients,
+   typically running on employee laptops, must be able to reach its HTTPS
+   endpoint. On Kubernetes, the Helm chart in step 6 installs it instead.
 2. **Expose the MCP endpoint over HTTPS.** Choose an internal hostname and
    configure TLS in Temporal MCP or an approved colocated proxy. Do not expose
    plain HTTP on the network.
@@ -81,9 +81,16 @@ These are independent trust relationships:
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
-   Start it with `temporal-mcp --config <path>`, or pass the same file to the
-   Helm chart with `--set-file config=<path>`, and capture the audit records and
-   error logs.
+   Start it with `temporal-mcp --config <path>` and capture the audit records and
+   error logs. On Kubernetes, install the release's Helm chart with the same
+   file and a values file that maps Kubernetes Secrets you create to the
+   environment variables and files your config names, as
+   [examples/helm-values.yaml](../examples/helm-values.yaml) does for the
+   [API-key example](../examples/http-auth-config.yaml):
+
+   ```sh
+   helm install temporal-mcp https://github.com/temporalio/temporal-mcp/releases/download/v<version>/temporal-mcp-<version>.tgz -f values.yaml --set-file config=<path>
+   ```
 7. **Test from an MCP client.** Sign in as a user with the intended access, then
    call `list_available_targets`, `check_connection`, and one read tool.
 8. **Verify access.** Confirm that users see the tools and targets assigned to

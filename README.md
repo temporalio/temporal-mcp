@@ -20,11 +20,7 @@ curl -sSfL https://temporal.download/mcp.sh | sh
 temporal-mcp --version # checks the install
 ```
 
-Each release is also published as the container image `temporalio/temporal-mcp:<version>` on [Docker Hub](https://hub.docker.com/r/temporalio/temporal-mcp), and comes with a Helm chart that runs it on Kubernetes. To install the chart, write a values file like [examples/helm-values.yaml](examples/helm-values.yaml), which gives the server your config's API keys and certificates from Kubernetes Secrets, then pass it with the same `config.yaml` you'd run `temporal-mcp` with:
-
-```sh
-helm install temporal-mcp https://github.com/temporalio/temporal-mcp/releases/download/v<version>/temporal-mcp-<version>.tgz -f values.yaml --set-file config=config.yaml
-```
+Each release is also published as the container image `temporalio/temporal-mcp:<version>` on [Docker Hub](https://hub.docker.com/r/temporalio/temporal-mcp).
 
 ### Start a dev server
 

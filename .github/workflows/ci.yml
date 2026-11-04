@@ -25,11 +25,19 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go test -race ./...
 
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: helm lint --strict helm/temporal-mcp -f examples/helm-values.yaml
+      - run: helm template temporal-mcp helm/temporal-mcp -f examples/helm-values.yaml
+
   build-and-test:
-    needs: test
+    needs: [test, helm]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: test "$RESULT" = success
+      - run: test "$TEST" = success && test "$HELM" = success
         env:
-          RESULT: ${{ needs.test.result }}
+          TEST: ${{ needs.test.result }}
+          HELM: ${{ needs.helm.result }}

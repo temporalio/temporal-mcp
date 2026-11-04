@@ -57,10 +57,10 @@ These are independent trust relationships:
 ## Central deployment
 
 1. **[Install Temporal MCP](../README.md#install).** Download the release for the
-   server host, or build it from source. Run it on an internal host that can
-   reach the Temporal namespaces and the identity provider. MCP clients,
-   typically running on employee laptops, must be able to reach its HTTPS
-   endpoint.
+   server host, install its Helm chart on Kubernetes, or build it from source.
+   Run it on an internal host that can reach the Temporal namespaces and the
+   identity provider. MCP clients, typically running on employee laptops, must
+   be able to reach its HTTPS endpoint.
 2. **Expose the MCP endpoint over HTTPS.** Choose an internal hostname and
    configure TLS in Temporal MCP or an approved colocated proxy. Do not expose
    plain HTTP on the network.
@@ -81,8 +81,8 @@ These are independent trust relationships:
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
-   Start it with `temporal-mcp --config <path>` and capture the audit records and
-   error logs.
+   Start it with `temporal-mcp --config <path>`, or put the YAML in the Helm
+   values file's `config`, and capture the audit records and error logs.
 7. **Test from an MCP client.** Sign in as a user with the intended access, then
    call `list_available_targets`, `check_connection`, and one read tool.
 8. **Verify access.** Confirm that users see the tools and targets assigned to

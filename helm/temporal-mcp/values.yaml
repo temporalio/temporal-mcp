@@ -1,0 +1,64 @@
+# Required. The server's config file, as YAML text. See examples/helm-values.yaml
+# and docs/config.md in https://github.com/temporalio/temporal-mcp. Without auth,
+# the server listens only on loopback, so only kubectl port-forward reaches it.
+config: ""
+
+image:
+  # The image repository.
+  repository: temporalio/temporal-mcp
+  # The image tag, by default the version of the release the chart comes from.
+  tag: ""
+  # When to pull the image.
+  pullPolicy: IfNotPresent
+# Secrets with the credentials for pulling the image.
+imagePullSecrets: []
+
+# The number of server pods.
+replicaCount: 1
+
+# Environment variables of the server, such as the API keys that config reads
+# with env:, taken from Secrets.
+env: []
+# Sources of environment variables, such as a whole Secret.
+envFrom: []
+# Volumes of the files that config names, such as certificates from Secrets.
+volumes: []
+# Where the server's container mounts the volumes.
+volumeMounts: []
+
+service:
+  # The Service type.
+  type: ClusterIP
+  # The Service port, by default the port of config's listen address.
+  port: null
+  # Annotations of the Service, such as one that makes a LoadBalancer internal.
+  annotations: {}
+
+# Annotations of the server pods.
+podAnnotations: {}
+# The service account of the server pods, such as one a secret-store CSI driver
+# authenticates as.
+serviceAccountName: ""
+# How long Kubernetes waits before SIGKILL, 30 seconds if unset, counting any
+# preStop hook, which runs before SIGTERM. Keep config's shutdown_timeout at
+# least a second shorter than the time left after SIGTERM.
+terminationGracePeriodSeconds: null
+# The server container's lifecycle hooks, such as a preStop.sleep that delays SIGTERM.
+lifecycle: {}
+# The pod security context, which fits the image's non-root user.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+# The server container's security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+# The server container's resource requests and limits.
+resources: {}
+# Scheduling constraints of the server pods.
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -3,9 +3,12 @@ package main
 import (
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/server"
@@ -25,8 +28,11 @@ func TestExamplesLoad(t *testing.T) {
 	for _, path := range paths {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			load := config.Load
-			if strings.HasPrefix(filepath.Base(path), "stdio") {
+			switch base := filepath.Base(path); {
+			case strings.HasPrefix(base, "stdio"):
 				load = config.LoadStdio
+			case base == "helm-values.yaml":
+				path = helmConfig(t, path)
 			}
 			cfg, err := load(path)
 			if err != nil {
@@ -38,4 +44,20 @@ func TestExamplesLoad(t *testing.T) {
 			}
 		})
 	}
+}
+
+func helmConfig(t *testing.T, path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values struct{ Config string }
+	if err := yaml.Unmarshal(data, &values); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(values.Config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

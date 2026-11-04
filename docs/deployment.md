@@ -63,7 +63,8 @@ These are independent trust relationships:
    endpoint.
 2. **Expose the MCP endpoint over HTTPS.** Choose an internal hostname and
    configure TLS in Temporal MCP or an approved colocated proxy. Do not expose
-   plain HTTP on the network.
+   plain HTTP on the network. A load balancer's health check can use
+   `/healthz`, which answers 200 without a token.
 3. **Add the Temporal targets.** For each namespace, configure its address,
    namespace name, and API key or mTLS certificate. Keep file-backed credentials
    in protected paths on the host and use least-privileged credentials. For
@@ -115,7 +116,9 @@ test and verify the deployment.
    ClusterIP Service on the port of the config's `listen` address. Reach it
    over HTTPS through the cluster's approved internal path, such as an internal
    load balancer (set `service.type` and `service.annotations`) or the
-   cluster's ingress. Do not expose plain HTTP on the network.
+   cluster's ingress. Do not expose plain HTTP on the network. A load balancer
+   or ingress health check can use `/healthz`, which answers 200 without a
+   token.
 6. **Change the config.** Run `helm upgrade` with the same arguments and the
    edited file. The pods restart with it.
 

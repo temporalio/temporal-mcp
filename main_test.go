@@ -198,6 +198,41 @@ func TestHTTPS(t *testing.T) {
 	}
 }
 
+func TestHealthz(t *testing.T) {
+	bin := buildBinary(t)
+	tests := []struct{ name, config string }{
+		{"auth", "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
+			"authorization:\n  profiles: {p: {targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n"},
+		{"without auth", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			auditLog, configPath := filepath.Join(dir, "audit.log"), filepath.Join(dir, "config.yaml")
+			config := fmt.Sprintf("listen: 127.0.0.1:0\naudit_log_file: %q\n", auditLog) + tt.config +
+				"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.Get(strings.TrimSuffix(startServer(t, bin, configPath, nil), "/mcp") + "/healthz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+				t.Errorf("GET /healthz = %d %q, want 200 ok", resp.StatusCode, body)
+			}
+			if data, err := os.ReadFile(auditLog); err != nil || len(data) > 0 {
+				t.Errorf("audit log = %q (%v), want no records", data, err)
+			}
+		})
+	}
+}
+
 func TestLogFiles(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

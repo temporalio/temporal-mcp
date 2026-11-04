@@ -82,13 +82,12 @@ These are independent trust relationships:
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
    Start it with `temporal-mcp --config <path>` and capture the audit records and
-   error logs. On Kubernetes, leave `audit_log_file` and `error_log_file` unset,
-   so the audit records go to stdout and the error logs to stderr, which
-   Kubernetes collects from the container. Install the release's Helm chart with
-   the same file and a values file that maps Kubernetes Secrets you create to the
-   environment variables and files your config names, as
-   [examples/helm-values.yaml](../examples/helm-values.yaml) does for the
-   [API-key example](../examples/http-auth-config.yaml):
+   error logs. On Kubernetes, start from the
+   [API-key example](../examples/http-auth-config.yaml) instead, and install the
+   release's Helm chart with it and a values file like
+   [examples/helm-values.yaml](../examples/helm-values.yaml), which maps
+   Kubernetes Secrets you create to the environment variables and files that
+   config names:
 
    ```sh
    helm install temporal-mcp https://github.com/temporalio/temporal-mcp/releases/download/v<version>/temporal-mcp-<version>.tgz -f values.yaml --set-file config=<path>

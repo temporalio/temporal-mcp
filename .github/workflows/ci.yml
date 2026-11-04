@@ -29,8 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: helm lint --strict helm/temporal-mcp -f examples/helm-values.yaml
-      - run: helm template temporal-mcp helm/temporal-mcp -f examples/helm-values.yaml
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1
+      - run: helm lint --strict -f examples/helm-values.yaml --set-file config=examples/http-auth-config.yaml helm/temporal-mcp
 
   build-and-test:
     needs: [test, helm]

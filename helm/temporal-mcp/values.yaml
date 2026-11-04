@@ -1,6 +1,7 @@
-# Required. The server's config file, as YAML text. See examples/helm-values.yaml
-# and docs/config.md in https://github.com/temporalio/temporal-mcp. Without auth,
-# the server listens only on loopback, so only kubectl port-forward reaches it.
+# Required. The server's config file, as YAML text, usually passed with
+# --set-file config=config.yaml. See docs/config.md in
+# https://github.com/temporalio/temporal-mcp. Without auth, the server listens
+# only on loopback, so only kubectl port-forward reaches it.
 config: ""
 
 image:
@@ -39,12 +40,17 @@ podAnnotations: {}
 # The service account of the server pods, such as one a secret-store CSI driver
 # authenticates as.
 serviceAccountName: ""
-# How long Kubernetes waits before SIGKILL, 30 seconds if unset, counting any
-# preStop hook, which runs before SIGTERM. Keep config's shutdown_timeout at
-# least a second shorter than the time left after SIGTERM.
+# How long Kubernetes waits before SIGKILL, 30 seconds if unset, counting the
+# preStop sleep, which runs before SIGTERM. Keep it at least a second longer
+# than the sleep plus config's shutdown_timeout.
 terminationGracePeriodSeconds: null
-# The server container's lifecycle hooks, such as a preStop.sleep that delays SIGTERM.
-lifecycle: {}
+# The server container's lifecycle hooks. The preStop sleep, which needs
+# Kubernetes 1.30 or later, delays SIGTERM while the pod leaves the Service's
+# endpoints. Set lifecycle to null to drop it; {} keeps it, since Helm merges maps.
+lifecycle:
+  preStop:
+    sleep:
+      seconds: 15
 # The pod security context, which fits the image's non-root user.
 podSecurityContext:
   runAsNonRoot: true

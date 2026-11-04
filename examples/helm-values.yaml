@@ -1,38 +1,12 @@
-# Helm values for running the server on Kubernetes, with HTTPS and auth. The
-# target's API key and the TLS certificate come from Secrets you create. See
-# docs/config.md.
-config: |
-  listen: 0.0.0.0:8443
-  listen_tls:
-    cert_file: /etc/temporal-mcp/tls.crt
-    key_file: /etc/temporal-mcp/tls.key
+# Helm values that go with examples/http-auth-config.yaml, passed as the config
+# with --set-file config=examples/http-auth-config.yaml. The config's API keys
+# and TLS certificate come from Secrets you create.
 
-  auth:
-    resource: https://temporal-mcp.example.com/mcp
-    issuer: https://login.example.com/
-    audience: https://temporal-mcp.example.com/mcp
-    required_scopes: [temporal.read]
-
-  authorization:
-    profiles:
-      payments-dev:
-        targets: [payments-staging]
-    rules:
-      - {claim_name: groups, claim_value: payments-dev, profile: payments-dev}
-
-  targets:
-    - name: payments-staging
-      description: Staging namespace of the payments service.
-      address: payments-staging.a1b2c.tmprl.cloud:7233
-      namespace: payments-staging.a1b2c
-      api_key: {env: PAYMENTS_STAGING_API_KEY}
-
-env:
-  - name: PAYMENTS_STAGING_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: payments-staging-api-key
-        key: api-key
+# A Secret whose keys are PAYMENTS_PROD_API_KEY, PAYMENTS_STAGING_API_KEY and
+# ORDERS_PROD_API_KEY, the variables the config reads its API keys from.
+envFrom:
+  - secretRef:
+      name: temporal-mcp-api-keys
 
 # kubectl create secret tls makes a Secret holding tls.crt and tls.key, the
 # files listen_tls names.

@@ -81,8 +81,9 @@ These are independent trust relationships:
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
-   Start it with `temporal-mcp --config <path>`, or put the YAML in the Helm
-   values file's `config`, and capture the audit records and error logs.
+   Start it with `temporal-mcp --config <path>`, or pass the same file to the
+   Helm chart with `--set-file config=<path>`, and capture the audit records and
+   error logs.
 7. **Test from an MCP client.** Sign in as a user with the intended access, then
    call `list_available_targets`, `check_connection`, and one read tool.
 8. **Verify access.** Confirm that users see the tools and targets assigned to

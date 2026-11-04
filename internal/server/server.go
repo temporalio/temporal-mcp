@@ -212,9 +212,10 @@ func NewServer(ctx, subscriptions context.Context, name, version string, cfg *co
 // over the MCP streamable HTTP transport at /mcp. With auth configured, /mcp
 // requires a valid access token, logger gets the reason for each rejected token
 // or verification failure, and the protected resource metadata is served at the
-// path the token challenge points to.
+// path the token challenge points to. GET /healthz gets 200 ok, without a token.
 func NewMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
 	handler := newHandler(s, cfg)
 	if cfg.Auth != nil {
 		metadataPath, metadata := identity.MetadataPath(cfg.Auth.Resource), identity.MetadataHandler(cfg.Auth)

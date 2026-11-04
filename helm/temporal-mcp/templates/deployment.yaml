@@ -40,7 +40,7 @@ spec:
           ports:
             - name: mcp
               containerPort: {{ include "temporal-mcp.listenPort" . }}
-          {{- with .Values.readinessProbe }}
+          {{- with and (hasKey (fromYaml .Values.config) "auth") .Values.readinessProbe }}
           {{- with .httpGet }}
           {{- $_ := set . "scheme" (ternary "HTTPS" "HTTP" (hasKey (fromYaml $.Values.config) "listen_tls")) }}
           {{- end }}

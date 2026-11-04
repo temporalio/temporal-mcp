@@ -44,9 +44,9 @@ serviceAccountName: ""
 # preStop sleep, which runs before SIGTERM. Keep it at least a second longer
 # than the sleep plus config's shutdown_timeout.
 terminationGracePeriodSeconds: null
-# The server container's readiness probe, by default a GET of /healthz on the
-# mcp port, over HTTPS when config sets listen_tls. Set it to null to drop it;
-# {} keeps the default, since Helm merges maps.
+# The server container's readiness probe, used when config sets auth: by default
+# a GET of /healthz on the mcp port, over HTTPS when config sets listen_tls. Set
+# it to null to drop it; {} keeps the default, since Helm merges maps.
 readinessProbe:
   httpGet:
     path: /healthz

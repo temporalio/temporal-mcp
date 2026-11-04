@@ -1,0 +1,7 @@
+apiVersion: v2
+name: temporal-mcp
+description: A read-only MCP server that gives AI agents access to Temporal namespaces.
+type: application
+# Each release sets version and appVersion to its tag without its v.
+version: 0.0.0
+appVersion: 0.0.0

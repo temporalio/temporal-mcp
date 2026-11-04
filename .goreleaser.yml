@@ -2,6 +2,11 @@ version: 2
 
 project_name: temporal-mcp
 
+before:
+  hooks:
+    # Into bin, since dist must be empty until GoReleaser fills it.
+    - helm package helm/temporal-mcp --version {{ .Version }} --app-version {{ .Version }} --destination bin
+
 builds:
   - env:
       - CGO_ENABLED=0
@@ -21,6 +26,8 @@ archives:
 
 checksum:
   name_template: checksums.txt
+  extra_files: &chart
+    - glob: bin/temporal-mcp-{{ .Version }}.tgz
 
 changelog:
   use: github-native
@@ -31,3 +38,4 @@ release:
   draft: true
   replace_existing_draft: true
   prerelease: auto
+  extra_files: *chart

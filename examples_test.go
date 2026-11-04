@@ -23,6 +23,9 @@ func TestExamplesLoad(t *testing.T) {
 		t.Fatal("no examples found")
 	}
 	for _, path := range paths {
+		if filepath.Base(path) == "helm-values.yaml" {
+			continue
+		}
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			load := config.Load
 			if strings.HasPrefix(filepath.Base(path), "stdio") {

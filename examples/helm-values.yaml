@@ -1,0 +1,20 @@
+# Helm values that go with examples/http-auth-config.yaml, passed as the config
+# with --set-file config=examples/http-auth-config.yaml. The config's API keys
+# and TLS certificate come from Secrets you create.
+
+# A Secret whose keys are PAYMENTS_PROD_API_KEY, PAYMENTS_STAGING_API_KEY and
+# ORDERS_PROD_API_KEY, the variables the config reads its API keys from.
+envFrom:
+  - secretRef:
+      name: temporal-mcp-api-keys
+
+# kubectl create secret tls makes a Secret holding tls.crt and tls.key, the
+# files listen_tls names.
+volumes:
+  - name: tls
+    secret:
+      secretName: temporal-mcp-tls
+volumeMounts:
+  - name: tls
+    mountPath: /etc/temporal-mcp
+    readOnly: true

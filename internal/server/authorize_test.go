@@ -243,13 +243,13 @@ authorization:
 		{
 			name:    "profile without tools or tools_deny",
 			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.All"}}),
-			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
+			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 		{
 			name:    "profile with tools_deny",
 			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.NoHistory"}}),
-			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
+			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
 		},
 	}
@@ -346,7 +346,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }

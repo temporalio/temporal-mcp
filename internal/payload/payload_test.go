@@ -320,10 +320,10 @@ func TestRenderFailsClosed(t *testing.T) {
 			}
 			var logs bytes.Buffer
 			r := newRenderer(t, tt.endpoint, tt.auth, &logs)
-			if got := r.CheckCodec(t.Context(), "t"); got != tt.reason {
-				t.Errorf("CheckCodec = %q, want %q", got, tt.reason)
+			if got := r.CheckCodec(t.Context(), "t"); got != "/decode: "+tt.reason {
+				t.Errorf("CheckCodec = %q, want %q", got, "/decode: "+tt.reason)
 			}
-			// Each payload the codec server should have decoded gives the reason check_connection does.
+			// Each payload the codec server should have decoded gives the reason check_connection does, without the path.
 			got, err := render(t, t.Context(), r.Batch("t"), payload("binary/encrypted", "a"), payload("binary/null", ""))
 			want := fmt.Sprintf(`[{"handling":"omitted","encoding":"binary/encrypted","size_bytes":1,"reason":"decode_failed","error":%[1]q},`+
 				`{"handling":"omitted","encoding":"binary/null","size_bytes":0,"reason":"decode_failed","error":%[1]q}]`, tt.reason)
@@ -333,8 +333,8 @@ func TestRenderFailsClosed(t *testing.T) {
 			if u, _ := url.Parse(tt.endpoint); strings.Contains(got, u.Hostname()) {
 				t.Errorf("fields %s name the codec server's host %s", got, u.Hostname())
 			}
-			if log := logs.String(); !strings.Contains(log, tt.reason) || strings.Contains(log, customerData) {
-				t.Errorf("log %q, want the cause and never the codec server's response or the authorization header", log)
+			if log := logs.String(); !strings.Contains(log, tt.reason) || !strings.Contains(log, "path=/decode") || strings.Contains(log, customerData) {
+				t.Errorf("log %q, want the cause and the path, and never the codec server's response or the authorization header", log)
 			}
 		})
 	}

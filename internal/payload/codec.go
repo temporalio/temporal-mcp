@@ -1,8 +1,8 @@
 // The codec server client, which speaks the protocol of the Temporal CLI's
-// --codec-endpoint: a POST to the endpoint's /decode path, with the payloads as
-// temporal.api.common.v1.Payloads in proto JSON, the target's namespace in the
-// X-Namespace header, the configured Authorization header, and the configured
-// passthrough headers of the tool call's HTTP request.
+// --codec-endpoint: a POST to the endpoint's /decode or /encode path, with the
+// payloads as temporal.api.common.v1.Payloads in proto JSON, the target's namespace
+// in the X-Namespace header, the configured Authorization header, and the
+// configured passthrough headers of the tool call's HTTP request.
 
 package payload
 
@@ -49,10 +49,10 @@ func WithRequestHeader(ctx context.Context, h http.Header) context.Context {
 	return context.WithValue(ctx, requestHeaderKey{}, h)
 }
 
-// A codecError is a failed codec request. Its reason, which check_connection and each
-// payload the request leaves out show agents, says what went wrong in plain words
-// and names no address, path or response content. Its cause, for the log, may name
-// an address or path but never response content; it is nil when the reason says it all.
+// A codecError is a failed codec request. Its reason, which agents see, says what
+// went wrong in plain words and names no address, path or response content. Its
+// cause, for the log, may name an address or path but never response content; it
+// is nil when the reason says it all.
 type codecError struct {
 	reason string
 	cause  error
@@ -65,19 +65,19 @@ func (e *codecError) Error() string {
 	return e.reason + ": " + e.cause.Error()
 }
 
-// decode returns ps as the codec server decodes them, in order.
-func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb.Payload, *codecError) {
+// send posts ps to the codec server's path, /decode or /encode, and returns the payloads it responds with, in order.
+func (c *codec) send(ctx context.Context, path string, ps []*commonpb.Payload) ([]*commonpb.Payload, *codecError) {
 	// Proto JSON leaves out an empty list, which some codec servers then fail to read.
 	body := []byte(`{"payloads":[]}`)
 	if len(ps) > 0 {
 		var err error
 		if body, err = protojson.Marshal(&commonpb.Payloads{Payloads: ps}); err != nil {
-			return nil, &codecError{"the payloads could not be encoded for the codec server", err}
+			return nil, &codecError{"the payloads could not be serialized for the codec server", err}
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, codecTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/decode", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, &codecError{"the codec server's endpoint is not a valid URL", err}
 	}
@@ -104,7 +104,7 @@ func (c *codec) decode(ctx context.Context, ps []*commonpb.Payload) ([]*commonpb
 	if resp.StatusCode != http.StatusOK {
 		reason := fmt.Sprintf("the codec server responded HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		if resp.StatusCode/100 == 3 {
-			reason += "; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without /decode"
+			reason += "; redirects are not followed, so the codec endpoint must be the URL the codec server redirects to, without " + path
 		}
 		return nil, &codecError{reason, nil}
 	}

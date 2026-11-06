@@ -1,5 +1,5 @@
-// Temporal-mcp runs an MCP server that gives AI agents read access to
-// Temporal targets.
+// Temporal-mcp runs an MCP server that gives AI agents access to Temporal
+// targets.
 package main
 
 import (

@@ -1,6 +1,6 @@
 # temporal-mcp ([Pre-release])
 
-`temporal-mcp` is a read-only MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can read and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, and search and count workflow runs with Visibility queries.
+`temporal-mcp` is an MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can use and check that the server can reach each one, read a workflow run's state and event history, see a task queue's pollers and backlog, list a namespace's search attributes, search and count workflow runs with Visibility queries, and start workflow runs. Every tool but `start_workflow` only reads.
 
 > [!NOTE]
 >
@@ -32,7 +32,7 @@ temporal server start-dev
 
 ### Configure
 
-`temporal-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio-local-config.yaml](examples/stdio-local-config.yaml), whose `local` target reads the dev server.
+`temporal-mcp` reads one YAML config, passed with `--config`. Copy [examples/stdio-local-config.yaml](examples/stdio-local-config.yaml), whose `local` target is the dev server.
 
 ### Connect
 
@@ -62,7 +62,7 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 ### Add your own namespaces
 
-To read your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
+To use your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first.
 

@@ -12,7 +12,7 @@ require (
 	go.temporal.io/cloud-sdk v0.20.0
 	go.temporal.io/sdk v1.50.0
 	go.temporal.io/server v1.32.1
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/net v0.60.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12

@@ -9,7 +9,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.1-0.20260914075210-e40f35d137b7
 	github.com/nexus-rpc/sdk-go v0.7.0
 	go.temporal.io/api v1.64.0
-	go.temporal.io/cloud-sdk v0.20.0
+	go.temporal.io/cloud-sdk v0.21.0
 	go.temporal.io/sdk v1.50.0
 	go.temporal.io/server v1.32.1
 	go.yaml.in/yaml/v3 v3.0.6

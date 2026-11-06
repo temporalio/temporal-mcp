@@ -109,7 +109,7 @@ authorization:
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

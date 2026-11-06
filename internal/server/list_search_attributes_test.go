@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
@@ -29,9 +31,11 @@ import (
 
 type fakeCloudService struct {
 	cloudservice.UnimplementedCloudServiceServer
-	mu    sync.Mutex
-	calls []string
-	err   error
+	mu        sync.Mutex
+	calls     []string
+	err       error
+	pages     [][]*namespacepb.Namespace
+	deadlines []bool
 }
 
 func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.GetNamespaceRequest) (*cloudservice.GetNamespaceResponse, error) {
@@ -53,6 +57,21 @@ func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.G
 			"Tags":     namespacepb.NamespaceSpec_SEARCH_ATTRIBUTE_TYPE_KEYWORD_LIST,
 		},
 	}}}, nil
+}
+
+func (f *fakeCloudService) GetNamespaces(ctx context.Context, req *cloudservice.GetNamespacesRequest) (*cloudservice.GetNamespacesResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, req.GetPageToken()+" "+strings.Join(md.Get("authorization"), ","))
+	deadline, ok := ctx.Deadline()
+	f.deadlines = append(f.deadlines, ok && time.Until(deadline) <= temporal.CallTimeout)
+	page, _ := strconv.Atoi(req.GetPageToken())
+	resp := &cloudservice.GetNamespacesResponse{Namespaces: f.pages[page]}
+	if page+1 < len(f.pages) {
+		resp.NextPageToken = strconv.Itoa(page + 1)
+	}
+	return resp, nil
 }
 
 func TestListSearchAttributesOnCloud(t *testing.T) {

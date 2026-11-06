@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 )
 
 const validTargets = `
@@ -36,7 +39,7 @@ codecs:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
+	cfg, err := Load(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +91,7 @@ authorization:
 
 func TestParseLoopbackListen(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "127.0.0.1:0"} {
-		if _, err := parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
+		if _, err := parse([]byte("listen: \""+listen+"\"\n"+validTargets), nil); err != nil {
 			t.Errorf("listen %s: %v", listen, err)
 		}
 	}
@@ -97,7 +100,7 @@ func TestParseLoopbackListen(t *testing.T) {
 func TestParseTargetAddress(t *testing.T) {
 	for _, address := range []string{"localhost:1", "localhost:65535", "dns:///prod.example.tmprl.cloud:7233"} {
 		data := "listen: 127.0.0.1:8080\ntargets:\n  - {name: a, description: x, address: \"" + address + "\", namespace: a}\n"
-		if _, err := parse([]byte(data)); err != nil {
+		if _, err := parse([]byte(data), nil); err != nil {
 			t.Errorf("address %s: %v", address, err)
 		}
 	}
@@ -106,7 +109,7 @@ func TestParseTargetAddress(t *testing.T) {
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
 		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
-		if _, err := parse([]byte(data)); err != nil {
+		if _, err := parse([]byte(data), nil); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
@@ -129,6 +132,8 @@ func TestParseStdio(t *testing.T) {
 		{"authorization", validTargets + validAuthorization, []string{"authorization: not allowed with --stdio"}},
 		{"codec authorization header with no value", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    authorization_header:\n", []string{`codecs: "c": authorization_header: exactly one of env or file is required`}},
 		{"codec passthrough headers", validTargets + "codecs:\n  c:\n    endpoint: https://codec.example.com\n    passthrough_headers: [{name: X-Tenant-Id}]\n", []string{`codecs: "c": passthrough_headers: not allowed with --stdio`}},
+		{"temporal_cloud", "temporal_cloud: {api_key: {env: A_KEY}}\n" + validTargets, []string{"temporal_cloud: not allowed with --stdio"}},
+		{"empty temporal_cloud", "temporal_cloud:\n" + validTargets, []string{"temporal_cloud: not allowed with --stdio"}},
 		{"every key and a bad target", "listen: 127.0.0.1:8080\nlisten_tls:\ntargets:\n  - {name: a}\n" + auth + validAuthorization, []string{
 			"listen, listen_tls, auth, authorization: not allowed with --stdio",
 			"targets[0]: address is required",
@@ -161,7 +166,7 @@ func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
 		"  - {name: prod, description: x, address: b:7233, namespace: b}\n"
-	if _, err := parse([]byte(data)); err != nil {
+	if _, err := parse([]byte(data), nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -170,12 +175,159 @@ func TestParseAPIKey(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}}\n" +
 		"  - {name: b, description: x, address: b:7233, namespace: b, api_key: {file: /keys/b}}\n"
-	cfg, err := parse([]byte(data))
+	cfg, err := parse([]byte(data), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := []*Secret{cfg.Targets[0].APIKey, cfg.Targets[1].APIKey}, []*Secret{{Env: "A_KEY"}, {File: "/keys/b"}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("api keys = %+v, want %+v", got, want)
+	}
+}
+
+func cloudNamespace(name, address, description string) *namespacepb.Namespace {
+	return &namespacepb.Namespace{
+		Namespace: name + ".acct1",
+		Spec:      &namespacepb.NamespaceSpec{Name: name, Description: description, ApiKeyAuth: &namespacepb.ApiKeyAuthSpec{Enabled: address != ""}},
+		Endpoints: &namespacepb.Endpoints{GrpcAddress: address},
+	}
+}
+
+func listing(t *testing.T, namespaces ...*namespacepb.Namespace) ListNamespacesFunc {
+	return func(apiKey string) ([]*namespacepb.Namespace, error) {
+		if apiKey != "cloud-key" {
+			t.Errorf("list got API key %q, want cloud-key", apiKey)
+		}
+		return namespaces, nil
+	}
+}
+
+func TestParseTemporalCloud(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key\n")
+	const address = "us-east-1.aws.api.temporal.io:7233"
+	data := `listen: 0.0.0.0:8080
+targets:
+  - {name: orders-mtls, description: Orders over mTLS., address: "orders.acct1.tmprl.cloud:7233", namespace: orders.acct1, tls: {cert_file: a.crt, key_file: a.key}}
+  - {name: billing, description: Billing., address: "billing:7233", namespace: billing}
+  - {name: legacy, aliases: [Shipping], description: Legacy., address: "legacy:7233", namespace: legacy}
+  - {name: audit, aliases: [audit.acct1], description: Audit., address: "audit:7233", namespace: audit}
+temporal_cloud:
+  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
+  namespaces: {exclude: ["test-*"], payload_handling: passthrough}
+auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com", audience: a, required_scopes: [s]}
+authorization:
+  profiles: {p: {targets: [payments, shipping.acct1]}}
+  rules: [{claim_name: sub, claim_value: alice, profile: p}]
+`
+	provisioning := cloudNamespace("provisioning", "", "")
+	provisioning.Spec.ApiKeyAuth.Enabled = true
+	cfg, err := parse([]byte(data), listing(t,
+		cloudNamespace("orders", address, "Orders."),
+		cloudNamespace("payments", address, "Payments."),
+		cloudNamespace("billing", address, " \n "),
+		cloudNamespace("shipping", address, "Shipping."),
+		cloudNamespace("audit", address, "Audit."),
+		cloudNamespace("test-load", address, "Load tests."),
+		cloudNamespace("mtls-only", "", "mTLS only."),
+		provisioning,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := cfg.TemporalCloud.APIKey
+	cloudTarget := func(name, namespace, description string) Target {
+		return Target{Name: name, Description: description, Address: address, Namespace: namespace, APIKey: key, PayloadHandling: PayloadPassthrough}
+	}
+	if want := []Target{
+		cloudTarget("payments", "payments.acct1", "Payments."),
+		cloudTarget("billing.acct1", "billing.acct1", "Temporal Cloud namespace billing.acct1"),
+		cloudTarget("shipping.acct1", "shipping.acct1", "Shipping."),
+	}; !reflect.DeepEqual(cfg.Targets[4:], want) {
+		t.Errorf("targets after the file's = %+v\nwant %+v", cfg.Targets[4:], want)
+	}
+	if want := []string{"payments", "billing.acct1", "shipping.acct1"}; !reflect.DeepEqual(cfg.TemporalCloud.Added, want) {
+		t.Errorf("added = %q, want %q", cfg.TemporalCloud.Added, want)
+	}
+	if want := []string{
+		"temporal_cloud: namespaces listed by the API key: 8",
+		`temporal_cloud: namespace orders.acct1: added no target, because target "orders-mtls" has this namespace`,
+		`temporal_cloud: namespace payments.acct1: added target "payments"`,
+		`temporal_cloud: namespace billing.acct1: added target "billing.acct1"`,
+		`temporal_cloud: namespace shipping.acct1: added target "shipping.acct1"`,
+		"temporal_cloud: namespace audit.acct1: added no target, because other targets already have its name and its namespace ID as names or aliases",
+		"temporal_cloud: namespace test-load.acct1: added no target, because temporal_cloud's include and exclude patterns do not select it",
+		"temporal_cloud: namespace mtls-only.acct1: added no target, because it does not accept API keys",
+		"temporal_cloud: namespace provisioning.acct1: added no target, because it does not accept API keys",
+	}; !reflect.DeepEqual(cfg.TemporalCloud.Report, want) {
+		t.Errorf("report = %q\nwant %q", cfg.TemporalCloud.Report, want)
+	}
+}
+
+func TestParseTemporalCloudInclude(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	data := "listen: 127.0.0.1:8080\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n  namespaces: {include: [\"PAY*\", \"ship*\"], exclude: [\"*-Dev\"]}\n"
+	cfg, err := parse([]byte(data), listing(t,
+		cloudNamespace("payments", "a:7233", ""),
+		cloudNamespace("payments-dev", "a:7233", ""),
+		cloudNamespace("shipping", "a:7233", ""),
+		cloudNamespace("orders", "a:7233", ""),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"payments", "shipping"}; !reflect.DeepEqual(cfg.TemporalCloud.Added, want) {
+		t.Errorf("added = %q, want %q", cfg.TemporalCloud.Added, want)
+	}
+	if cfg.Targets[0].PayloadHandling != "" {
+		t.Errorf("payload_handling = %q, want the default", cfg.Targets[0].PayloadHandling)
+	}
+}
+
+func TestParseTemporalCloudInvalid(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	const key = "  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n"
+	failing := func(string) ([]*namespacepb.Namespace, error) { return nil, errors.New("connection refused") }
+	for _, tt := range []struct {
+		name, yaml string
+		list       ListNamespacesFunc
+		want       []string
+	}{
+		{"no value", "temporal_cloud:\n", nil, []string{"temporal_cloud: api_key is required"}},
+		{"API key with no value", "temporal_cloud:\n  api_key:\n", nil, []string{"temporal_cloud: api_key is required"}},
+		{"API key with env and file", "temporal_cloud:\n  api_key: {env: A, file: /a}\n", nil, []string{"temporal_cloud: api_key: exactly one of env or file is required"}},
+		{"malformed patterns", "temporal_cloud:\n" + key + "  namespaces: {include: [\"[\"], exclude: [ok, \"a[\"]}\n", nil, []string{
+			`temporal_cloud: namespaces: include[0]: "[" is not a valid pattern`,
+			`temporal_cloud: namespaces: exclude[1]: "a[" is not a valid pattern`,
+		}},
+		{"empty include", "temporal_cloud:\n" + key + "  namespaces: {include: []}\n", nil, []string{"temporal_cloud: namespaces: include: at least one pattern is required; leave include out to select every namespace"}},
+		{"include with no value", "temporal_cloud:\n" + key + "  namespaces:\n    include:\n", nil, []string{"temporal_cloud: namespaces: include: at least one pattern is required; leave include out to select every namespace"}},
+		{"unknown payload handling", "temporal_cloud:\n" + key + "  namespaces: {payload_handling: raw}\n", nil, []string{`temporal_cloud: namespaces: payload_handling: "raw" is not one of omit or passthrough`}},
+		{"unset API key", "temporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_UNSET_CLOUD_KEY}\n", nil, []string{"temporal_cloud: api_key: environment variable TEMPORAL_MCP_TEST_UNSET_CLOUD_KEY is unset or empty"}},
+		{"listing fails", "temporal_cloud:\n" + key, failing, []string{"temporal_cloud: listing the account's namespaces: connection refused"}},
+		{"no namespace and no targets", "temporal_cloud:\n" + key, listing(t, cloudNamespace("mtls-only", "", "")), []string{
+			"targets: at least one target is required",
+			"temporal_cloud: namespaces listed by the API key: 1",
+			"temporal_cloud: namespace mtls-only.acct1: added no target, because it does not accept API keys",
+		}},
+		{"no namespaces listed", "temporal_cloud:\n" + key, listing(t), []string{"targets: at least one target is required", "temporal_cloud: namespaces listed by the API key: 0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			list := tt.list
+			if list == nil {
+				list = func(string) ([]*namespacepb.Namespace, error) {
+					t.Error("list was called")
+					return nil, nil
+				}
+			}
+			_, err := parse([]byte("listen: 127.0.0.1:8080\n"+tt.yaml), list)
+			for _, want := range tt.want {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("error %v does not contain %q", err, want)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), "cloud-key") {
+				t.Errorf("error %v contains the API key", err)
+			}
+		})
 	}
 }
 
@@ -740,7 +892,7 @@ func TestParseInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parse([]byte(tt.yaml))
+			_, err := parse([]byte(tt.yaml), nil)
 			if err == nil {
 				t.Fatal("want an error")
 			}

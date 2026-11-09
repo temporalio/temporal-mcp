@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 )
 
@@ -309,6 +310,16 @@ func TestParseTemporalCloudInvalid(t *testing.T) {
 			"temporal_cloud: namespace mtls-only.acct1: added no target, because it does not accept API keys",
 		}},
 		{"no namespaces listed", "temporal_cloud:\n" + key, listing(t), []string{"targets: at least one target is required", "temporal_cloud: namespaces listed by the API key: 0"}},
+		{"groups with no value", "temporal_cloud:\n" + key + "  groups:\n", nil, []string{"temporal_cloud: groups: claim_name is required"}},
+		{"bad groups", "temporal_cloud:\n" + key + "  groups: {claim_name: \" groups\", tools_deny: []}\n", nil, []string{
+			`temporal_cloud: groups: claim_name " groups" has leading or trailing whitespace, which no claim name matches`,
+			"temporal_cloud: groups: tools_deny: at least one tool is required",
+		}},
+		{"groups tools_deny with no value", "temporal_cloud:\n" + key + "  groups:\n    claim_name: groups\n    tools_deny:\n", nil, []string{"temporal_cloud: groups: tools_deny: at least one tool is required"}},
+		{"groups claim_name scope", "temporal_cloud:\n" + key + "  groups: {claim_name: scope}\n", nil, []string{`temporal_cloud: groups: claim_name "scope" is not allowed, because that claim holds the token's scopes, not group names`}},
+		{"groups without auth", "temporal_cloud:\n" + key + "  groups: {claim_name: groups}\n", listing(t, cloudNamespace("payments", "a:7233", "")), []string{
+			"temporal_cloud: groups: not allowed without an auth section, whose access tokens carry the group names that groups match",
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			list := tt.list
@@ -328,6 +339,40 @@ func TestParseTemporalCloudInvalid(t *testing.T) {
 				t.Errorf("error %v contains the API key", err)
 			}
 		})
+	}
+}
+
+func TestGroupAuthorizationRoleWithoutTargets(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	data := "listen: 0.0.0.0:8080\n" + validTargets + `temporal_cloud:
+  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
+  namespaces: {exclude: [payments]}
+  groups: {claim_name: groups}
+auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com", audience: a, required_scopes: [s]}
+`
+	cfg, err := parse([]byte(data), listing(t, cloudNamespace("payments", "a:7233", "")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report, err := cfg.GroupAuthorization(func(apiKey string) ([]*identitypb.UserGroup, error) {
+		if apiKey != "cloud-key" {
+			t.Errorf("list got API key %q, want cloud-key", apiKey)
+		}
+		return []*identitypb.UserGroup{{Id: "g1", Spec: &identitypb.UserGroupSpec{
+			DisplayName: "Temporal Owners",
+			Access:      &identitypb.Access{AccountAccess: &identitypb.AccountAccess{Role: identitypb.AccountAccess_ROLE_OWNER}},
+			GroupType:   &identitypb.UserGroupSpec_ScimGroup{ScimGroup: &identitypb.SCIMGroupSpec{IdpId: "Temporal Owners"}},
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"temporal_cloud: user groups listed by the API key: 1",
+		`temporal_cloud: group g1 "Temporal Owners": gives no targets, because none of the account's namespaces has a target`,
+	}
+	if !reflect.DeepEqual(report, want) {
+		t.Errorf("report = %q, want %q", report, want)
 	}
 }
 
@@ -878,6 +923,12 @@ func TestParseInvalid(t *testing.T) {
 				`authorization: rules[5]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
 				`authorization: rules[6]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
 			},
+		},
+		{
+			name: "profile name reserved for temporal_cloud groups",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n" +
+				"authorization:\n  profiles: {\"cloud-group:g1\": {targets: [prod]}}\n  rules: [{claim_name: groups, claim_value: a, profile: \"cloud-group:g1\"}]\n",
+			want: []string{`authorization: profiles: "cloud-group:g1": names starting with cloud-group: are reserved for the profiles of temporal_cloud groups`},
 		},
 		{
 			name: "all errors reported",

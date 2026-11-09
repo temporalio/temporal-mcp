@@ -25,7 +25,11 @@
     [ namespaces:
         [ include: [ <glob>, ... ] | default = every namespace ]
         [ exclude: [ <glob>, ... ] ]
-        [ payload_handling: <string> | default = omit ] ] ]
+        [ payload_handling: <string> | default = omit ] ]
+    # Requires auth.
+    [ groups:
+        claim_name: <string>
+        [ tools_deny: [ <string>, ... ] ] ] ]
 
 [ codecs:
     <string>:
@@ -58,7 +62,7 @@ listen: <host:port>
     [ scopes_supported: [ <string>, ... ] | default = required_scopes ]
     [ authorization_server: <url> | default = issuer ] ]
 
-# HTTP mode only. Required with auth, not allowed without it.
+# HTTP mode only. Required with auth unless temporal_cloud has groups, not allowed without auth.
 [ authorization:
     profiles:
       <string>:
@@ -99,17 +103,26 @@ With `tls`, the server does not start if it cannot load the certificate and key,
 
 Optional, HTTP mode only. With this section, the server adds a target for each namespace of a Temporal Cloud account, so that you need not list each one in `targets`. When it starts, it lists the account's namespaces through the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443`, and adds a target for each one that accepts API keys and that `namespaces` selects. It does not start if it cannot list them. It lists them only at startup, so a namespace created later gets a target when the server restarts. `temporal_cloud:` with no value is an error.
 
-- `api_key` (secret, required): Where to read the API key that the server lists the namespaces with, which is also the `api_key` of each added target. The key needs Read on every namespace the server should read.
+- `api_key` (secret, required): Where to read the API key that the server lists the namespaces with, which is also the `api_key` of each added target. The key needs Read on every namespace the server should read, and with `groups`, it must also be able to list the account's user groups through the Cloud Ops API.
 - `namespaces` (optional): Which namespaces get a target, by their name without the account ID, such as `payments` for the namespace ID `payments.a1b2c`, and how those targets show payloads.
   - `include` (list of globs, default every namespace): A namespace gets a target only if its name matches one of these, ignoring case. `include:` with no value or `[]` is an error, not the same as leaving it out.
   - `exclude` (list of globs, optional): A namespace whose name matches one of these, ignoring case, gets no target, even if it matches `include`.
   - `payload_handling` (string, default `omit`): The `payload_handling` of each added target, `omit` or `passthrough`.
+- `groups` (optional): Gives the members of each of the account's SCIM groups the targets of the namespaces that the group can access in Temporal Cloud, as described below. It requires `auth`, and with `groups`, `authorization` is optional. `groups:` with no value is an error. [Identity and access](identity-and-access.md#temporal-cloud-groups) describes the identity provider's setup.
+  - `claim_name` (string, required): The access token claim that lists the user's groups, such as `groups`, whose values the server matches with each group's `idp_id`. Write it as you would a rule's `claim_name`. `scope` and `scp` are not allowed, because they hold the token's scopes, not groups.
+  - `tools_deny` (list of strings, optional): The tools that groups do not give, as in a profile's `tools_deny`. Without it, a group gives every read-only tool. `tools_deny:` with no value or `[]` is an error.
 
 Each added target's `namespace` is the namespace ID, its `address` is the namespace's API key endpoint, and its `description` is the namespace's description in Temporal Cloud, or `Temporal Cloud namespace <namespace ID>` if it has none. Its `name` is the namespace's name, such as `payments`, unless another target already has that name, or an alias equal to it ignoring case, and then it is the namespace ID, such as `payments.a1b2c`. A namespace whose ID is taken too gets no target. Authorization profiles name added targets by these names, like any other target.
 
 A target in `targets` whose `namespace` is the ID of one of the account's namespaces replaces that namespace's added target. So to read a namespace differently, for example to decode its payloads with a codec or to give it another name, add it to `targets` with its namespace ID. A namespace that accepts only client certificates gets no target, so add it to `targets` with `tls`.
 
 After listing the namespaces, the server logs how many the API key listed, the target it added for each namespace, and why it added none for the others: a target in `targets` has the namespace, `include` and `exclude` do not select it, it does not accept API keys, or its name and ID are both taken. If the config is then invalid, for example because a profile names a namespace that got no target, the error the server stops with ends with the same lines. At startup it also runs `check_connection` on each added target, in the background so that it does not delay serving, and logs each stage that fails.
+
+With `groups`, the server lists the account's user groups through the Cloud Ops API once it has added the targets, and does not start if it cannot. Each SCIM group gives its members the targets of the account's namespaces on which it has the Admin, Write or Read permission in Temporal Cloud, all of which mean reading here, or of all the account's namespaces if it has the Owner or Global Admin account role. Targets count by their `namespace`, so a target in `targets` that replaces a namespace's added target is the one a group gives, and a target for a namespace outside the account, such as a self-hosted one, is never given by a group. A group that is not a SCIM group, or none of whose namespaces has a target, gives nothing.
+
+A caller gets a group's targets when its token's `claim_name` claim is the group's `idp_id` in Temporal Cloud, or a list with it as an entry, matched exactly and case-sensitively as rules match. Each group works as a profile with those targets and `tools_deny`, and a rule for its `idp_id`, added to those of `authorization`, so a caller gets everything its groups and rules give, combined per target.
+
+The server lists the groups again every 5 minutes and replaces what they give with the result, while calls in progress finish with the access they started with. If a listing fails, callers keep what the last successful one gave and the server logs the error. Targets still change only at restart, so a group's namespace without a target gives nothing until a restart adds one. The server logs how many groups the API key listed, then one line for each group in group ID order: the targets it gives, the claim value that gets them and any of its namespaces that have no target, or why it gives none. It logs them at startup and again whenever a later listing changes them.
 
 ## Payloads and `codecs`
 
@@ -156,7 +169,7 @@ Optional in both modes, default `8s`; zero uses the default and negative values 
 
 ## `auth`
 
-Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from the identity provider that `issuer` names, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A server accepts tokens from one identity provider only, so to accept tokens from two, run two servers with different `resource` URLs. A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
+Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from the identity provider that `issuer` names, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A server accepts tokens from one identity provider only, so to accept tokens from two, run two servers with different `resource` URLs. A config with `auth` must also have an [`authorization`](#authorization) section, unless [`temporal_cloud`](#temporal_cloud) has `groups`. `auth:` with no value is an error.
 
 An agent gets its access token by signing the user in to the identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, carrying this server's `audience` in their `aud` claim and each of `required_scopes` in their `scope` or `scp` claim.
 
@@ -175,9 +188,9 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth`, unless [`temporal_cloud`](#temporal_cloud) has `groups`, and not allowed without `auth`, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
-- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
+- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. A profile name must not start with `cloud-group:`, which is reserved for the profiles of `temporal_cloud` groups. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.

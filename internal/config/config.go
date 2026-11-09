@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/net/http/httpguts"
@@ -44,7 +45,8 @@ type Config struct {
 	Codecs map[string]Codec `yaml:"codecs"`
 	// Auth, when set, requires every MCP request to carry a valid access token.
 	Auth *Auth `yaml:"auth"`
-	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
+	// Authorization decides which tools each caller may use on which targets. It is required with Auth, unless
+	// TemporalCloud has Groups, and not allowed without Auth.
 	Authorization *Authorization `yaml:"authorization"`
 	// AuditLogFile is the path of the file the server appends audit records to; stdout, or stderr over stdio, if empty.
 	AuditLogFile string `yaml:"audit_log_file"`
@@ -150,14 +152,19 @@ type Target struct {
 // targets: those that accept API keys and that Namespaces selects.
 type TemporalCloud struct {
 	// APIKey says where to read the API key that lists the account's namespaces
-	// through the Cloud Ops API, and that each of their targets connects with.
+	// and user groups through the Cloud Ops API, and that each added target
+	// connects with.
 	APIKey     *Secret         `yaml:"api_key"`
 	Namespaces CloudNamespaces `yaml:"namespaces"`
+	// Groups, when set, gives the account's SCIM groups access through GroupAuthorization.
+	Groups *CloudGroups `yaml:"groups"`
 	// Added are the names of the targets that Load added for the account's namespaces.
 	Added []string `yaml:"-"`
 	// Report says how many namespaces Load listed, the target it added for each,
 	// and why it added none for the others, one line each.
 	Report []string `yaml:"-"`
+	// namespaceIDs are the IDs of the namespaces that Load listed.
+	namespaceIDs []string
 }
 
 // CloudNamespaces says which of a Temporal Cloud account's namespaces get a
@@ -177,6 +184,23 @@ type CloudNamespaces struct {
 
 // ListNamespacesFunc returns the namespaces that the Temporal Cloud Ops API lists for apiKey.
 type ListNamespacesFunc func(apiKey string) ([]*namespacepb.Namespace, error)
+
+// CloudGroups gives the members of a Temporal Cloud account's SCIM groups the
+// targets of the account's namespaces that their groups can access.
+type CloudGroups struct {
+	// ClaimName is the access token claim that lists the caller's groups by
+	// each SCIM group's idp_id.
+	ClaimName string `yaml:"claim_name"`
+	// ToolsDeny is the ToolsDeny of each group's profile.
+	ToolsDeny []string `yaml:"tools_deny"`
+}
+
+// ListUserGroupsFunc returns the user groups that the Temporal Cloud Ops API lists for apiKey.
+type ListUserGroupsFunc func(apiKey string) ([]*identitypb.UserGroup, error)
+
+// groupProfilePrefix starts the name of each profile that GroupAuthorization
+// adds, and of no profile in the authorization section.
+const groupProfilePrefix = "cloud-group:"
 
 // The values of Target.PayloadHandling.
 const (
@@ -319,8 +343,8 @@ func parseStdio(data []byte) (*Config, error) {
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
 // no value, except a profile's tools and tools_deny and temporal_cloud's
-// namespaces include, which decode reads from the authorization and
-// temporal_cloud nodes. A missing key's node has Kind 0.
+// namespaces include, groups and groups tools_deny, which decode reads from the
+// authorization and temporal_cloud nodes. A missing key's node has Kind 0.
 type keyNodes struct {
 	Listen        yaml.Node `yaml:"listen"`
 	ListenTLS     yaml.Node `yaml:"listen_tls"`
@@ -382,11 +406,22 @@ func decode(data []byte, list ListNamespacesFunc, validate func(*Config, *keyNod
 			Namespaces struct {
 				Include yaml.Node `yaml:"include"`
 			} `yaml:"namespaces"`
+			Groups yaml.Node `yaml:"groups"`
 		}
 		if err := keys.TemporalCloud.Decode(&temporalCloud); err != nil {
 			return nil, err
 		}
 		emptyListIfPresent(&cfg.TemporalCloud.Namespaces.Include, temporalCloud.Namespaces.Include)
+		emptyIfPresent(&cfg.TemporalCloud.Groups, temporalCloud.Groups)
+		if cfg.TemporalCloud.Groups != nil {
+			var groups struct {
+				ToolsDeny yaml.Node `yaml:"tools_deny"`
+			}
+			if err := temporalCloud.Groups.Decode(&groups); err != nil {
+				return nil, err
+			}
+			emptyListIfPresent(&cfg.TemporalCloud.Groups.ToolsDeny, groups.ToolsDeny)
+		}
 	}
 	for i, t := range keys.Targets {
 		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
@@ -497,13 +532,25 @@ func (c *Config) validateHTTP() error {
 	if c.Auth != nil {
 		errs = append(errs, c.Auth.validate()...)
 	}
+	groups := c.TemporalCloud != nil && c.TemporalCloud.Groups != nil
 	switch {
-	case c.Auth != nil && c.Authorization == nil:
-		errs = append(errs, errors.New("authorization: required with an auth section"))
+	case c.Auth != nil && c.Authorization == nil && !groups:
+		errs = append(errs, errors.New("authorization: required with an auth section, unless temporal_cloud has groups"))
 	case c.Auth == nil && c.Authorization != nil:
 		errs = append(errs, errors.New("authorization: not allowed without an auth section, whose access tokens carry the claims that rules match"))
 	case c.Authorization != nil:
 		errs = append(errs, c.Authorization.validate(c)...)
+		for _, name := range slices.Sorted(maps.Keys(c.Authorization.Profiles)) {
+			if strings.HasPrefix(name, groupProfilePrefix) {
+				errs = append(errs, fmt.Errorf("authorization: profiles: %q: names starting with %s are reserved for the profiles of temporal_cloud groups", name, groupProfilePrefix))
+			}
+		}
+		if len(c.Authorization.Rules) == 0 {
+			errs = append(errs, errors.New("authorization: rules: at least one rule is required"))
+		}
+	}
+	if groups && c.Auth == nil {
+		errs = append(errs, errors.New("temporal_cloud: groups: not allowed without an auth section, whose access tokens carry the group names that groups match"))
 	}
 	return errors.Join(errs...)
 }
@@ -613,6 +660,7 @@ func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
 	tc.Report = append(tc.Report, fmt.Sprintf("temporal_cloud: namespaces listed by the API key: %d", len(namespaces)))
 	for _, ns := range namespaces {
 		id, name := ns.GetNamespace(), ns.GetSpec().GetName()
+		tc.namespaceIDs = append(tc.namespaceIDs, id)
 		var reason string
 		switch i := slices.IndexFunc(c.Targets, func(t Target) bool { return t.Namespace == id }); {
 		case i >= 0:
@@ -670,7 +718,89 @@ func (tc *TemporalCloud) validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("temporal_cloud: namespaces: payload_handling: %q is not one of %s or %s", tc.Namespaces.PayloadHandling, PayloadOmit, PayloadPassthrough))
 	}
+	if g := tc.Groups; g != nil {
+		if err := validateClaimName("temporal_cloud: groups", g.ClaimName); err != nil {
+			errs = append(errs, err)
+		} else if g.ClaimName == "scope" || g.ClaimName == "scp" {
+			errs = append(errs, fmt.Errorf("temporal_cloud: groups: claim_name %q is not allowed, because that claim holds the token's scopes, not group names", g.ClaimName))
+		}
+		if g.ToolsDeny != nil && len(g.ToolsDeny) == 0 {
+			errs = append(errs, errors.New("temporal_cloud: groups: tools_deny: at least one tool is required"))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// GroupAuthorization returns the authorization section, or an empty one, plus a
+// profile and a rule for each SCIM group that list lists and that can read a
+// target. It also returns a report: how many groups it listed, then one line
+// per group in ID order with the targets the group gives and its namespaces
+// that have no target, or why it gives none. It fails if it cannot list the
+// groups or the result is invalid.
+func (c *Config) GroupAuthorization(list ListUserGroupsFunc) (*Authorization, []string, error) {
+	tc := c.TemporalCloud
+	key, err := tc.APIKey.Read()
+	if err != nil {
+		return nil, nil, fmt.Errorf("temporal_cloud: api_key: %w", err)
+	}
+	groups, err := list(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("temporal_cloud: listing the account's user groups: %w", err)
+	}
+	a := &Authorization{Profiles: map[string]Profile{}}
+	if c.Authorization != nil {
+		maps.Copy(a.Profiles, c.Authorization.Profiles)
+		a.Rules = slices.Clone(c.Authorization.Rules)
+	}
+	allNamespaces := []identitypb.AccountAccess_Role{identitypb.AccountAccess_ROLE_OWNER, identitypb.AccountAccess_ROLE_ADMIN}
+	reads := []identitypb.NamespaceAccess_Permission{identitypb.NamespaceAccess_PERMISSION_ADMIN, identitypb.NamespaceAccess_PERMISSION_WRITE, identitypb.NamespaceAccess_PERMISSION_READ}
+	slices.SortFunc(groups, func(a, b *identitypb.UserGroup) int { return cmp.Compare(a.GetId(), b.GetId()) })
+	report := []string{fmt.Sprintf("temporal_cloud: user groups listed by the API key: %d", len(groups))}
+	for _, g := range groups {
+		access := g.GetSpec().GetAccess()
+		all := slices.Contains(allNamespaces, access.GetAccountAccess().GetRole())
+		var targets, accessible, missing []string
+		for _, t := range c.Targets {
+			if slices.Contains(tc.namespaceIDs, t.Namespace) && (all || slices.Contains(reads, access.GetNamespaceAccesses()[t.Namespace].GetPermission())) {
+				targets = append(targets, t.Name)
+			}
+		}
+		for ns, na := range access.GetNamespaceAccesses() {
+			if slices.Contains(reads, na.GetPermission()) {
+				accessible = append(accessible, ns)
+			}
+		}
+		slices.Sort(accessible)
+		for _, ns := range accessible {
+			if !slices.Contains(tc.namespaceIDs, ns) || !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Namespace == ns }) {
+				missing = append(missing, ns)
+			}
+		}
+		idpID, label := g.GetSpec().GetScimGroup().GetIdpId(), fmt.Sprintf("temporal_cloud: group %s %q", g.GetId(), g.GetSpec().GetDisplayName())
+		switch {
+		case idpID == "":
+			report = append(report, label+": gives no targets, because it is not a SCIM group")
+		case len(targets) > 0:
+			name := groupProfilePrefix + g.GetId()
+			a.Profiles[name] = Profile{ToolsDeny: tc.Groups.ToolsDeny, Targets: targets}
+			a.Rules = append(a.Rules, Rule{ClaimName: tc.Groups.ClaimName, ClaimValue: idpID, Profile: name})
+			line := fmt.Sprintf("%s: gives targets %q to callers whose %s claim has %q", label, targets, tc.Groups.ClaimName, idpID)
+			if len(missing) > 0 {
+				line += fmt.Sprintf("; its namespaces %q have no target", missing)
+			}
+			report = append(report, line)
+		case all:
+			report = append(report, label+": gives no targets, because none of the account's namespaces has a target")
+		case len(accessible) == 0:
+			report = append(report, label+": gives no targets, because it has no access to any namespace")
+		default:
+			report = append(report, fmt.Sprintf("%s: gives no targets, because its namespaces %q have no target", label, missing))
+		}
+	}
+	if err := errors.Join(a.validate(c)...); err != nil {
+		return nil, nil, err
+	}
+	return a, report, nil
 }
 
 // selects reports whether include and exclude select the namespace named name, without the account ID, ignoring case.
@@ -773,15 +903,10 @@ func (a *Authorization) validate(c *Config) []error {
 			}
 		}
 	}
-	if len(a.Rules) == 0 {
-		errs = append(errs, errors.New("authorization: rules: at least one rule is required"))
-	}
 	for i, r := range a.Rules {
 		label := fmt.Sprintf("authorization: rules[%d]", i)
-		if strings.TrimSpace(r.ClaimName) == "" {
-			errs = append(errs, fmt.Errorf("%s: claim_name is required", label))
-		} else if r.ClaimName != strings.TrimSpace(r.ClaimName) {
-			errs = append(errs, fmt.Errorf("%s: claim_name %q has leading or trailing whitespace, which no claim name matches", label, r.ClaimName))
+		if err := validateClaimName(label, r.ClaimName); err != nil {
+			errs = append(errs, err)
 		}
 		if r.ClaimValue == "" {
 			errs = append(errs, fmt.Errorf("%s: claim_value is required", label))
@@ -795,6 +920,16 @@ func (a *Authorization) validate(c *Config) []error {
 		}
 	}
 	return errs
+}
+
+func validateClaimName(label, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%s: claim_name is required", label)
+	}
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("%s: claim_name %q has leading or trailing whitespace, which no claim name matches", label, name)
+	}
+	return nil
 }
 
 // Lookup returns the target whose name is exactly name or that has an alias equal to name ignoring case.

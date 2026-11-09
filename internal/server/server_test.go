@@ -24,9 +24,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
-	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
-	"google.golang.org/grpc"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -170,34 +168,12 @@ func TestListAvailableTargets(t *testing.T) {
 func TestTemporalCloudTargets(t *testing.T) {
 	closed := listen(t)
 	closed.Close()
-	namespace := func(name, description string, apiKeys bool) *namespacepb.Namespace {
-		return &namespacepb.Namespace{
-			Namespace: name + ".acct1",
-			Spec:      &namespacepb.NamespaceSpec{Name: name, Description: description, ApiKeyAuth: &namespacepb.ApiKeyAuthSpec{Enabled: apiKeys}},
-			Endpoints: &namespacepb.Endpoints{GrpcAddress: closed.Addr().String()},
-		}
-	}
-	fake := &fakeCloudService{pages: [][]*namespacepb.Namespace{
-		{namespace("payments", "Payments.", true)},
-		{namespace("orders", "", true), namespace("legacy", "Legacy.", false)},
-	}}
-	ln := listen(t)
-	gs := grpc.NewServer()
-	cloudservice.RegisterCloudServiceServer(gs, fake)
-	go gs.Serve(ln)
-	t.Cleanup(gs.Stop)
-
-	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(configPath, func(apiKey string) ([]*namespacepb.Namespace, error) {
-		return temporal.ListNamespaces(t.Context(), apiKey, "test", "0", temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	address := closed.Addr().String()
+	payments, legacy := cloudNamespace("payments", address), cloudNamespace("legacy", address)
+	payments.Spec.Description = "Payments."
+	legacy.Spec.ApiKeyAuth.Enabled = false
+	fake := &fakeCloudService{pages: [][]*namespacepb.Namespace{{payments}, {cloudNamespace("orders", address), legacy}}}
+	cfg, clients, _ := serveCloud(t, fake, "listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n")
 	fake.mu.Lock()
 	if want := []string{" Bearer cloud-key", "1 Bearer cloud-key"}; !reflect.DeepEqual(fake.calls, want) {
 		t.Errorf("GetNamespaces calls = %q, want %q", fake.calls, want)
@@ -206,10 +182,6 @@ func TestTemporalCloudTargets(t *testing.T) {
 		t.Errorf("GetNamespaces calls with a deadline within temporal.CallTimeout = %v, want %v", fake.deadlines, want)
 	}
 	fake.mu.Unlock()
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	session := serveTools(t, cfg, clients, t.Output())
 	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets"})
@@ -301,7 +273,7 @@ func TestToolCalls(t *testing.T) {
 
 func TestToolErrorHasResultType(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +340,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuer: issuerURL, Audience: "operator"}
 	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

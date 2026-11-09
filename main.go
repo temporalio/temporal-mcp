@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
@@ -120,7 +121,9 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	defer cancelCalls()
 	subscriptions, cancelSubscriptions := context.WithCancel(context.Background())
 	defer cancelSubscriptions()
-	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger)
+	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger, func(apiKey string) ([]*identitypb.UserGroup, error) {
+		return temporal.ListUserGroups(context.Background(), apiKey, name, version)
+	})
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}

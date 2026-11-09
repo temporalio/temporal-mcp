@@ -397,7 +397,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unopenable error log", []string{"--config", unopenableErrorLog}, 1, "invalid config " + unopenableErrorLog + ": error_log_file: open " + missingLog},
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 		{"unknown tool in a profile's tools_deny", []string{"--config", unknownTool}, 1, `authorization: profiles: "q": tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
-		{"tools_deny that leaves a profile no tools", []string{"--config", unknownTool}, 1, `authorization: profiles: "r": tools_deny: leaves the profile no tools`},
+		{"tools_deny that leaves a profile no tools", []string{"--config", unknownTool}, 1, `authorization: profiles: "r": tools_deny: leaves no tools`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,7 +1,7 @@
 // Package temporal provides one Temporal client per target, plus a Cloud Ops API
 // client for each Temporal Cloud target with an API key, and limits the calls each
 // tool can make through them. Each call's API key comes from a credential that sees
-// the caller. It also lists the namespaces of a Temporal Cloud account.
+// the caller. It also lists the namespaces and user groups of a Temporal Cloud account.
 package temporal
 
 import (
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"go.temporal.io/cloud-sdk/cloudclient"
 	"go.temporal.io/sdk/client"
@@ -37,7 +38,7 @@ type Clients struct {
 	cloud  map[string]cloudservice.CloudServiceClient
 }
 
-// An Option changes how NewClients and ListNamespaces connect. Options are for tests.
+// An Option changes how NewClients, ListNamespaces and ListUserGroups connect. Options are for tests.
 type Option func(*options)
 
 type options struct {
@@ -166,7 +167,7 @@ func IsCloud(address string) bool {
 	return strings.HasSuffix(host, ".tmprl.cloud") || strings.HasSuffix(host, ".api.temporal.io")
 }
 
-// CallTimeout bounds a tool's call to a Temporal server or the Cloud Ops API, including its retries while the server is unavailable, and each page that ListNamespaces reads.
+// CallTimeout bounds a tool's call to a Temporal server or the Cloud Ops API, including its retries while the server is unavailable, and each page that ListNamespaces and ListUserGroups read.
 const CallTimeout = 10 * time.Second
 
 // ListNamespaces returns every namespace that the Temporal Cloud Ops API lists
@@ -174,6 +175,23 @@ const CallTimeout = 10 * time.Second
 // version as NewClients' clients do. Each page's call fails if it takes longer
 // than CallTimeout.
 func ListNamespaces(ctx context.Context, apiKey, name, version string, opts ...Option) ([]*namespacepb.Namespace, error) {
+	return listPages(ctx, apiKey, name, version, opts, func(ctx context.Context, c cloudservice.CloudServiceClient, token string) ([]*namespacepb.Namespace, string, error) {
+		resp, err := c.GetNamespaces(ctx, &cloudservice.GetNamespacesRequest{PageToken: token})
+		return resp.GetNamespaces(), resp.GetNextPageToken(), err
+	})
+}
+
+// ListUserGroups returns every user group that the Temporal Cloud Ops API lists
+// for apiKey, as ListNamespaces returns namespaces.
+func ListUserGroups(ctx context.Context, apiKey, name, version string, opts ...Option) ([]*identitypb.UserGroup, error) {
+	return listPages(ctx, apiKey, name, version, opts, func(ctx context.Context, c cloudservice.CloudServiceClient, token string) ([]*identitypb.UserGroup, string, error) {
+		resp, err := c.GetUserGroups(ctx, &cloudservice.GetUserGroupsRequest{PageToken: token})
+		return resp.GetGroups(), resp.GetNextPageToken(), err
+	})
+}
+
+// listPages returns the items of every page that page reads, following next page tokens, each call bounded by CallTimeout.
+func listPages[T any](ctx context.Context, apiKey, name, version string, opts []Option, page func(context.Context, cloudservice.CloudServiceClient, string) ([]T, string, error)) ([]T, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -183,18 +201,18 @@ func ListNamespaces(ctx context.Context, apiKey, name, version string, opts ...O
 		return nil, err
 	}
 	defer c.Close()
-	var namespaces []*namespacepb.Namespace
-	req := &cloudservice.GetNamespacesRequest{}
+	var items []T
+	var token string
 	for {
 		pageCtx, cancel := context.WithTimeout(ctx, CallTimeout)
-		resp, err := c.CloudService().GetNamespaces(pageCtx, req)
+		got, next, err := page(pageCtx, c.CloudService(), token)
 		cancel()
 		if err != nil {
 			return nil, err
 		}
-		namespaces = append(namespaces, resp.GetNamespaces()...)
-		if req.PageToken = resp.GetNextPageToken(); req.PageToken == "" {
-			return namespaces, nil
+		items = append(items, got...)
+		if token = next; token == "" {
+			return items, nil
 		}
 	}
 }

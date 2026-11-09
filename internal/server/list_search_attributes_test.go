@@ -19,6 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -36,6 +37,11 @@ type fakeCloudService struct {
 	err       error
 	pages     [][]*namespacepb.Namespace
 	deadlines []bool
+	groups    [][]*identitypb.UserGroup
+	// listing is groups as they were when the latest listing read its first page; its later pages read from it, so a
+	// listing never mixes two versions of groups.
+	listing    [][]*identitypb.UserGroup
+	groupCalls int
 }
 
 func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.GetNamespaceRequest) (*cloudservice.GetNamespaceResponse, error) {
@@ -69,6 +75,24 @@ func (f *fakeCloudService) GetNamespaces(ctx context.Context, req *cloudservice.
 	page, _ := strconv.Atoi(req.GetPageToken())
 	resp := &cloudservice.GetNamespacesResponse{Namespaces: f.pages[page]}
 	if page+1 < len(f.pages) {
+		resp.NextPageToken = strconv.Itoa(page + 1)
+	}
+	return resp, nil
+}
+
+func (f *fakeCloudService) GetUserGroups(_ context.Context, req *cloudservice.GetUserGroupsRequest) (*cloudservice.GetUserGroupsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groupCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if req.GetPageToken() == "" {
+		f.listing = f.groups
+	}
+	page, _ := strconv.Atoi(req.GetPageToken())
+	resp := &cloudservice.GetUserGroupsResponse{Groups: f.listing[page]}
+	if page+1 < len(f.listing) {
 		resp.NextPageToken = strconv.Itoa(page + 1)
 	}
 	return resp, nil
@@ -175,7 +199,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		if len(fake.calls) != 0 {
 			t.Errorf("Cloud Ops API calls = %q, want none", fake.calls)
 		}
-		if err := checkFields(t.Context(), nil, cfg, clients, &searchAttributeNames{}, &cfg.Targets[1], []string{"OrderId"}); err != nil {
+		if err := checkFields(t.Context(), cfg, clients, &searchAttributeNames{}, &cfg.Targets[1], []string{"OrderId"}); err != nil {
 			t.Errorf("checkFields = %v, want a field it cannot check to pass", err)
 		}
 	})

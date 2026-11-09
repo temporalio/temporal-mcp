@@ -81,9 +81,6 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 		if err != nil {
 			return nil, none, err
 		}
-		if in.WorkflowID == "" {
-			return nil, none, &toolError{Code: "invalid_argument", Message: "workflow_id is required"}
-		}
 		types, err := eventTypes(in.EventTypes)
 		if err != nil {
 			return nil, none, err
@@ -96,18 +93,9 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 			return nil, none, &toolError{Code: "invalid_argument", Message: "event_range: last must not be less than first"}
 		}
 		svc := clients.Client(t.Name).WorkflowService()
-		runID := in.RunID
-		if runID == "" {
-			desc, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
-				return svc.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
-					Namespace: t.Namespace,
-					Execution: &commonpb.WorkflowExecution{WorkflowId: in.WorkflowID},
-				}, opts...)
-			})
-			if err != nil {
-				return nil, none, err
-			}
-			runID = desc.GetWorkflowExecutionInfo().GetExecution().GetRunId()
+		runID, err := resolveRunID(ctx, t, svc, in.workflowRef)
+		if err != nil {
+			return nil, none, err
 		}
 		binding := []string{t.Name, in.WorkflowID, runID, in.Order, fmt.Sprint(slices.Sorted(maps.Keys(types))), strconv.FormatInt(r.First, 10), strconv.FormatInt(r.Last, 10)}
 		// A position is the ID of the last event returned, or 0 if none was, and then the token of the page to read. Every
@@ -132,25 +120,13 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 			// 0 asks for the server's largest page.
 			pageSize = 0
 		}
-		read := func(token []byte) ([]*historypb.HistoryEvent, []byte, error) {
-			if forward {
-				resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
-					return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
-				})
-				return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
-			}
-			resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryReverseResponse, error) {
-				return svc.GetWorkflowExecutionHistoryReverse(ctx, &workflowservice.GetWorkflowExecutionHistoryReverseRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
-			})
-			return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
-		}
 		earlier := func(a, b int64) bool { return forward && a < b || !forward && a > b }
 		batch := payloads.Batch(t.Name)
 		out := envelope[workflowHistory]{Target: &t.Name, Result: workflowHistory{WorkflowID: in.WorkflowID, RunID: runID, Events: []historyEvent{}}}
 		var more bool
 	pages:
 		for pages := 1; ; pages++ {
-			events, next, err := read(token)
+			events, next, err := historyPage(ctx, t, svc, execution, forward, pageSize, token)
 			if err != nil {
 				if pages == 1 && in.Continuation != "" {
 					err = continuationError(err, "get_workflow_history")
@@ -210,6 +186,38 @@ func getWorkflowHistory(cfg *config.Config, clients *temporal.Clients, payloads 
 	}
 }
 
+// resolveRunID returns w's run ID, or the ID of the workflow's latest run if w gives none.
+func resolveRunID(ctx context.Context, t *config.Target, svc workflowservice.WorkflowServiceClient, w workflowRef) (string, error) {
+	if w.WorkflowID == "" {
+		return "", &toolError{Code: "invalid_argument", Message: "workflow_id is required"}
+	}
+	if w.RunID != "" {
+		return w.RunID, nil
+	}
+	desc, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+		return svc.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
+			Namespace: t.Namespace,
+			Execution: &commonpb.WorkflowExecution{WorkflowId: w.WorkflowID},
+		}, opts...)
+	})
+	return desc.GetWorkflowExecutionInfo().GetExecution().GetRunId(), err
+}
+
+// historyPage returns a page of execution's history, oldest first if forward and newest first if not, of at most
+// pageSize events, or the server's largest page if pageSize is 0, and the token of the next page.
+func historyPage(ctx context.Context, t *config.Target, svc workflowservice.WorkflowServiceClient, execution *commonpb.WorkflowExecution, forward bool, pageSize int32, token []byte) ([]*historypb.HistoryEvent, []byte, error) {
+	if forward {
+		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
+			return svc.GetWorkflowExecutionHistory(ctx, &workflowservice.GetWorkflowExecutionHistoryRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
+		})
+		return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
+	}
+	resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryReverseResponse, error) {
+		return svc.GetWorkflowExecutionHistoryReverse(ctx, &workflowservice.GetWorkflowExecutionHistoryReverseRequest{Namespace: t.Namespace, Execution: execution, MaximumPageSize: pageSize, NextPageToken: token}, opts...)
+	})
+	return resp.GetHistory().GetEvents(), resp.GetNextPageToken(), err
+}
+
 func eventTypes(names []string) (map[enumspb.EventType]bool, error) {
 	types := map[enumspb.EventType]bool{}
 	var bad []string
@@ -236,22 +244,30 @@ func eventTypes(names []string) (map[enumspb.EventType]bool, error) {
 }
 
 func toHistoryEvent(e *historypb.HistoryEvent, batch *payload.Batch) (historyEvent, error) {
-	event := historyEvent{EventID: e.GetEventId(), EventTime: timeOf(e.GetEventTime()), EventType: e.GetEventType().String(), Attributes: map[string]any{}, Links: []map[string]any{}}
+	event := historyEvent{EventID: e.GetEventId(), EventTime: timeOf(e.GetEventTime()), EventType: e.GetEventType().String(), Attributes: map[string]any{}}
+	var err error
 	m := e.ProtoReflect()
 	if fd := m.WhichOneof(m.Descriptor().Oneofs().ByName("attributes")); fd != nil {
-		var err error
 		if event.Attributes, err = protoFields(m.Get(fd).Message(), batch); err != nil {
 			return historyEvent{}, err
 		}
 	}
+	if event.Links, err = eventLinks(e, batch); err != nil {
+		return historyEvent{}, err
+	}
+	return event, nil
+}
+
+func eventLinks(e *historypb.HistoryEvent, batch *payload.Batch) ([]map[string]any, error) {
+	links := []map[string]any{}
 	for _, l := range e.GetLinks() {
 		link, err := protoFields(l.ProtoReflect(), batch)
 		if err != nil {
-			return historyEvent{}, err
+			return nil, err
 		}
-		event.Links = append(event.Links, link)
+		links = append(links, link)
 	}
-	return event, nil
+	return links, nil
 }
 
 // protoFields returns the fields set in m by their proto names, with payloads, failures and search attributes as get_workflows gives them.

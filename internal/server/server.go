@@ -55,7 +55,8 @@ func boundPageSize(p *jsonschema.Schema) {
 // the SDK validates arguments as float64, in which math.MaxInt64 rounds up to 2^63 and overflows an int64.
 const maxJSONInteger = 1<<53 - 1
 
-// maxListItems is the most items a list argument, such as get_workflows' workflows, may have.
+// maxListItems is the most items a list argument, such as get_workflows' workflows, may have, and the most entries
+// each list in a get_workflow_history_summary result has.
 const maxListItems = 50
 
 // boundList limits p, a list property, to 1 to maxListItems items, and key, the schema of each item's key, to a
@@ -149,6 +150,13 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
 	}, getWorkflowHistory(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+		Name:        "get_workflow_history_summary",
+		Description: fmt.Sprintf("Summarize a workflow run's whole history, which this server reads in full: for each activity type, marker name, child workflow type, Nexus operation, signal name received or sent and update name, and for timers and workflow tasks, exact counts of their events by outcome, where open counts those scheduled or initiated that have no closing event. Event IDs to read with get_workflow_history are on activity types (first and last), marker names and received signal names (last), and each last_failure, unsuccessful entry and open timer. An activity type's max_attempt is the highest attempt that an ActivityTaskStarted event records, and last_failure can be an earlier attempt's failure that such an event records. Temporal writes that event only when the activity closes, and nothing about an open activity's retries, so an activity still retrying counts in open but not in max_attempt or last_failure (get_workflows has its attempt and last failure). Local activities appear in markers, without their activity types, named LocalActivity by the Go and Java SDKs and core_local_activity by the Python, TypeScript, .NET and Ruby SDKs, and one retried after a backoff timer records more than one marker. After a workflow task fails, its retries write no events until one completes, so workflow_tasks.failed counts a streak of failures once. unsuccessful lists the child workflows and Nexus operations that failed to start or ended without completing, the updates that failed, and the markers that recorded a failure, where a local activity's entry can be a failure it then retried after a backoff timer, so the local activity may still have completed. Each last_failure, and each update and marker in unsuccessful, has the failure's message and message_unavailable, which is null unless the SDK encoded the message and this server cannot show it, and then says why, payload_handling or decode_failed, while message is what was stored unencoded, often Encoded failure. timers.open lists, while the run is open, the timers that neither fired nor were canceled. close is the run's close event, null if the run was open when read, and coverage says which events were read. run_id in the result is the run read: the workflow's latest run if run_id is omitted. The summary has no payloads, such as inputs, results or failure details, and leaves the run's current state to get_workflows. Each list has up to %d entries, lists of counts most frequent first and the others newest first; a cut list gives in omitted how many entries it left out, and in next_call a get_workflow_history call whose events include all of them, and complete is false when any list is cut.", maxListItems),
+		Annotations: readOnlyAnnotations,
+	}, []string{
+		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
+		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
+	}, getWorkflowHistorySummary(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:         "get_task_queues",
 		Description:  fmt.Sprintf("Get the pollers and backlog of up to %d task queues, with a section in each for every task queue type asked for: up to %d of the type's pollers, most recently polled first, and poller_count, the number of pollers (complete is false when any section's list of pollers is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error. result has an entry for each name in task_queues, in the order given. A name that the Temporal server rejects as invalid, such as one that is too long, gets an error in its entry and no sections, while the other entries are unaffected. Any other error reading a task queue fails the whole call, and its message starts with the task queue's path, such as task_queues[3].", maxListItems, maxPollers),
 		Annotations:  readOnlyAnnotations,
@@ -263,9 +271,10 @@ var groupRefreshInterval = 5 * time.Minute
 // over the MCP streamable HTTP transport at /mcp. With auth configured, /mcp
 // requires a valid access token, logger gets the reason for each rejected token
 // or verification failure, and the protected resource metadata is served at the
-// path the token challenge points to.
+// path the token challenge points to. GET /healthz gets 200 ok, without a token.
 func NewMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
 	handler := newHandler(s, cfg)
 	if cfg.Auth != nil {
 		metadataPath, metadata := identity.MetadataPath(cfg.Auth.Resource), identity.MetadataHandler(cfg.Auth)

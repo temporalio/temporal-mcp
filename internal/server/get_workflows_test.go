@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	failurepb "go.temporal.io/api/failure/v1"
+	historypb "go.temporal.io/api/history/v1"
 	nexuspb "go.temporal.io/api/nexus/v1"
 	"go.temporal.io/api/operatorservice/v1"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
@@ -348,6 +350,65 @@ func runHeartbeating(ctx workflow.Context) error {
 
 func rejectWithDetails(workflow.Context) error {
 	return temporal.NewApplicationError("order rejected", "OrderRejected", "detail-1")
+}
+
+func rejectEntry(context.Context) error {
+	return temporal.NewNonRetryableApplicationError("entry rejected", "EntryRejected", nil, "secret-detail")
+}
+
+func acceptEntry(context.Context) (string, error) {
+	return "secret-result", nil
+}
+
+func rejectRequest(ctx workflow.Context, input string) (string, error) {
+	if input == "late" {
+		workflow.GetSignalChannel(ctx, "release").Receive(ctx, nil)
+	}
+	return "", temporal.NewApplicationError("request rejected", "RequestRejected")
+}
+
+var rejectOperation = temporalnexus.NewWorkflowRunOperation("reject", rejectRequest, func(_ context.Context, input string, _ nexus.StartOperationOptions) (client.StartWorkflowOptions, error) {
+	return client.StartWorkflowOptions{ID: "summarized-rejected-" + input}, nil
+})
+
+func summarized(ctx workflow.Context) error {
+	denied := 0
+	if err := workflow.SetUpdateHandler(ctx, "approve", func(ctx workflow.Context, ok bool) error {
+		if ok {
+			return nil
+		}
+		if denied++; denied == 1 {
+			_ = workflow.Await(ctx, func() bool { return denied > 1 })
+		}
+		return errors.New("not approved")
+	}); err != nil {
+		return err
+	}
+	_ = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Minute}), rejectEntry).Get(ctx, nil)
+	_ = workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: "summarized-child"}), rejectWithDetails).Get(ctx, nil)
+	nexusClient := workflow.NewNexusClient("summarized", "summarized")
+	late := nexusClient.ExecuteOperation(ctx, rejectOperation, "late", workflow.NexusOperationOptions{})
+	_ = late.GetNexusOperationExecution().Get(ctx, nil)
+	_ = nexusClient.ExecuteOperation(ctx, rejectOperation, "early", workflow.NexusOperationOptions{}).Get(ctx, nil)
+	_ = workflow.SignalExternalWorkflow(ctx, "summarized-rejected-late", "", "release", nil).Get(ctx, nil)
+	_ = late.Get(ctx, nil)
+	waiter := workflow.ExecuteChildWorkflow(workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: "summarized-waiter"}), waitForSignal)
+	_ = waiter.SignalChildWorkflow(ctx, "release", nil).Get(ctx, nil)
+	_ = workflow.SignalExternalWorkflow(ctx, "summarized-missing", "", "ping", nil).Get(ctx, nil)
+	_ = waiter.Get(ctx, nil)
+	local := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{StartToCloseTimeout: time.Minute})
+	_ = workflow.ExecuteLocalActivity(local, rejectEntry).Get(ctx, nil)
+	_ = workflow.ExecuteLocalActivity(local, acceptEntry).Get(ctx, nil)
+	return workflow.Sleep(ctx, time.Hour)
+}
+
+func cancelHeartbeating(ctx workflow.Context) error {
+	activityCtx, cancel := workflow.WithCancel(ctx)
+	heartbeating := workflow.ExecuteActivity(workflow.WithActivityOptions(activityCtx, workflow.ActivityOptions{StartToCloseTimeout: time.Hour}), heartbeatThenWait)
+	workflow.GetSignalChannel(ctx, "cancel").Receive(ctx, nil)
+	cancel()
+	_ = heartbeating.Get(ctx, nil)
+	return nil
 }
 
 // handlerNamespace is the namespace of the workflow that greetOperation starts, apart from the caller's.
@@ -2022,6 +2083,316 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 		if got := attributes(events[0])["failure"].(map[string]any)["application"]; !reflect.DeepEqual(got, map[string]any{"type": "LedgerWriteRejected", "non_retryable": true, "next_retry_delay": nil, "category": "Unspecified"}) {
 			t.Errorf("ActivityTaskFailed application failure = %#v, want the non-retryable LedgerWriteRejected", got)
+		}
+	})
+
+	t.Run("get_workflow_history_summary", func(t *testing.T) {
+		if _, err := c.OperatorService().CreateNexusEndpoint(ctx, &operatorservice.CreateNexusEndpointRequest{Spec: &nexuspb.EndpointSpec{
+			Name:   "summarized",
+			Target: &nexuspb.EndpointTarget{Variant: &nexuspb.EndpointTarget_Worker_{Worker: &nexuspb.EndpointTarget_Worker{Namespace: "default", TaskQueue: "summarized"}}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		ec, err := client.NewClientFromExisting(c, client.Options{DataConverter: encoded.DataConverter, FailureConverter: temporal.NewDefaultFailureConverter(temporal.DefaultFailureConverterOptions{DataConverter: encoded.DataConverter, EncodeCommonAttributes: true})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(ec.Close)
+		service := nexus.NewService("summarized")
+		if err := service.Register(rejectOperation); err != nil {
+			t.Fatal(err)
+		}
+		sw := worker.New(ec, "summarized", worker.Options{})
+		sw.RegisterWorkflow(summarized)
+		sw.RegisterWorkflow(rejectWithDetails)
+		sw.RegisterWorkflow(rejectRequest)
+		sw.RegisterWorkflow(waitForSignal)
+		sw.RegisterWorkflow(cancelHeartbeating)
+		sw.RegisterActivity(rejectEntry)
+		sw.RegisterActivity(heartbeatThenWait)
+		sw.RegisterNexusService(service)
+		if err := sw.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(sw.Stop)
+		run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: "summarized", TaskQueue: "summarized"}, summarized)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := []string{"repeated"}
+		for i := range 55 {
+			names = append(names, fmt.Sprintf("note-%d", i))
+		}
+		for _, name := range append(names, "repeated", "repeated") {
+			if err := c.SignalWorkflow(ctx, "summarized", "", name, "secret-signal"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		summarize := func(t *testing.T, args map[string]any) map[string]any {
+			t.Helper()
+			env := callTool(t, "get_workflow_history_summary", args)
+			b, err := json.Marshal(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range []string{`"handling"`, "secret", "catalog_should_fail"} {
+				if strings.Contains(string(b), s) {
+					t.Errorf("summary %s contains %s, want no payloads", b, s)
+				}
+			}
+			if cut := regexp.MustCompile(`"omitted":[1-9]`).Match(b); env["complete"] != !cut || env["next_call"] != nil {
+				t.Errorf("complete = %v, next_call = %v; want complete %v, false exactly when a list is cut, and no next_call", env["complete"], env["next_call"], !cut)
+			}
+			return env["result"].(map[string]any)
+		}
+		waitUntil(ctx, t, "the timer to start", func() bool {
+			return summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized"})["timers"].(map[string]any)["started"] == 1.0
+		})
+		approve := func(updateID string, ok bool, stage client.WorkflowUpdateStage) client.WorkflowUpdateHandle {
+			handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{WorkflowID: "summarized", UpdateID: updateID, UpdateName: "approve", Args: []any{ok}, WaitForStage: stage})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return handle
+		}
+		approve("approved", true, client.WorkflowUpdateStageCompleted)
+		held := approve("held", false, client.WorkflowUpdateStageAccepted)
+		approve("denied", false, client.WorkflowUpdateStageCompleted)
+		_ = held.Get(ctx, nil)
+		history := func(t *testing.T, workflowID string) map[enumspb.EventType][]*historypb.HistoryEvent {
+			t.Helper()
+			events := map[enumspb.EventType][]*historypb.HistoryEvent{}
+			for it := c.GetWorkflowHistory(ctx, workflowID, "", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT); it.HasNext(); {
+				e, err := it.Next()
+				if err != nil {
+					t.Fatal(err)
+				}
+				events[e.GetEventType()] = append(events[e.GetEventType()], e)
+			}
+			return events
+		}
+		id := func(e *historypb.HistoryEvent) float64 { return float64(e.GetEventId()) }
+		at := func(e *historypb.HistoryEvent) string { return e.GetEventTime().AsTime().Format(time.RFC3339Nano) }
+		list := func(items ...any) map[string]any {
+			return map[string]any{"items": append([]any{}, items...), "omitted": 0.0, "next_call": nil}
+		}
+		activity := func(typ string, scheduled, last *historypb.HistoryEvent, counts map[string]any) map[string]any {
+			a := map[string]any{"type": typ, "scheduled": 1.0, "completed": 0.0, "failed": 0.0, "timed_out": 0.0, "canceled": 0.0, "open": 0.0, "max_attempt": 1.0, "last_failure": nil, "first_event_id": id(scheduled), "last_event_id": id(last)}
+			maps.Copy(a, counts)
+			return a
+		}
+		child := func(typ string, counts map[string]any) map[string]any {
+			g := map[string]any{"type": typ, "initiated": 1.0, "start_failed": 0.0, "started": 1.0, "completed": 0.0, "failed": 0.0, "timed_out": 0.0, "canceled": 0.0, "terminated": 0.0, "open": 0.0}
+			maps.Copy(g, counts)
+			return g
+		}
+		check := func(t *testing.T, got, want map[string]any) {
+			t.Helper()
+			for k, v := range want {
+				if !reflect.DeepEqual(got[k], v) {
+					t.Errorf("%s = %#v\nwant %#v", k, got[k], v)
+				}
+			}
+		}
+		wantUpdates := func(h map[enumspb.EventType][]*historypb.HistoryEvent, message string, unavailable any) map[string]any {
+			completed := h[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED]
+			failedUpdate := func(updateID string, e *historypb.HistoryEvent) map[string]any {
+				return map[string]any{"name": "approve", "update_id": updateID, "message": message, "event_id": id(e), "message_unavailable": unavailable}
+			}
+			return map[string]any{
+				"names":        list(map[string]any{"name": "approve", "accepted": 3.0, "completed": 1.0, "failed": 2.0}),
+				"unsuccessful": list(failedUpdate("held", completed[2]), failedUpdate("denied", completed[1])),
+			}
+		}
+
+		t.Run("running", func(t *testing.T) {
+			h := history(t, "summarized")
+			got := summarize(t, map[string]any{"target": "local", "workflow_id": "summarized"})
+			failedOperations := h[enumspb.EVENT_TYPE_NEXUS_OPERATION_FAILED]
+			unsuccessfulOperations := []any{}
+			for i, input := range []string{"late", "early"} {
+				handler, err := c.DescribeWorkflowExecution(ctx, "summarized-rejected-"+input, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				unsuccessfulOperations = append(unsuccessfulOperations, map[string]any{"endpoint": "summarized", "service": "summarized", "operation": "reject", "outcome": "failed", "event_id": id(failedOperations[len(failedOperations)-1-i]), "links": []any{map[string]any{"workflow_event": map[string]any{
+					"namespace": "default", "workflow_id": "summarized-rejected-" + input, "run_id": handler.GetWorkflowExecutionInfo().GetExecution().GetRunId(),
+					"event_ref": map[string]any{"event_id": 1.0, "event_type": "WorkflowExecutionStarted"},
+				}}}})
+			}
+			signaled := h[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED]
+			var last *historypb.HistoryEvent
+			for events := range maps.Values(h) {
+				if l := events[len(events)-1]; last == nil || l.GetEventId() > last.GetEventId() {
+					last = l
+				}
+			}
+			timer := h[enumspb.EVENT_TYPE_TIMER_STARTED][0]
+			failedChild := h[enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_FAILED][0]
+			failedActivity := h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0]
+			wantActivities := func(message string, unavailable any) map[string]any {
+				return list(activity("rejectEntry", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], failedActivity, map[string]any{
+					"failed": 1.0, "last_failure": map[string]any{"message": message, "event_id": id(failedActivity), "message_unavailable": unavailable},
+				}))
+			}
+			markers := h[enumspb.EVENT_TYPE_MARKER_RECORDED]
+			wantMarkers := func(unavailable any) map[string]any {
+				return map[string]any{
+					"names":        list(map[string]any{"name": "LocalActivity", "count": 2.0, "failed": 1.0, "last_event_id": id(markers[1])}),
+					"unsuccessful": list(map[string]any{"name": "LocalActivity", "message": "entry rejected", "event_id": id(markers[0]), "message_unavailable": unavailable}),
+				}
+			}
+			check(t, got, map[string]any{
+				"workflow_id": "summarized",
+				"run_id":      run.GetRunID(),
+				"activities":  wantActivities("entry rejected", nil),
+				"markers":     wantMarkers(nil),
+				"child_workflows": map[string]any{
+					"types": list(child("waitForSignal", map[string]any{"completed": 1.0}), child("rejectWithDetails", map[string]any{"failed": 1.0})),
+					"unsuccessful": list(map[string]any{
+						"workflow_id": "summarized-child", "run_id": failedChild.GetChildWorkflowExecutionFailedEventAttributes().GetWorkflowExecution().GetRunId(), "outcome": "failed", "event_id": id(failedChild),
+					}),
+				},
+				"nexus_operations": map[string]any{
+					"operations":   list(map[string]any{"endpoint": "summarized", "service": "summarized", "operation": "reject", "scheduled": 2.0, "started": 2.0, "completed": 0.0, "failed": 2.0, "canceled": 0.0, "timed_out": 0.0, "open": 0.0}),
+					"unsuccessful": list(unsuccessfulOperations...),
+				},
+				"signals_sent": list(
+					map[string]any{"name": "release", "initiated": 2.0, "signaled": 2.0, "failed": 0.0},
+					map[string]any{"name": "ping", "initiated": 1.0, "signaled": 0.0, "failed": 1.0},
+				),
+				"updates": wantUpdates(h, "not approved", nil),
+				"timers": map[string]any{"started": 1.0, "fired": 0.0, "canceled": 0.0, "open": list(map[string]any{
+					"timer_id": timer.GetTimerStartedEventAttributes().GetTimerId(), "fires_at": timer.GetEventTime().AsTime().Add(time.Hour).Format(time.RFC3339Nano), "event_id": id(timer),
+				})},
+				"workflow_tasks": map[string]any{"completed": float64(len(h[enumspb.EVENT_TYPE_WORKFLOW_TASK_COMPLETED])), "failed": 0.0, "failed_by_cause": map[string]any{}, "timed_out": 0.0, "last_failure": nil},
+				"close":          nil,
+				"coverage": map[string]any{
+					"events_read": id(last), "first_event_id": 1.0, "first_event_time": at(h[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED][0]),
+					"last_event_id": id(last), "last_event_time": at(last), "previous_run_id": nil,
+				},
+			})
+
+			received := got["signals_received"].(map[string]any)
+			items := received["items"].([]any)
+			wantNext := map[string]any{"name": "get_workflow_history", "arguments": map[string]any{"target": "dev", "workflow_id": "summarized", "run_id": run.GetRunID(), "event_types": []any{"WorkflowExecutionSignaled"}}}
+			if first := map[string]any{"name": "repeated", "count": 3.0, "last_event_id": id(signaled[len(signaled)-1])}; len(items) != maxListItems || received["omitted"] != float64(len(names)-maxListItems) ||
+				!reflect.DeepEqual(items[0], first) || !reflect.DeepEqual(received["next_call"], wantNext) {
+				t.Fatalf("signals_received = %d items starting %#v, omitted %v, next_call %#v; want %d starting %#v, omitted %d, next_call %#v", len(items), items[0], received["omitted"], received["next_call"], maxListItems, first, len(names)-maxListItems, wantNext)
+			}
+			events, _ := pageThrough(t, "get_workflow_history", wantNext["arguments"].(map[string]any))
+			listed := []string{}
+			for _, e := range events {
+				listed = append(listed, attributes(e)["signal_name"].(string))
+			}
+			if slices.Sort(listed); !slices.Equal(slices.Compact(listed), slices.Sorted(slices.Values(names))) {
+				t.Errorf("signal names from next_call = %v, want %v", listed, names)
+			}
+
+			for target, reason := range map[string]string{"dev-omit": "payload_handling", "dev-passthrough": "payload_handling", "dev-unauthorized": "decode_failed"} {
+				t.Run(target, func(t *testing.T) {
+					check(t, summarize(t, map[string]any{"target": target, "workflow_id": "summarized"}), map[string]any{
+						"activities": wantActivities("Encoded failure", reason),
+						// The Go SDK records a local activity's failure with its message decoded beside the encoded attributes.
+						"markers": wantMarkers(reason),
+						"updates": wantUpdates(h, "Encoded failure", reason),
+					})
+				})
+			}
+		})
+
+		t.Run("closed", func(t *testing.T) {
+			h := history(t, "order-88231")
+			enrich, failed := h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][1], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_FAILED][0]
+			closed := h[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED][0]
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "order-88231"}), map[string]any{
+				"activities": list(
+					activity("enrich_product", enrich, failed, map[string]any{"failed": 1.0, "max_attempt": 3.0, "last_failure": map[string]any{"message": "503 Service Unavailable from catalog service", "event_id": id(failed), "message_unavailable": nil}}),
+					activity("authorize_payment", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED][0], map[string]any{"completed": 1.0}),
+				),
+				"close": map[string]any{"event_type": "WorkflowExecutionFailed", "event_time": at(closed), "event_id": id(closed)},
+			})
+
+			h = history(t, "ledger-payments-recovered")
+			started := h[enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED][0]
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "ledger-payments-recovered"}), map[string]any{
+				"activities": list(activity("ProcessLedgerEntry", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED][0], map[string]any{
+					"completed": 1.0, "max_attempt": 2.0, "last_failure": map[string]any{"message": "LedgerServiceUnavailable: recovery still in progress", "event_id": id(started), "message_unavailable": nil},
+				})),
+			})
+
+			if got := summarize(t, map[string]any{"target": "dev", "workflow_id": "continue-once"}); got["run_id"] != latestRunID || got["coverage"].(map[string]any)["previous_run_id"] != firstRunID {
+				t.Errorf("latest run: run_id = %v, coverage = %#v; want run %s continued from %s", got["run_id"], got["coverage"], latestRunID, firstRunID)
+			}
+		})
+
+		t.Run("open activities and children", func(t *testing.T) {
+			h := history(t, "order-running")
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "order-running"}), map[string]any{
+				"activities": list(
+					activity("enrich_product", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][1], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][1], map[string]any{"open": 1.0, "max_attempt": 0.0}),
+					activity("authorize_payment", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED][0], map[string]any{"completed": 1.0}),
+				),
+			})
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "order-parent"}), map[string]any{
+				"child_workflows": map[string]any{"types": list(child("waitForSignal", map[string]any{"open": 1.0})), "unsuccessful": list()},
+			})
+
+			canceling, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: "summarized-cancel-requested", TaskQueue: "summarized"}, cancelHeartbeating)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForDescribe(ctx, t, c, "summarized-cancel-requested", "the activity heartbeat to be recorded", func(desc *workflowservice.DescribeWorkflowExecutionResponse) bool {
+				pa := desc.GetPendingActivities()
+				return len(pa) == 1 && len(pa[0].GetHeartbeatDetails().GetPayloads()) > 0
+			})
+			if err := c.SignalWorkflow(ctx, "summarized-cancel-requested", "", "cancel", nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := canceling.Get(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			h = history(t, "summarized-cancel-requested")
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized-cancel-requested"}), map[string]any{
+				"activities": list(activity("heartbeatThenWait", h[enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED][0], h[enumspb.EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED][0], map[string]any{"open": 1.0, "max_attempt": 0.0})),
+			})
+		})
+
+		t.Run("failed workflow tasks", func(t *testing.T) {
+			wtFailed := history(t, "nde-affected")[enumspb.EVENT_TYPE_WORKFLOW_TASK_FAILED][0]
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "nde-affected"}), map[string]any{
+				"workflow_tasks": map[string]any{"completed": 1.0, "failed": 1.0, "failed_by_cause": map[string]any{"NonDeterministicError": 1.0}, "timed_out": 0.0, "last_failure": map[string]any{
+					"cause": "NonDeterministicError", "message": wtFailed.GetWorkflowTaskFailedEventAttributes().GetFailure().GetMessage(), "event_id": id(wtFailed), "message_unavailable": nil,
+				}},
+			})
+		})
+
+		t.Run("reset", func(t *testing.T) {
+			timer := history(t, "summarized")[enumspb.EVENT_TYPE_TIMER_STARTED][0]
+			reset, err := c.ResetWorkflowExecution(ctx, &workflowservice.ResetWorkflowExecutionRequest{
+				Namespace:                 "default",
+				WorkflowExecution:         &commonpb.WorkflowExecution{WorkflowId: "summarized", RunId: run.GetRunID()},
+				Reason:                    "reapply the approve updates",
+				WorkflowTaskFinishEventId: timer.GetTimerStartedEventAttributes().GetWorkflowTaskCompletedEventId(),
+				RequestId:                 "summarized-reset",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitUntil(ctx, t, "the reapplied updates to complete", func() bool {
+				return len(history(t, "summarized")[enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED]) == 3
+			})
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized"}), map[string]any{
+				"run_id":  reset.GetRunId(),
+				"updates": wantUpdates(history(t, "summarized"), "not approved", nil),
+			})
+			check(t, summarize(t, map[string]any{"target": "dev", "workflow_id": "summarized", "run_id": run.GetRunID()}), map[string]any{
+				"timers": map[string]any{"started": 1.0, "fired": 0.0, "canceled": 0.0, "open": list()},
+			})
+		})
+
+		if got := callToolError(t, "get_workflow_history_summary", map[string]any{"target": "dev", "workflow_id": ""}); got["code"] != "invalid_argument" {
+			t.Errorf("empty workflow_id: error = %#v, want code invalid_argument", got)
 		}
 	})
 }

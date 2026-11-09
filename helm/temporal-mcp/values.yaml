@@ -44,6 +44,13 @@ serviceAccountName: ""
 # preStop sleep, which runs before SIGTERM. Keep it at least a second longer
 # than the sleep plus config's shutdown_timeout.
 terminationGracePeriodSeconds: null
+# The server container's readiness probe, used when config sets auth: by default
+# a GET of /healthz on the mcp port, over HTTPS when config sets listen_tls. Set
+# it to null to drop it; {} keeps the default, since Helm merges maps.
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: mcp
 # The server container's lifecycle hooks. The preStop sleep, which needs
 # Kubernetes 1.30 or later, delays SIGTERM while the pod leaves the Service's
 # endpoints. Set lifecycle to null to drop it; {} keeps it, since Helm merges maps.

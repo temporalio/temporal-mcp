@@ -198,6 +198,41 @@ func TestHTTPS(t *testing.T) {
 	}
 }
 
+func TestHealthz(t *testing.T) {
+	bin := buildBinary(t)
+	tests := []struct{ name, config string }{
+		{"auth", "auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
+			"authorization:\n  profiles: {p: {targets: [prod]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n"},
+		{"without auth", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			auditLog, configPath := filepath.Join(dir, "audit.log"), filepath.Join(dir, "config.yaml")
+			config := fmt.Sprintf("listen: 127.0.0.1:0\naudit_log_file: %q\n", auditLog) + tt.config +
+				"targets:\n  - {name: prod, description: x, address: prod.example.tmprl.cloud:7233, namespace: payments.abc12}\n"
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.Get(strings.TrimSuffix(startServer(t, bin, configPath, nil), "/mcp") + "/healthz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+				t.Errorf("GET /healthz = %d %q, want 200 ok", resp.StatusCode, body)
+			}
+			if data, err := os.ReadFile(auditLog); err != nil || len(data) > 0 {
+				t.Errorf("audit log = %q (%v), want no records", data, err)
+			}
+		})
+	}
+}
+
 func TestLogFiles(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -348,7 +383,7 @@ func TestExitsWithoutServing(t *testing.T) {
 	unknownTool := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}, q: {tools_deny: [terminate_workflow], targets: [a]},\n" +
-		"    r: {tools_deny: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_task_queues, search_workflows, count_workflows, list_search_attributes], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
+		"    r: {tools_deny: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_workflow_history_summary, get_task_queues, search_workflows, count_workflows, list_search_attributes], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
 		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")

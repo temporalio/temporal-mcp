@@ -180,9 +180,10 @@ type CloudNamespaces struct {
 	// Exclude are path.Match patterns, matched ignoring case; a namespace whose
 	// name matches one of them gets no target.
 	Exclude []string `yaml:"exclude"`
-	// PayloadHandling is the PayloadHandling of each target, PayloadOmit or
-	// PayloadPassthrough. Empty means PayloadOmit.
+	// PayloadHandling is the PayloadHandling of each target. Empty means PayloadOmit.
 	PayloadHandling string `yaml:"payload_handling"`
+	// Codec is the Codec of each target.
+	Codec string `yaml:"codec"`
 }
 
 // ListNamespacesFunc returns the namespaces that the Temporal Cloud Ops API lists for apiKey.
@@ -617,17 +618,7 @@ func (c *Config) validateTargets() error {
 		if t.APIKey != nil && t.TLS != nil {
 			errs = append(errs, fmt.Errorf("%s: at most one of api_key or tls is allowed", label))
 		}
-		switch t.PayloadHandling {
-		case "", PayloadOmit, PayloadPassthrough, PayloadDecode:
-		default:
-			errs = append(errs, fmt.Errorf("%s: payload_handling: %q is not one of %s, %s or %s", label, t.PayloadHandling, PayloadOmit, PayloadPassthrough, PayloadDecode))
-		}
-		if _, ok := c.Codecs[t.Codec]; t.Codec != "" && !ok {
-			errs = append(errs, fmt.Errorf("%s: codec %q is not one of codecs", label, t.Codec))
-		}
-		if t.PayloadHandling == PayloadDecode && t.Codec == "" {
-			errs = append(errs, fmt.Errorf("%s: codec is required with payload_handling %s", label, PayloadDecode))
-		}
+		errs = append(errs, validatePayloadHandling(label, t.PayloadHandling, t.Codec, c.Codecs)...)
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
 		codec, label := c.Codecs[name], fmt.Sprintf("codecs: %q", name)
@@ -645,7 +636,7 @@ func (c *Config) validateTargets() error {
 // addCloudTargets adds the targets of the temporal_cloud section and records each listed namespace's outcome in TemporalCloud.Report.
 func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
 	tc := c.TemporalCloud
-	if err := tc.validate(); err != nil {
+	if err := tc.validate(c.Codecs); err != nil {
 		return err
 	}
 	key, err := tc.APIKey.Read()
@@ -665,9 +656,9 @@ func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
 		id, name := ns.GetNamespace(), ns.GetSpec().GetName()
 		tc.namespaceIDs = append(tc.namespaceIDs, id)
 		var reason string
-		switch i := slices.IndexFunc(c.Targets, func(t Target) bool { return t.Namespace == id }); {
+		switch i := slices.IndexFunc(c.Targets, func(t Target) bool { return tc.targetOf(t, id) }); {
 		case i >= 0:
-			reason = fmt.Sprintf("target %q has this namespace", c.Targets[i].Name)
+			reason = fmt.Sprintf("target %q in targets replaces it", c.Targets[i].Name)
 		case !tc.Namespaces.selects(name):
 			reason = "temporal_cloud's include and exclude patterns do not select it"
 		case !ns.GetSpec().GetApiKeyAuth().GetEnabled() || ns.GetEndpoints().GetGrpcAddress() == "":
@@ -689,6 +680,7 @@ func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
 			Namespace:       id,
 			APIKey:          tc.APIKey,
 			PayloadHandling: tc.Namespaces.PayloadHandling,
+			Codec:           tc.Namespaces.Codec,
 		})
 		tc.Added = append(tc.Added, name)
 		tc.Report = append(tc.Report, fmt.Sprintf("temporal_cloud: namespace %s: added target %q", id, name))
@@ -696,7 +688,15 @@ func (c *Config) addCloudTargets(list ListNamespacesFunc) error {
 	return nil
 }
 
-func (tc *TemporalCloud) validate() error {
+// targetOf reports whether t is the target of the listed namespace id: the one
+// Load added for it, or one in targets with that namespace at a Temporal Cloud
+// address. A target with that namespace at another address may be another
+// server, so it is not.
+func (tc *TemporalCloud) targetOf(t Target, id string) bool {
+	return slices.Contains(tc.namespaceIDs, id) && t.Namespace == id && (IsCloud(t.Address) || slices.Contains(tc.Added, t.Name))
+}
+
+func (tc *TemporalCloud) validate(codecs map[string]Codec) error {
 	var errs []error
 	if tc.APIKey == nil {
 		errs = append(errs, errors.New("temporal_cloud: api_key is required"))
@@ -716,11 +716,7 @@ func (tc *TemporalCloud) validate() error {
 			}
 		}
 	}
-	switch tc.Namespaces.PayloadHandling {
-	case "", PayloadOmit, PayloadPassthrough:
-	default:
-		errs = append(errs, fmt.Errorf("temporal_cloud: namespaces: payload_handling: %q is not one of %s or %s", tc.Namespaces.PayloadHandling, PayloadOmit, PayloadPassthrough))
-	}
+	errs = append(errs, validatePayloadHandling("temporal_cloud: namespaces", tc.Namespaces.PayloadHandling, tc.Namespaces.Codec, codecs)...)
 	if g := tc.Groups; g != nil {
 		if err := validateClaimName("temporal_cloud: groups", g.ClaimName); err != nil {
 			errs = append(errs, err)
@@ -738,17 +734,23 @@ func (tc *TemporalCloud) validate() error {
 // profile and a rule for each SCIM group that list lists and that can read a
 // target. It also returns a report: how many groups it listed, then one line
 // per group in ID order with the targets the group gives and its namespaces
-// that have no target, or why it gives none. It fails if it cannot list the
-// groups or the result is invalid.
-func (c *Config) GroupAuthorization(list ListUserGroupsFunc) (*Authorization, []string, error) {
+// that have no target, or why it gives none. Namespaces can move between
+// projects, so it also lists them with listNamespaces for the projects they
+// are in now. It fails if it cannot list the groups or the namespaces, or the
+// result is invalid.
+func (c *Config) GroupAuthorization(listNamespaces ListNamespacesFunc, listGroups ListUserGroupsFunc) (*Authorization, []string, error) {
 	tc := c.TemporalCloud
 	key, err := tc.APIKey.Read()
 	if err != nil {
 		return nil, nil, fmt.Errorf("temporal_cloud: api_key: %w", err)
 	}
-	groups, err := list(key)
+	groups, err := listGroups(key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("temporal_cloud: listing the account's user groups: %w", err)
+	}
+	namespaces, err := listNamespaces(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("temporal_cloud: listing the account's namespaces: %w", err)
 	}
 	a := &Authorization{Profiles: map[string]Profile{}}
 	if c.Authorization != nil {
@@ -757,25 +759,32 @@ func (c *Config) GroupAuthorization(list ListUserGroupsFunc) (*Authorization, []
 	}
 	allNamespaces := []identitypb.AccountAccess_Role{identitypb.AccountAccess_ROLE_OWNER, identitypb.AccountAccess_ROLE_ADMIN}
 	reads := []identitypb.NamespaceAccess_Permission{identitypb.NamespaceAccess_PERMISSION_ADMIN, identitypb.NamespaceAccess_PERMISSION_WRITE, identitypb.NamespaceAccess_PERMISSION_READ}
+	// These project roles give the namespace permission of the same name on each of the project's namespaces.
+	projectReads := []identitypb.ProjectAccess_ProjectRole{identitypb.ProjectAccess_PROJECT_ROLE_ADMIN, identitypb.ProjectAccess_PROJECT_ROLE_WRITE, identitypb.ProjectAccess_PROJECT_ROLE_READ}
 	slices.SortFunc(groups, func(a, b *identitypb.UserGroup) int { return cmp.Compare(a.GetId(), b.GetId()) })
 	report := []string{fmt.Sprintf("temporal_cloud: user groups listed by the API key: %d", len(groups))}
 	for _, g := range groups {
 		access := g.GetSpec().GetAccess()
 		all := slices.Contains(allNamespaces, access.GetAccountAccess().GetRole())
-		var targets, accessible, missing []string
+		accessible := map[string]bool{}
+		for ns, na := range access.GetNamespaceAccesses() {
+			if slices.Contains(reads, na.GetPermission()) {
+				accessible[ns] = true
+			}
+		}
+		for _, ns := range namespaces {
+			if project := ns.GetProjectId(); project != "" && slices.Contains(projectReads, access.GetProjectAccesses()[project].GetRole()) {
+				accessible[ns.GetNamespace()] = true
+			}
+		}
+		var targets, missing []string
 		for _, t := range c.Targets {
-			if slices.Contains(tc.namespaceIDs, t.Namespace) && (all || slices.Contains(reads, access.GetNamespaceAccesses()[t.Namespace].GetPermission())) {
+			if (all || accessible[t.Namespace]) && tc.targetOf(t, t.Namespace) {
 				targets = append(targets, t.Name)
 			}
 		}
-		for ns, na := range access.GetNamespaceAccesses() {
-			if slices.Contains(reads, na.GetPermission()) {
-				accessible = append(accessible, ns)
-			}
-		}
-		slices.Sort(accessible)
-		for _, ns := range accessible {
-			if !slices.Contains(tc.namespaceIDs, ns) || !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Namespace == ns }) {
+		for _, ns := range slices.Sorted(maps.Keys(accessible)) {
+			if !slices.ContainsFunc(c.Targets, func(t Target) bool { return tc.targetOf(t, ns) }) {
 				missing = append(missing, ns)
 			}
 		}
@@ -804,6 +813,24 @@ func (c *Config) GroupAuthorization(list ListUserGroupsFunc) (*Authorization, []
 		return nil, nil, err
 	}
 	return a, report, nil
+}
+
+// validatePayloadHandling requires payloadHandling to be empty or a
+// PayloadHandling value, codec to be empty or a key of codecs, and a codec with PayloadDecode.
+func validatePayloadHandling(label, payloadHandling, codec string, codecs map[string]Codec) []error {
+	var errs []error
+	switch payloadHandling {
+	case "", PayloadOmit, PayloadPassthrough, PayloadDecode:
+	default:
+		errs = append(errs, fmt.Errorf("%s: payload_handling: %q is not one of %s, %s or %s", label, payloadHandling, PayloadOmit, PayloadPassthrough, PayloadDecode))
+	}
+	if _, ok := codecs[codec]; codec != "" && !ok {
+		errs = append(errs, fmt.Errorf("%s: codec %q is not one of codecs", label, codec))
+	}
+	if payloadHandling == PayloadDecode && codec == "" {
+		errs = append(errs, fmt.Errorf("%s: codec is required with payload_handling %s", label, PayloadDecode))
+	}
+	return errs
 }
 
 // selects reports whether include and exclude select the namespace named name, without the account ID, ignoring case.
@@ -1070,4 +1097,15 @@ func LoopbackHost(host string) bool {
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.IsLoopback()
+}
+
+// IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
+func IsCloud(address string) bool {
+	address = strings.TrimPrefix(address, "dns:///")
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.HasSuffix(host, ".tmprl.cloud") || strings.HasSuffix(host, ".api.temporal.io")
 }

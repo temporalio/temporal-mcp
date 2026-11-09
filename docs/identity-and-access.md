@@ -182,8 +182,10 @@ confirm that the claim lists the names of their Temporal groups.
 - **A user joins or leaves an Okta group:** in the next access token Okta
   issues them, since the server reads membership only from the token, so a
   removal takes effect once their current token expires.
-- **A group's namespace access changes in Temporal Cloud:** within 5 minutes,
-  when the server next lists the groups.
+- **A group's namespace permissions or project roles change in Temporal
+  Cloud:** within 5 minutes, when the server next lists the groups.
+- **A namespace moves to another project:** within 5 minutes, when the server
+  next lists the namespaces along with the groups.
 - **A group is renamed in Okta:** once Temporal Cloud has applied the new name,
   within 10 minutes according to its
   [SCIM documentation](https://docs.temporal.io/cloud/manage-access/scim), and
@@ -204,9 +206,7 @@ their client next lists tools. Every call is checked against the current access.
 - **Groups created only in Temporal Cloud** never appear in the token.
 - **Account roles:** Owner and Global Admin give every target of the account's
   namespaces, and the other roles give nothing beyond the group's namespace
-  permissions.
-- **Project access and custom roles** are not read, so namespace access that a
-  group has only through them gives nothing in Temporal MCP.
+  permissions and project roles.
 
 ## Interpreting Failures
 

@@ -110,7 +110,7 @@ func fetchSearchAttributes(ctx context.Context, clients *temporal.Clients, names
 			// The Cloud Ops API's type names are the IndexedValueType names with another prefix.
 			custom[name] = enumspb.IndexedValueType(enumspb.IndexedValueType_value["INDEXED_VALUE_TYPE_"+strings.TrimPrefix(typ.String(), "SEARCH_ATTRIBUTE_TYPE_")])
 		}
-	case temporal.IsCloud(t.Address):
+	case config.IsCloud(t.Address):
 		return map[string]enumspb.IndexedValueType{}, cloudSystemSearchAttributes, false, nil
 	default:
 		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*operatorservice.ListSearchAttributesResponse, error) {

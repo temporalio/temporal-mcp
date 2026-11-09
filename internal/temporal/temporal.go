@@ -11,9 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -82,7 +80,7 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 			continue
 		}
 		c.byName[t.Name] = cl
-		if cred != nil && IsCloud(t.Address) {
+		if cred != nil && config.IsCloud(t.Address) {
 			ops, err := cloudOpsClient(apiKeyReader(func(ctx context.Context) (string, error) {
 				return cred(ctx, identity.CallerFrom(ctx), &t)
 			}), name, version, o.cloudOpsAddress, grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)))
@@ -154,17 +152,6 @@ func (c *Clients) Client(name string) client.Client {
 // CloudOps returns the Temporal Cloud Ops API client for the target with the given name, or nil if the target is not on Temporal Cloud or has no API key.
 func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 	return c.cloud[name]
-}
-
-// IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
-func IsCloud(address string) bool {
-	address = strings.TrimPrefix(address, "dns:///")
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		host = address
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return strings.HasSuffix(host, ".tmprl.cloud") || strings.HasSuffix(host, ".api.temporal.io")
 }
 
 // CallTimeout bounds a tool's call to a Temporal server or the Cloud Ops API, including its retries while the server is unavailable, and each page that ListNamespaces and ListUserGroups read.

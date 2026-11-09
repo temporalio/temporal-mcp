@@ -32,16 +32,19 @@ import (
 
 type fakeCloudService struct {
 	cloudservice.UnimplementedCloudServiceServer
-	mu        sync.Mutex
-	calls     []string
-	err       error
-	pages     [][]*namespacepb.Namespace
-	deadlines []bool
-	groups    [][]*identitypb.UserGroup
-	// listing is groups as they were when the latest listing read its first page; its later pages read from it, so a
-	// listing never mixes two versions of groups.
-	listing    [][]*identitypb.UserGroup
-	groupCalls int
+	mu    sync.Mutex
+	calls []string
+	err   error
+	// namespacesErr is the error that GetNamespaces returns, if set.
+	namespacesErr error
+	pages         [][]*namespacepb.Namespace
+	deadlines     []bool
+	groups        [][]*identitypb.UserGroup
+	// namespaceListing and listing are pages and groups as they were when the latest listing of each read its first
+	// page; its later pages read from it, so a listing never mixes two versions.
+	namespaceListing [][]*namespacepb.Namespace
+	listing          [][]*identitypb.UserGroup
+	groupCalls       int
 }
 
 func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.GetNamespaceRequest) (*cloudservice.GetNamespaceResponse, error) {
@@ -72,9 +75,15 @@ func (f *fakeCloudService) GetNamespaces(ctx context.Context, req *cloudservice.
 	f.calls = append(f.calls, req.GetPageToken()+" "+strings.Join(md.Get("authorization"), ","))
 	deadline, ok := ctx.Deadline()
 	f.deadlines = append(f.deadlines, ok && time.Until(deadline) <= temporal.CallTimeout)
+	if f.namespacesErr != nil {
+		return nil, f.namespacesErr
+	}
+	if req.GetPageToken() == "" {
+		f.namespaceListing = f.pages
+	}
 	page, _ := strconv.Atoi(req.GetPageToken())
-	resp := &cloudservice.GetNamespacesResponse{Namespaces: f.pages[page]}
-	if page+1 < len(f.pages) {
+	resp := &cloudservice.GetNamespacesResponse{Namespaces: f.namespaceListing[page]}
+	if page+1 < len(f.namespaceListing) {
 		resp.NextPageToken = strconv.Itoa(page + 1)
 	}
 	return resp, nil

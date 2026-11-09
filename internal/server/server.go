@@ -197,13 +197,13 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // the server does not have, or if a ToolsDeny leaves no tools. Without groups,
 // it sets the Tools of each authorization profile without them to the
 // server's read-only tools other than those in the profile's ToolsDeny.
-// With groups, callers get cfg.GroupAuthorization of the groups that
-// listGroups lists, with Tools set the same way, and cfg.Authorization is left
+// With groups, callers get cfg.GroupAuthorization of the groups and namespaces
+// that listGroups and listNamespaces list, with Tools set the same way, and cfg.Authorization is left
 // unchanged. NewServer fails if it cannot get it, and logs its report; then,
 // until ctx is done, it gets it again every groupRefreshInterval, logging the
 // report when it changes, or the error, in which case callers keep the last
 // one. Each request uses the policy it starts with.
-func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger, listGroups config.ListUserGroupsFunc) (*mcp.Server, error) {
+func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger, listNamespaces config.ListNamespacesFunc, listGroups config.ListUserGroupsFunc) (*mcp.Server, error) {
 	groups := cfg.TemporalCloud != nil && cfg.TemporalCloud.Groups != nil
 	if cfg.Auth != nil && cfg.Authorization == nil && !groups {
 		return nil, errors.New("authorization: required with an auth section, unless temporal_cloud has groups")
@@ -216,7 +216,7 @@ func NewServer(ctx, subscriptions context.Context, name, version string, cfg *co
 		return nil, err
 	}
 	buildPolicy := func() (*config.Authorization, []string, error) {
-		a, report, err := cfg.GroupAuthorization(listGroups)
+		a, report, err := cfg.GroupAuthorization(listNamespaces, listGroups)
 		if err == nil {
 			err = resolveProfileTools(a, tools, s.access)
 		}

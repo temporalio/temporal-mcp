@@ -211,9 +211,12 @@ targets:
   - {name: billing, description: Billing., address: "billing:7233", namespace: billing}
   - {name: legacy, aliases: [Shipping], description: Legacy., address: "legacy:7233", namespace: legacy}
   - {name: audit, aliases: [audit.acct1], description: Audit., address: "audit:7233", namespace: audit}
+  - {name: payments-proxy, description: Payments through a proxy., address: "proxy:7233", namespace: payments.acct1}
 temporal_cloud:
   api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
-  namespaces: {exclude: ["test-*"], payload_handling: passthrough}
+  namespaces: {exclude: ["test-*"], payload_handling: decode, codec: cloud}
+codecs:
+  cloud: {endpoint: "https://codec.example.com/{namespace}"}
 auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com", audience: a, required_scopes: [s]}
 authorization:
   profiles: {p: {targets: [payments, shipping.acct1]}}
@@ -236,21 +239,21 @@ authorization:
 	}
 	key := cfg.TemporalCloud.APIKey
 	cloudTarget := func(name, namespace, description string) Target {
-		return Target{Name: name, Description: description, Address: address, Namespace: namespace, APIKey: key, PayloadHandling: PayloadPassthrough}
+		return Target{Name: name, Description: description, Address: address, Namespace: namespace, APIKey: key, PayloadHandling: PayloadDecode, Codec: "cloud"}
 	}
 	if want := []Target{
 		cloudTarget("payments", "payments.acct1", "Payments."),
 		cloudTarget("billing.acct1", "billing.acct1", "Temporal Cloud namespace billing.acct1"),
 		cloudTarget("shipping.acct1", "shipping.acct1", "Shipping."),
-	}; !reflect.DeepEqual(cfg.Targets[4:], want) {
-		t.Errorf("targets after the file's = %+v\nwant %+v", cfg.Targets[4:], want)
+	}; !reflect.DeepEqual(cfg.Targets[5:], want) {
+		t.Errorf("targets after the file's = %+v\nwant %+v", cfg.Targets[5:], want)
 	}
 	if want := []string{"payments", "billing.acct1", "shipping.acct1"}; !reflect.DeepEqual(cfg.TemporalCloud.Added, want) {
 		t.Errorf("added = %q, want %q", cfg.TemporalCloud.Added, want)
 	}
 	if want := []string{
 		"temporal_cloud: namespaces listed by the API key: 8",
-		`temporal_cloud: namespace orders.acct1: added no target, because target "orders-mtls" has this namespace`,
+		`temporal_cloud: namespace orders.acct1: added no target, because target "orders-mtls" in targets replaces it`,
 		`temporal_cloud: namespace payments.acct1: added target "payments"`,
 		`temporal_cloud: namespace billing.acct1: added target "billing.acct1"`,
 		`temporal_cloud: namespace shipping.acct1: added target "shipping.acct1"`,
@@ -301,7 +304,7 @@ func TestParseTemporalCloudInvalid(t *testing.T) {
 		}},
 		{"empty include", "temporal_cloud:\n" + key + "  namespaces: {include: []}\n", nil, []string{"temporal_cloud: namespaces: include: at least one pattern is required; leave include out to select every namespace"}},
 		{"include with no value", "temporal_cloud:\n" + key + "  namespaces:\n    include:\n", nil, []string{"temporal_cloud: namespaces: include: at least one pattern is required; leave include out to select every namespace"}},
-		{"unknown payload handling", "temporal_cloud:\n" + key + "  namespaces: {payload_handling: raw}\n", nil, []string{`temporal_cloud: namespaces: payload_handling: "raw" is not one of omit or passthrough`}},
+		{"unknown payload handling", "temporal_cloud:\n" + key + "  namespaces: {payload_handling: raw}\n", nil, []string{`temporal_cloud: namespaces: payload_handling: "raw" is not one of omit, passthrough or decode`}},
 		{"unset API key", "temporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_UNSET_CLOUD_KEY}\n", nil, []string{"temporal_cloud: api_key: environment variable TEMPORAL_MCP_TEST_UNSET_CLOUD_KEY is unset or empty"}},
 		{"listing fails", "temporal_cloud:\n" + key, failing, []string{"temporal_cloud: listing the account's namespaces: connection refused"}},
 		{"no namespace and no targets", "temporal_cloud:\n" + key, listing(t, cloudNamespace("mtls-only", "", "")), []string{
@@ -358,6 +361,8 @@ temporal_cloud:
 	for _, tt := range []struct{ name, yaml, cloudErr string }{
 		{"listing fails", data, "temporal_cloud: listing the account's namespaces: connection refused"},
 		{"malformed include", data + "  namespaces: {include: [\"[\"]}\n", `temporal_cloud: namespaces: include[0]: "[" is not a valid pattern`},
+		{"decode without a codec", data + "  namespaces: {payload_handling: decode}\n", "temporal_cloud: namespaces: codec is required with payload_handling decode"},
+		{"unknown codec", data + "  namespaces: {payload_handling: decode, codec: missing}\n", `temporal_cloud: namespaces: codec "missing" is not one of codecs`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parse([]byte(tt.yaml), failing)
@@ -390,7 +395,7 @@ auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, report, err := cfg.GroupAuthorization(func(apiKey string) ([]*identitypb.UserGroup, error) {
+	_, report, err := cfg.GroupAuthorization(listing(t, cloudNamespace("payments", "a:7233", "")), func(apiKey string) ([]*identitypb.UserGroup, error) {
 		if apiKey != "cloud-key" {
 			t.Errorf("list got API key %q, want cloud-key", apiKey)
 		}
@@ -409,6 +414,73 @@ auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com
 	}
 	if !reflect.DeepEqual(report, want) {
 		t.Errorf("report = %q, want %q", report, want)
+	}
+}
+
+func TestGroupAuthorizationProjectRoles(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	data := "listen: 0.0.0.0:8080\n" + `temporal_cloud:
+  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
+  namespaces: {exclude: [archive]}
+  groups: {claim_name: groups}
+auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com", audience: a, required_scopes: [s]}
+`
+	billing, archive := cloudNamespace("billing", "a:7233", ""), cloudNamespace("archive", "a:7233", "")
+	billing.ProjectId, archive.ProjectId = "finance", "finance"
+	namespaces := []*namespacepb.Namespace{billing, archive, cloudNamespace("orders", "a:7233", "")}
+	cfg, err := parse([]byte(data), listing(t, namespaces...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups []*identitypb.UserGroup
+	for _, g := range []struct {
+		id, name, project string
+		role              identitypb.ProjectAccess_ProjectRole
+	}{
+		{"g1", "Finance Readers", "finance", identitypb.ProjectAccess_PROJECT_ROLE_READ},
+		{"g2", "Finance Writers", "finance", identitypb.ProjectAccess_PROJECT_ROLE_WRITE},
+		{"g3", "Finance Admins", "finance", identitypb.ProjectAccess_PROJECT_ROLE_ADMIN},
+		{"g4", "Finance Listers", "finance", identitypb.ProjectAccess_PROJECT_ROLE_LIST},
+		{"g5", "Finance Contributors", "finance", identitypb.ProjectAccess_PROJECT_ROLE_CONTRIBUTE},
+		{"g6", "Finance Members", "finance", identitypb.ProjectAccess_PROJECT_ROLE_MEMBER},
+		{"g7", "Finance Developers", "finance", identitypb.ProjectAccess_PROJECT_ROLE_DEVELOPER},
+		// orders has no project, which must not match a project access with an empty ID.
+		{"g8", "No Project", "", identitypb.ProjectAccess_PROJECT_ROLE_READ},
+	} {
+		groups = append(groups, &identitypb.UserGroup{Id: g.id, Spec: &identitypb.UserGroupSpec{
+			DisplayName: g.name,
+			Access: &identitypb.Access{
+				AccountAccess:   &identitypb.AccountAccess{Role: identitypb.AccountAccess_ROLE_DEVELOPER},
+				ProjectAccesses: map[string]*identitypb.ProjectAccess{g.project: {Role: g.role}},
+			},
+			GroupType: &identitypb.UserGroupSpec_ScimGroup{ScimGroup: &identitypb.SCIMGroupSpec{IdpId: g.name}},
+		}})
+	}
+	a, report, err := cfg.GroupAuthorization(listing(t, namespaces...), func(string) ([]*identitypb.UserGroup, error) { return groups, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"temporal_cloud: user groups listed by the API key: 8",
+		`temporal_cloud: group g1 "Finance Readers": gives targets ["billing"] to callers whose groups claim has "Finance Readers"; its namespaces ["archive.acct1"] have no target`,
+		`temporal_cloud: group g2 "Finance Writers": gives targets ["billing"] to callers whose groups claim has "Finance Writers"; its namespaces ["archive.acct1"] have no target`,
+		`temporal_cloud: group g3 "Finance Admins": gives targets ["billing"] to callers whose groups claim has "Finance Admins"; its namespaces ["archive.acct1"] have no target`,
+		`temporal_cloud: group g4 "Finance Listers": gives no targets, because it has no access to any namespace`,
+		`temporal_cloud: group g5 "Finance Contributors": gives no targets, because it has no access to any namespace`,
+		`temporal_cloud: group g6 "Finance Members": gives no targets, because it has no access to any namespace`,
+		`temporal_cloud: group g7 "Finance Developers": gives no targets, because it has no access to any namespace`,
+		`temporal_cloud: group g8 "No Project": gives no targets, because it has no access to any namespace`,
+	}
+	if !reflect.DeepEqual(report, want) {
+		t.Errorf("report = %q\nwant %q", report, want)
+	}
+	if len(a.Profiles) != 3 {
+		t.Errorf("profiles = %+v, want only those of g1, g2 and g3", a.Profiles)
+	}
+	for _, id := range []string{"g1", "g2", "g3"} {
+		if got := a.Profiles["cloud-group:"+id].Targets; !reflect.DeepEqual(got, []string{"billing"}) {
+			t.Errorf("profile of %s: targets = %q, want [billing]", id, got)
+		}
 	}
 }
 
@@ -517,6 +589,20 @@ func TestLookup(t *testing.T) {
 		}
 		if !ok || got.Name != tt.want {
 			t.Errorf("Lookup(%q) = %v, %v, want %q", tt.name, got, ok, tt.want)
+		}
+	}
+}
+
+func TestIsCloud(t *testing.T) {
+	for address, want := range map[string]bool{
+		"dns:///orders.acct1.tmprl.cloud:7233": true,
+		"us-east-1.aws.api.temporal.io:7233":   true,
+		"127.0.0.1:7233":                       false,
+		"eviltmprl.cloud:7233":                 false,
+		"orders.acct1.tmprl.cloud.example.com": false,
+	} {
+		if got := IsCloud(address); got != want {
+			t.Errorf("IsCloud(%q) = %v, want %v", address, got, want)
 		}
 	}
 }

@@ -70,11 +70,10 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("unexpected arguments %q", flags.Args())
 	}
 
-	load := func(path string) (*config.Config, error) {
-		return config.Load(path, func(apiKey string) ([]*namespacepb.Namespace, error) {
-			return temporal.ListNamespaces(context.Background(), apiKey, name, version)
-		})
+	listNamespaces := func(apiKey string) ([]*namespacepb.Namespace, error) {
+		return temporal.ListNamespaces(context.Background(), apiKey, name, version)
 	}
+	load := func(path string) (*config.Config, error) { return config.Load(path, listNamespaces) }
 	if *stdio {
 		// Broken client pipes must not stop calls before they are audited.
 		signal.Ignore(syscall.SIGPIPE)
@@ -121,7 +120,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	defer cancelCalls()
 	subscriptions, cancelSubscriptions := context.WithCancel(context.Background())
 	defer cancelSubscriptions()
-	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger, func(apiKey string) ([]*identitypb.UserGroup, error) {
+	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger, listNamespaces, func(apiKey string) ([]*identitypb.UserGroup, error) {
 		return temporal.ListUserGroups(context.Background(), apiKey, name, version)
 	})
 	if err != nil {

@@ -173,7 +173,7 @@ func TestTemporalCloudTargets(t *testing.T) {
 	payments.Spec.Description = "Payments."
 	legacy.Spec.ApiKeyAuth.Enabled = false
 	fake := &fakeCloudService{pages: [][]*namespacepb.Namespace{{payments}, {cloudNamespace("orders", address), legacy}}}
-	cfg, clients, _ := serveCloud(t, fake, "listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n")
+	cfg, clients, _, _ := serveCloud(t, fake, "listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n")
 	fake.mu.Lock()
 	if want := []string{" Bearer cloud-key", "1 Bearer cloud-key"}; !reflect.DeepEqual(fake.calls, want) {
 		t.Errorf("GetNamespaces calls = %q, want %q", fake.calls, want)
@@ -273,7 +273,7 @@ func TestToolCalls(t *testing.T) {
 
 func TestToolErrorHasResultType(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuer: issuerURL, Audience: "operator"}
 	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil)
+	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

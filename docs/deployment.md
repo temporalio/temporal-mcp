@@ -83,8 +83,8 @@ These are independent trust relationships:
    syncs groups to Temporal Cloud through SCIM, `temporal_cloud.groups` can
    instead give each group the namespaces it has there, as
    [Temporal Cloud groups](identity-and-access.md#temporal-cloud-groups)
-   describes. The server then keeps listing the groups through the Cloud Ops API
-   while it runs, so it must keep reaching that API.
+   describes. The server then keeps listing the groups and namespaces through
+   the Cloud Ops API while it runs, so it must keep reaching that API.
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
    or `omit` when payload contents should not be returned.
@@ -153,10 +153,10 @@ configuration and restarting the process.
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart. It also lists
-the Temporal Cloud namespaces that `temporal_cloud` adds as targets only at
-startup, so a namespace created later needs a restart to become a target. The
-access that `temporal_cloud.groups` gives changes without a restart, as
+identity provider settings, profiles, or rules require a restart. It also adds
+Temporal Cloud namespaces as targets only at startup, so a namespace created
+later needs a restart to become a target. The access that
+`temporal_cloud.groups` gives changes without a restart, as
 [When changes take effect](identity-and-access.md#when-changes-take-effect)
 describes.
 

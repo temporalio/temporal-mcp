@@ -126,7 +126,7 @@ authorization:
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger, nil)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 
 func TestNewServerRequiresAuthorizationWithAuth(t *testing.T) {
 	cfg := &config.Config{Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example.com", Audience: "operator"}}
-	if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler), nil); err == nil {
+	if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler), nil, nil); err == nil {
 		t.Error("NewServer with auth and no authorization succeeded, want an error")
 	}
 }
@@ -574,9 +574,9 @@ func availableTargets(t *testing.T, session *mcp.ClientSession) []string {
 }
 
 // serveCloud serves fake as the Cloud Ops API and returns the config that config.Load reads from yaml with the
-// namespaces fake lists, its clients, and a function that lists fake's user groups. It sets
+// namespaces fake lists, its clients, and functions that list fake's namespaces and user groups. It sets
 // TEMPORAL_MCP_TEST_CLOUD_KEY, which yaml can read the API key from, to cloud-key.
-func serveCloud(t *testing.T, fake *fakeCloudService, yaml string) (*config.Config, *temporal.Clients, config.ListUserGroupsFunc) {
+func serveCloud(t *testing.T, fake *fakeCloudService, yaml string) (*config.Config, *temporal.Clients, config.ListNamespacesFunc, config.ListUserGroupsFunc) {
 	t.Helper()
 	ln := listen(t)
 	gs := grpc.NewServer()
@@ -589,9 +589,10 @@ func serveCloud(t *testing.T, fake *fakeCloudService, yaml string) (*config.Conf
 		t.Fatal(err)
 	}
 	cloudOps := temporal.WithPlaintextCloudOpsAPI(ln.Addr().String())
-	cfg, err := config.Load(configPath, func(apiKey string) ([]*namespacepb.Namespace, error) {
+	listNamespaces := func(apiKey string) ([]*namespacepb.Namespace, error) {
 		return temporal.ListNamespaces(t.Context(), apiKey, "test", "0", cloudOps)
-	})
+	}
+	cfg, err := config.Load(configPath, listNamespaces)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +600,7 @@ func serveCloud(t *testing.T, fake *fakeCloudService, yaml string) (*config.Conf
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cfg, clients, func(apiKey string) ([]*identitypb.UserGroup, error) {
+	return cfg, clients, listNamespaces, func(apiKey string) ([]*identitypb.UserGroup, error) {
 		return temporal.ListUserGroups(t.Context(), apiKey, "test", "0", cloudOps)
 	}
 }
@@ -617,8 +618,14 @@ func TestTemporalCloudGroups(t *testing.T) {
 	developer := identitypb.AccountAccess_ROLE_DEVELOPER
 	cloudGroup := scimGroup("g6", "Cloud Readers", identitypb.AccountAccess_ROLE_READ, map[string]identitypb.NamespaceAccess_Permission{"payments.acct1": read})
 	cloudGroup.Spec.GroupType = &identitypb.UserGroupSpec_CloudGroup{CloudGroup: &identitypb.CloudGroupSpec{}}
+	// account lists the account's namespaces with billing in billingProject.
+	account := func(billingProject string) [][]*namespacepb.Namespace {
+		billing := cloudNamespace("billing", address)
+		billing.ProjectId = billingProject
+		return [][]*namespacepb.Namespace{{cloudNamespace("payments", address), cloudNamespace("orders", address), billing, cloudNamespace("shipping", address), cloudNamespace("archive", address)}}
+	}
 	fake := &fakeCloudService{
-		pages: [][]*namespacepb.Namespace{{cloudNamespace("payments", address), cloudNamespace("orders", address), cloudNamespace("billing", address), cloudNamespace("shipping", address), cloudNamespace("archive", address)}},
+		pages: account("finance"),
 		// Listed out of ID order, which the report must not follow.
 		groups: [][]*identitypb.UserGroup{{
 			scimGroup("g4", "Temporal Admins", identitypb.AccountAccess_ROLE_ADMIN, nil),
@@ -633,8 +640,11 @@ func TestTemporalCloudGroups(t *testing.T) {
 	}
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 targets:
-  - {name: ship, description: x, address: %[1]q, namespace: shipping.acct1}
+  - {name: ship, description: x, address: shipping.acct1.tmprl.cloud:7233, namespace: shipping.acct1}
   - {name: local, description: x, address: %[1]q, namespace: default}
+  # Not on Temporal Cloud, so no group gives them, and payments.acct1 still gets its added target.
+  - {name: pay-proxy, description: x, address: %[1]q, namespace: payments.acct1}
+  - {name: archive-proxy, description: x, address: %[1]q, namespace: archive.acct1}
 temporal_cloud:
   api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
   namespaces: {exclude: [archive]}
@@ -650,16 +660,16 @@ authorization:
   rules:
     - {claim_name: roles, claim_value: oncall, profile: oncall}
 `, closed.Addr().String(), idp)
-	cfg, clients, listGroups := serveCloud(t, fake, yaml)
+	cfg, clients, listNamespaces, listGroups := serveCloud(t, fake, yaml)
 	setGroups := func(groups ...*identitypb.UserGroup) {
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
 		fake.groups = [][]*identitypb.UserGroup{groups}
 	}
-	setErr := func(err error) {
+	setErr := func(field *error, err error) {
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
-		fake.err = err
+		*field = err
 	}
 	groupCalls := func() int {
 		fake.mu.Lock()
@@ -670,15 +680,17 @@ authorization:
 	groupRefreshInterval = 10 * time.Millisecond
 	t.Cleanup(func() { groupRefreshInterval = interval })
 
-	setErr(status.Error(codes.Unavailable, "down"))
-	if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, nil, io.Discard, slog.New(slog.DiscardHandler), listGroups); err == nil || !strings.Contains(err.Error(), "temporal_cloud: listing the account's user groups: ") {
-		t.Errorf("NewServer with a failing listing: err = %v, want the listing's error", err)
+	for field, want := range map[*error]string{&fake.err: "temporal_cloud: listing the account's user groups: ", &fake.namespacesErr: "temporal_cloud: listing the account's namespaces: "} {
+		setErr(field, status.Error(codes.Unavailable, "down"))
+		if _, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, nil, io.Discard, slog.New(slog.DiscardHandler), listNamespaces, listGroups); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("NewServer with a failing listing: err = %v, want %q", err, want)
+		}
+		setErr(field, nil)
 	}
-	setErr(nil)
 
 	var logs lockedBuffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), io.Discard, logger, listGroups)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), io.Discard, logger, listNamespaces, listGroups)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +795,7 @@ authorization:
 	gained := `temporal_cloud: group g1 "Payments Dev": gives targets ["orders"] to callers whose groups claim has "Payments Dev"; its namespaces ["legacy.acct1"] have no target`
 	waitFor(t, "a refresh logs access to a namespace with no target", func() bool { return slices.Contains(logs.messages(t), gained) })
 
-	setErr(status.Error(codes.Unavailable, "down"))
+	setErr(&fake.err, status.Error(codes.Unavailable, "down"))
 	calls = groupCalls()
 	waitFor(t, "two failed refreshes", func() bool { return groupCalls() >= calls+2 })
 	if got := targets(t, groups("Payments Dev")); !slices.Equal(got, []string{"orders"}) {
@@ -792,13 +804,33 @@ authorization:
 	if got := logs.messages(t); !slices.Contains(got, "cannot refresh the access of temporal_cloud groups, so callers keep the access they have") {
 		t.Errorf("log = %q, want the failed refresh", got)
 	}
-	setErr(nil)
+	setErr(&fake.err, nil)
 
 	setGroups(scimGroup("g1", "Payments Engineering", developer, map[string]identitypb.NamespaceAccess_Permission{"orders.acct1": read}))
 	waitFor(t, "a refresh renames the group", func() bool { return slices.Equal(targets(t, groups("Payments Engineering")), []string{"orders"}) })
 	if got := targets(t, groups("Payments Dev")); got != nil {
 		t.Errorf("list_available_targets for the old name = %v, want none", got)
 	}
+
+	financeReader := scimGroup("g1", "Payments Engineering", developer, map[string]identitypb.NamespaceAccess_Permission{"orders.acct1": read})
+	financeReader.Spec.Access.ProjectAccesses = map[string]*identitypb.ProjectAccess{"finance": {Role: identitypb.ProjectAccess_PROJECT_ROLE_READ}}
+	setGroups(financeReader)
+	waitFor(t, "a refresh gives billing through its project", func() bool {
+		return slices.Equal(targets(t, groups("Payments Engineering")), []string{"orders", "billing"})
+	})
+	setErr(&fake.namespacesErr, status.Error(codes.Unavailable, "down"))
+	calls = groupCalls()
+	waitFor(t, "two refreshes whose namespace listing fails", func() bool { return groupCalls() >= calls+2 })
+	if got := targets(t, groups("Payments Engineering")); !slices.Equal(got, []string{"orders", "billing"}) {
+		t.Errorf("list_available_targets after a failed namespace listing = %v, want [orders billing]", got)
+	}
+	setErr(&fake.namespacesErr, nil)
+	fake.mu.Lock()
+	fake.pages = account("operations")
+	fake.mu.Unlock()
+	waitFor(t, "a refresh stops giving billing once it moves to another project", func() bool {
+		return slices.Equal(targets(t, groups("Payments Engineering")), []string{"orders"})
+	})
 }
 
 func TestTemporalCloudGroupsAlone(t *testing.T) {
@@ -819,9 +851,9 @@ temporal_cloud:
   groups: {claim_name: groups}
 auth: {resource: https://mcp.example.com/mcp, issuer: %q, audience: operator, required_scopes: [temporal.read]}
 `, idp)
-	cfg, clients, listGroups := serveCloud(t, fake, yaml)
+	cfg, clients, listNamespaces, listGroups := serveCloud(t, fake, yaml)
 	logger := slog.New(slog.DiscardHandler)
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), io.Discard, logger, listGroups)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), io.Discard, logger, listNamespaces, listGroups)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -847,7 +879,7 @@ func TestNewServerRejectsUnknownGroupTools(t *testing.T) {
 		Auth:          &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: "https://idp.example.com", Audience: "operator"},
 		TemporalCloud: &config.TemporalCloud{Groups: &config.CloudGroups{ClaimName: "groups", ToolsDeny: []string{"terminate_workflow"}}},
 	}
-	_, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler), nil)
+	_, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler), nil, nil)
 	if want := `temporal_cloud: groups: tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets`; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v, want %q", err, want)
 	}

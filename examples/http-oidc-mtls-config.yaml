@@ -30,6 +30,7 @@ authorization:
         - check_connection
         - get_workflows
         - get_workflow_history
+        - get_workflow_history_summary
         - get_task_queues
         - search_workflows
         - count_workflows

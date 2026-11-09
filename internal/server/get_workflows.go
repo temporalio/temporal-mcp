@@ -30,9 +30,7 @@ import (
 	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
-const callTimeout = 10 * time.Second
-
-// The waits before each retry of an unavailable server: 1.4s in all, which spans the first reconnect attempts of the Temporal and Cloud Ops clients and still reports a server that stays down well inside callTimeout.
+// The waits before each retry of an unavailable server: 1.4s in all, which spans the first reconnect attempts of the Temporal and Cloud Ops clients and still reports a server that stays down well inside temporal.CallTimeout.
 var retryDelays = []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
 type getWorkflowsInput struct {
@@ -276,7 +274,7 @@ func callTemporal[Resp any](ctx context.Context, t *config.Target, rpc func(cont
 
 // callServer calls server for target t, retrying a few times while server is unavailable, all within the timeout of a Temporal call, and returns its failure as a tool error that names server.
 func callServer[Resp any](ctx context.Context, t *config.Target, server string, rpc func(context.Context, ...grpc.CallOption) (Resp, error)) (Resp, error) {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	ctx, cancel := context.WithTimeout(ctx, temporal.CallTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
 		var p peer.Peer

@@ -1,7 +1,8 @@
 # Identity and access
 
 This guide describes the identity contract for a centrally hosted
-Temporal MCP deployment. It is intentionally provider-neutral: an
+Temporal MCP deployment. Apart from the Okta setup for
+[Temporal Cloud groups](#temporal-cloud-groups), it is provider-neutral: an
 organization may use Entra ID, Okta, or another OpenID Connect provider, while
 the server needs the same small set of token properties from each one.
 
@@ -92,7 +93,7 @@ The identity provider and MCP configuration answer different questions:
 | Is this token authentic and intended for the MCP API? | `auth.issuer` and `auth.audience` validate issuer, signature, time, and audience |
 | Was this token granted the MCP API's scope? | `auth.required_scopes` checks the token's `scope` or `scp` claim |
 | Which users belong to a group? | Identity-provider group membership |
-| What may that group do in MCP? | `authorization.profiles` lists tools and targets |
+| What may that group do in MCP? | `authorization.profiles` lists tools and targets, or `temporal_cloud.groups` gives the group's Temporal Cloud namespaces |
 | Which token claim grants which MCP profile? | `authorization.rules` maps a claim value to a profile |
 | What may the server do in Temporal? | The API key or mTLS identity configured on each target |
 
@@ -128,6 +129,85 @@ targets that profile can use. No Temporal-specific role is required in the
 identity provider. Use the group value exactly as it appears in the access
 token; depending on the provider, that may be a name or an ID.
 
+## Temporal Cloud groups
+
+When the identity provider syncs groups to Temporal Cloud through SCIM,
+[`temporal_cloud.groups`](config.md#temporal_cloud) gives each user the same
+namespaces through Temporal MCP that their groups have in Temporal Cloud, without
+a profile and rule for each group. Temporal Cloud's SSO does not reach the
+server, so `groups` still requires the `auth` section: the server verifies the
+user's access token itself and reads Temporal with its own credentials. With the
+`temporal_cloud` API key it lists the account's user groups, and gives the
+members of each SCIM group read access to the targets of the namespaces the
+group can access.
+
+```yaml
+temporal_cloud:
+  api_key: {env: TEMPORAL_MCP_API_KEY}
+  groups:
+    claim_name: groups # The access token claim that lists the user's groups.
+```
+
+The server compares each value of the token claim, with exact case, with the
+`idp_id` that Temporal Cloud stores for each SCIM group. With Okta, a group's
+`idp_id` is its name in Okta, and Okta's own group IDs never reach Temporal
+Cloud, so the claim must hold group names, not IDs. With another identity
+provider, compare the claim's values in a decoded access token with the claim
+value that the server logs at startup for each group that gives targets.
+
+### Okta setup
+
+1. **Add a groups claim.** On the custom authorization server that issues
+   tokens for Temporal MCP (**Security > API**, then the server's **Claims**
+   tab), add a claim to the access token, named as `claim_name`, with
+   **Value type** set to **Groups**. Okta puts the names of the user's groups in
+   it.
+2. **Filter it to the groups meant for Temporal.** Set the claim's **Filter** so
+   that it matches only the groups you push to Temporal Cloud.
+3. **Keep the pushed groups' names unique.** Any group in the token whose name
+   equals a pushed group's gets that group's access, including a group from
+   another source, such as one imported from Active Directory, so make sure no
+   other Okta group has the name of a group you push.
+4. **Keep linked groups' names in step.** If you push a group to Temporal Cloud
+   by linking it to an existing group there (**Link Group** on the app's
+   **Push Groups** tab), turn on **Rename app groups to match group name in
+   Okta** in the tab's Group Push Settings. Otherwise Temporal Cloud keeps the
+   existing group's name, which the token does not carry.
+
+Then decode a user's access token, as under [Token checks](#token-checks), and
+confirm that the claim lists the names of their Temporal groups.
+
+### When changes take effect
+
+- **A user joins or leaves an Okta group:** in the next access token Okta
+  issues them, since the server reads membership only from the token, so a
+  removal takes effect once their current token expires.
+- **A group's namespace permissions or project roles change in Temporal
+  Cloud:** within 5 minutes, when the server next lists the groups.
+- **A namespace moves to another project:** within 5 minutes, when the server
+  next lists the namespaces along with the groups.
+- **A group is renamed in Okta:** once Temporal Cloud has applied the new name,
+  within 10 minutes according to its
+  [SCIM documentation](https://docs.temporal.io/cloud/manage-access/scim), and
+  the server has listed the groups again. Access is not continuous across a
+  rename: tokens issued after the rename carry a name the server does not know
+  until then, and tokens issued before it stop matching from then until they
+  expire.
+
+MCP clients learn a user's tools when they list them, and the server cannot tell
+them the list changed, so a user who just gained access sees the new tools when
+their client next lists tools. Every call is checked against the current access.
+
+### What groups do not cover
+
+- **Access granted to a user directly** rather than through a group has no
+  claim to match, so it gives nothing in Temporal MCP; grant it through a group
+  instead.
+- **Groups created only in Temporal Cloud** never appear in the token.
+- **Account roles:** Owner and Global Admin give every target of the account's
+  namespaces, and the other roles give nothing beyond the group's namespace
+  permissions and project roles.
+
 ## Interpreting Failures
 
 - **The identity provider rejects the token request:** the requested resource
@@ -141,8 +221,8 @@ token; depending on the provider, that may be a name or an ID.
   server log. A 401 with no log line means the request carried no bearer token.
 - **Valid token, missing a required scope:** the request receives 403 Forbidden
   with `insufficient_scope`. The server log names the missing scope.
-- **Valid token, no matching rule:** authentication succeeds, but the caller
-  sees no tools or targets.
+- **Valid token, no matching rule or Temporal Cloud group:** authentication
+  succeeds, but the caller sees no tools or targets.
 - **Matching group, missing tool:** the caller does not see or cannot invoke that
   tool.
 - **Matching group and tool, missing target:** the tool cannot be used on that

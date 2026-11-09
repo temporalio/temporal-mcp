@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -67,11 +69,12 @@ func boundList(p, key *jsonschema.Schema) {
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
 // A toolServer is an MCP server that knows the access, read or write, and the input schema of each tool addTool adds
-// to it.
+// to it, and the authorization policy that each request starts with.
 type toolServer struct {
 	*mcp.Server
 	access map[string]string
 	inputs map[string]*jsonschema.Schema
+	policy atomic.Pointer[config.Authorization]
 }
 
 // schemaFor returns the schema inferred from T with opts, which may be nil, and panics naming tool and which schema, such as "input", if it cannot.
@@ -128,10 +131,7 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		Name:        "check_connection",
 		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it decodes payloads with one.",
 		Annotations: readOnlyAnnotations,
-	}, []string{
-		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
-		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-	}, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, checkConnectionRPCs, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
 		Name:         "get_workflows",
 		Description:  fmt.Sprintf("Get the current state of up to %d workflow runs: for each item of workflows, the run its run_id names, or the workflow's latest run if run_id is omitted. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut. result has an entry for each item of workflows, in the order given. An item that the Temporal server reports not found or invalid, such as an unknown workflow or a malformed run_id, gets an error in its entry and no run, while the other entries are unaffected. Any other error reading an item fails the whole call, and its message starts with the item's path, such as workflows[3].", maxListItems),
 		Annotations:  readOnlyAnnotations,
@@ -200,21 +200,72 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // Once ctx is done, the server cancels each request in progress and each
 // request it gets, whatever its MCP protocol version, so tool calls end with
 // outcome cancelled.
-// It fails if cfg has an auth section but no authorization, if an
-// authorization profile names a tool the server does not have, or if a
-// profile's ToolsDeny leaves it no tools. It sets the Tools of each
-// authorization profile without them to the server's read-only tools other
-// than those in the profile's ToolsDeny.
-func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
-	if cfg.Auth != nil && cfg.Authorization == nil {
-		return nil, errors.New("authorization: required with an auth section")
+// It fails if cfg has an auth section but no authorization or temporal_cloud
+// groups, if an authorization profile or the groups' ToolsDeny names a tool
+// the server does not have, or if a ToolsDeny leaves no tools. Without groups,
+// it sets the Tools of each authorization profile without them to the
+// server's read-only tools other than those in the profile's ToolsDeny.
+// With groups, callers get cfg.GroupAuthorization of the groups and namespaces
+// that listGroups and listNamespaces list, with Tools set the same way, and cfg.Authorization is left
+// unchanged. NewServer fails if it cannot get it, and logs its report; then,
+// until ctx is done, it gets it again every groupRefreshInterval, logging the
+// report when it changes, or the error, in which case callers keep the last
+// one. Each request uses the policy it starts with.
+func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger, listNamespaces config.ListNamespacesFunc, listGroups config.ListUserGroupsFunc) (*mcp.Server, error) {
+	groups := cfg.TemporalCloud != nil && cfg.TemporalCloud.Groups != nil
+	if cfg.Auth != nil && cfg.Authorization == nil && !groups {
+		return nil, errors.New("authorization: required with an auth section, unless temporal_cloud has groups")
 	}
 	s, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
-	if err := resolveProfileTools(cfg.Authorization, tools, s.access); err != nil {
+	if !groups {
+		return s.Server, resolveProfileTools(cfg.Authorization, tools, s.access)
+	}
+	if err := errors.Join(resolveTools("temporal_cloud: groups", &config.Profile{ToolsDeny: cfg.TemporalCloud.Groups.ToolsDeny}, tools, s.access)...); err != nil {
 		return nil, err
 	}
+	buildPolicy := func() (*config.Authorization, []string, error) {
+		a, report, err := cfg.GroupAuthorization(listNamespaces, listGroups)
+		if err == nil {
+			err = resolveProfileTools(a, tools, s.access)
+		}
+		return a, report, err
+	}
+	a, report, err := buildPolicy()
+	if err != nil {
+		return nil, err
+	}
+	s.policy.Store(a)
+	for _, line := range report {
+		logger.Info(line)
+	}
+	ticker := time.NewTicker(groupRefreshInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			a, next, err := buildPolicy()
+			if err != nil {
+				logger.Error("cannot refresh the access of temporal_cloud groups, so callers keep the access they have", "error", err.Error())
+				continue
+			}
+			if !slices.Equal(next, report) {
+				for _, line := range next {
+					logger.Info(line)
+				}
+				report = next
+			}
+			s.policy.Store(a)
+		}
+	}()
 	return s.Server, nil
 }
+
+// groupRefreshInterval is how often a server with temporal_cloud groups gets their access again.
+var groupRefreshInterval = 5 * time.Minute
 
 // NewMux returns an HTTP handler that serves s, a [NewServer] server for cfg,
 // over the MCP streamable HTTP transport at /mcp. With auth configured, /mcp
@@ -250,8 +301,9 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 
 // newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
 func newServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
-	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}, map[string]*jsonschema.Schema{}}
-	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), audit(records, logger, cfg, s.access), normalizeToolCalls(s.inputs), authorize(cfg))
+	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), access: map[string]string{}, inputs: map[string]*jsonschema.Schema{}}
+	s.policy.Store(cfg.Authorization)
+	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), audit(records, logger, cfg, s.access), normalizeToolCalls(s.inputs), authorize(cfg, &s.policy))
 	return s, addTools(s, cfg, clients, payloads)
 }
 

@@ -1,7 +1,7 @@
 // Package temporal provides one Temporal client per target, plus a Cloud Ops API
 // client for each Temporal Cloud target with an API key, and limits the calls each
 // tool can make through them. Each call's API key comes from a credential that sees
-// the caller.
+// the caller. It also lists the namespaces and user groups of a Temporal Cloud account.
 package temporal
 
 import (
@@ -11,12 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"slices"
-	"strings"
 	"sync/atomic"
+	"time"
 
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
+	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"go.temporal.io/cloud-sdk/cloudclient"
 	"go.temporal.io/sdk/client"
 	tlog "go.temporal.io/sdk/log"
@@ -35,7 +36,7 @@ type Clients struct {
 	cloud  map[string]cloudservice.CloudServiceClient
 }
 
-// An Option changes how NewClients connects. Options are for tests.
+// An Option changes how NewClients, ListNamespaces and ListUserGroups connect. Options are for tests.
 type Option func(*options)
 
 type options struct {
@@ -79,13 +80,15 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 			continue
 		}
 		c.byName[t.Name] = cl
-		if cred != nil && IsCloud(t.Address) {
-			ops, err := cloudOpsClient(t, name, version, cred, o.cloudOpsAddress)
+		if cred != nil && config.IsCloud(t.Address) {
+			ops, err := cloudOpsClient(apiKeyReader(func(ctx context.Context) (string, error) {
+				return cred(ctx, identity.CallerFrom(ctx), &t)
+			}), name, version, o.cloudOpsAddress, grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)))
 			if err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: %w", i, err))
 				continue
 			}
-			c.cloud[t.Name] = ops
+			c.cloud[t.Name] = ops.CloudService()
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -151,30 +154,65 @@ func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 	return c.cloud[name]
 }
 
-// IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
-func IsCloud(address string) bool {
-	address = strings.TrimPrefix(address, "dns:///")
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		host = address
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return strings.HasSuffix(host, ".tmprl.cloud") || strings.HasSuffix(host, ".api.temporal.io")
+// CallTimeout bounds a tool's call to a Temporal server or the Cloud Ops API, including its retries while the server is unavailable, and each page that ListNamespaces and ListUserGroups read.
+const CallTimeout = 10 * time.Second
+
+// ListNamespaces returns every namespace that the Temporal Cloud Ops API lists
+// for apiKey, reading all its pages, and identifies this server by name and
+// version as NewClients' clients do. Each page's call fails if it takes longer
+// than CallTimeout.
+func ListNamespaces(ctx context.Context, apiKey, name, version string, opts ...Option) ([]*namespacepb.Namespace, error) {
+	return listPages(ctx, apiKey, name, version, opts, func(ctx context.Context, c cloudservice.CloudServiceClient, token string) ([]*namespacepb.Namespace, string, error) {
+		resp, err := c.GetNamespaces(ctx, &cloudservice.GetNamespacesRequest{PageToken: token})
+		return resp.GetNamespaces(), resp.GetNextPageToken(), err
+	})
 }
 
-// cloudOpsClient returns a client for the Cloud Ops API that calls it with t's API key and the same limits and identity as t's Temporal client.
-func cloudOpsClient(t config.Target, name, version string, cred credential, cloudOpsAddress string) (cloudservice.CloudServiceClient, error) {
+// ListUserGroups returns every user group that the Temporal Cloud Ops API lists
+// for apiKey, as ListNamespaces returns namespaces.
+func ListUserGroups(ctx context.Context, apiKey, name, version string, opts ...Option) ([]*identitypb.UserGroup, error) {
+	return listPages(ctx, apiKey, name, version, opts, func(ctx context.Context, c cloudservice.CloudServiceClient, token string) ([]*identitypb.UserGroup, string, error) {
+		resp, err := c.GetUserGroups(ctx, &cloudservice.GetUserGroupsRequest{PageToken: token})
+		return resp.GetGroups(), resp.GetNextPageToken(), err
+	})
+}
+
+// listPages returns the items of every page that page reads, following next page tokens, each call bounded by CallTimeout.
+func listPages[T any](ctx context.Context, apiKey, name, version string, opts []Option, page func(context.Context, cloudservice.CloudServiceClient, string) ([]T, string, error)) ([]T, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	c, err := cloudOpsClient(apiKeyReader(func(context.Context) (string, error) { return apiKey, nil }), name, version, o.cloudOpsAddress)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	var items []T
+	var token string
+	for {
+		pageCtx, cancel := context.WithTimeout(ctx, CallTimeout)
+		got, next, err := page(pageCtx, c.CloudService(), token)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, got...)
+		if token = next; token == "" {
+			return items, nil
+		}
+	}
+}
+
+// cloudOpsClient returns a client for the Cloud Ops API that calls it with the API key from key and the same identity
+// as the Temporal clients, dialing with the options in opts.
+func cloudOpsClient(key apiKeyReader, name, version, cloudOpsAddress string, opts ...grpc.DialOption) (*cloudclient.Client, error) {
 	o := cloudclient.Options{
-		APIKeyReader: apiKeyReader(func(ctx context.Context) (string, error) {
-			return cred(ctx, identity.CallerFrom(ctx), &t)
-		}),
-		UserAgent: name + "/" + version,
+		APIKeyReader: key,
+		UserAgent:    name + "/" + version,
 		// Its retries would hide a rate limit from the agent; the tools retry only an unavailable API themselves.
-		DisableRetry: true,
-		GRPCDialOptions: []grpc.DialOption{
-			grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
-			grpc.WithChainUnaryInterceptor(identify(name, version)),
-		},
+		DisableRetry:    true,
+		GRPCDialOptions: append(opts, grpc.WithChainUnaryInterceptor(identify(name, version))),
 	}
 	if cloudOpsAddress != "" {
 		o.HostPort, o.AllowInsecure = cloudOpsAddress, true
@@ -183,7 +221,7 @@ func cloudOpsClient(t config.Target, name, version string, cred credential, clou
 	if err != nil {
 		return nil, fmt.Errorf("creating the Cloud Ops API client: %w", err)
 	}
-	return c.CloudService(), nil
+	return c, nil
 }
 
 type apiKeyReader func(context.Context) (string, error)

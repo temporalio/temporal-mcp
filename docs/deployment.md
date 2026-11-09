@@ -70,12 +70,22 @@ These are independent trust relationships:
    in protected paths on the host and use least-privileged credentials. For
    Temporal Cloud, prefer an API key from a read-only service account when API
    keys are available; use mTLS when the namespace does not accept API keys.
+   Instead of listing a Temporal Cloud account's namespaces, a
+   [`temporal_cloud`](config.md#temporal_cloud) section can add a target for
+   each one that accepts API keys. The server then lists them through the
+   Temporal Cloud Ops API at startup, so it must be able to reach that API,
+   and it does not start if it cannot list them.
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
    `auth.resource` to the same URL, require the same scope with
    `auth.required_scopes`, and map the chosen existing group claim to a profile.
-   See [Identity and access](identity-and-access.md).
+   See [Identity and access](identity-and-access.md). If the identity provider
+   syncs groups to Temporal Cloud through SCIM, `temporal_cloud.groups` can
+   instead give each group the namespaces it has there, as
+   [Temporal Cloud groups](identity-and-access.md#temporal-cloud-groups)
+   describes. The server then keeps listing the groups and namespaces through
+   the Cloud Ops API while it runs, so it must keep reaching that API.
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
    or `omit` when payload contents should not be returned.
@@ -128,23 +138,30 @@ Every successful Temporal read must pass all of these controls:
 
 1. **The server's tool surface.** The server exposes a bounded set of read-only
    operations rather than arbitrary Temporal gRPC calls.
-2. **The caller's MCP profile.** Authorization profiles grant specific tools on
-   specific configured targets. A valid token that matches no rule receives no
-   tools or targets.
+2. **The caller's MCP profile.** Authorization profiles, or the groups' access
+   with `temporal_cloud.groups`, grant specific tools on specific configured
+   targets. A valid token that matches no rule or group receives no tools or
+   targets.
 3. **The target credential.** Temporal accepts only the operations and
    namespaces allowed to the API key or mTLS identity used for that target.
 4. **The configured target boundary.** Tool calls cannot supply a different
    endpoint or use a configured target to cross into another namespace.
 
 The identity provider supplies group membership in the access token. The MCP
-YAML decides what that group can use inside this server. There is no MCP
-administration UI: changing the mapping means changing the server configuration
-and restarting the process.
+YAML, or with `temporal_cloud.groups` the groups' access in Temporal Cloud,
+decides what that group can use inside this server. There is no MCP
+administration UI: changing the mapping in the YAML means changing the server
+configuration and restarting the process.
 
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart.
+identity provider settings, profiles, or rules require a restart. It also adds
+Temporal Cloud namespaces as targets only at startup, so a namespace created
+later needs a restart to become a target. The access that
+`temporal_cloud.groups` gives changes without a restart, as
+[When changes take effect](identity-and-access.md#when-changes-take-effect)
+describes.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The
@@ -168,7 +185,8 @@ require a restart to change.
   claim of a decoded access token.
 - **The token is accepted but the user sees no tools:** inspect the actual
   access-token claims and compare them exactly, including case, with the
-  authorization rules.
+  authorization rules, or with the claim values that the server logs for
+  `temporal_cloud.groups`.
 - **A tool is visible but a target is not:** confirm that the matched profile
   grants that tool on that target's configured name.
 - **`check_connection` fails:** check network reachability, the target address

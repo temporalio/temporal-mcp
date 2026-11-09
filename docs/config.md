@@ -5,7 +5,8 @@
 ## Config file layout
 
 ```yaml
-targets:
+# Required unless temporal_cloud adds a target.
+[ targets:
   - name: <string>
     [ aliases: [ <string>, ... ] ]
     description: <string>
@@ -16,7 +17,20 @@ targets:
         cert_file: <filename>
         key_file: <filename> ]
     [ payload_handling: <string> | default = omit ]
-    [ codec: <string> ]
+    [ codec: <string> ] ]
+
+# HTTP mode only.
+[ temporal_cloud:
+    api_key: <secret>
+    [ namespaces:
+        [ include: [ <glob>, ... ] | default = every namespace ]
+        [ exclude: [ <glob>, ... ] ]
+        [ payload_handling: <string> | default = omit ]
+        [ codec: <string> ] ]
+    # Requires auth.
+    [ groups:
+        claim_name: <string>
+        [ tools_deny: [ <string>, ... ] ] ] ]
 
 [ codecs:
     <string>:
@@ -49,7 +63,7 @@ listen: <host:port>
     [ scopes_supported: [ <string>, ... ] | default = required_scopes ]
     [ authorization_server: <url> | default = issuer ] ]
 
-# HTTP mode only. Required with auth, not allowed without it.
+# HTTP mode only. Required with auth unless temporal_cloud has groups, not allowed without auth.
 [ authorization:
     profiles:
       <string>:
@@ -66,7 +80,7 @@ A value in `< >` is a placeholder for a value of that type, defined under [Types
 
 ## `targets`
 
-Required in both modes, with at least one entry. Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace, description and `payload_handling`.
+The server needs at least one target: in `--stdio` mode in `targets`, and in HTTP mode in `targets` or added by [`temporal_cloud`](#temporal_cloud). Each target is one Temporal namespace that the server can read from. Agents name a target in each tool call, and the `list_available_targets` tool shows them each target's name, aliases, namespace, description and `payload_handling`.
 
 - `name` (string, required): The name agents and authorization profiles use for the target. Names must be unique and are compared exactly, so `prod` and `Prod` are two different targets.
 - `aliases` (list of strings, optional): Other names agents may use for the target. A target name in a tool call matches an alias ignoring case, but a `name` only exactly. An alias must not be empty, and must differ from every name and every other alias ignoring case, including its own target's name.
@@ -82,9 +96,35 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
 
 With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
-The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use. On Temporal Cloud, a namespace that accepts only client certificates has no read-only option until you turn on API keys for it.
+The server only reads, so give it a credential with read-only access to the namespace. On Temporal Cloud, a client certificate (`tls`) cannot be limited to Read, so if the namespace accepts API keys, use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) created for the server: a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) one with the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions), or one with the Read-Only account role and Read on the namespace. Read allows every call the server makes for a target, including to the Cloud Ops API. Do not use the **Generate API Key** button on a namespace's page, which issues a key for the namespace's service account, an account with the Admin permission by default that other clients, such as workers, may also use. On Temporal Cloud, a namespace that accepts only client certificates has no read-only option until you turn on API keys for it.
 
 With `tls`, the server does not start if it cannot load the certificate and key, and starts with a warning in the log if the certificate has expired. It reads them again for each new connection to the target, so a renewed certificate takes effect without a restart once the Temporal server replaces the connection.
+
+## `temporal_cloud`
+
+Optional, HTTP mode only. With this section, the server adds a target for each namespace of a Temporal Cloud account, so that you need not list each one in `targets`. When it starts, it lists the account's namespaces through the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443`, and adds a target for each one that accepts API keys and that `namespaces` selects. It does not start if it cannot list them. It adds targets only at startup, so a namespace created later gets a target when the server restarts. `temporal_cloud:` with no value is an error.
+
+- `api_key` (secret, required): Where to read the API key that the server lists the namespaces with, which is also the `api_key` of each added target. Use an [API key](https://docs.temporal.io/cloud/api-keys) of a [service account](https://docs.temporal.io/cloud/manage-access/service-accounts) with the [Read-Only account role](https://docs.temporal.io/cloud/manage-access/permissions-reference#account-level-access) and the [Read permission](https://docs.temporal.io/cloud/manage-access/permissions-reference#namespace-level-permissions) on each namespace the server should read. Do not use a [namespace-scoped](https://docs.temporal.io/cloud/manage-access/service-accounts#scoped) service account, which is limited to a single namespace. The Read-Only role also allows listing the account's user groups, so the same key works with `groups`.
+- `namespaces` (optional): Which namespaces get a target, by their name without the account ID, such as `payments` for the namespace ID `payments.a1b2c`, and how those targets show payloads.
+  - `include` (list of globs, default every namespace): A namespace gets a target only if its name matches one of these, ignoring case. `include:` with no value or `[]` is an error, not the same as leaving it out.
+  - `exclude` (list of globs, optional): A namespace whose name matches one of these, ignoring case, gets no target, even if it matches `include`.
+  - `payload_handling` (string, default `omit`): The `payload_handling` of each added target, `omit`, `passthrough` or `decode`.
+  - `codec` (string, required with `payload_handling: decode`): The `codec` of each added target. One codec server can decode every namespace, since each request names the target's namespace as [`endpoint`](#payloads-and-codecs) describes.
+- `groups` (optional): Gives the members of each of the account's SCIM groups the targets of the namespaces that the group can access in Temporal Cloud, as described below. It requires `auth`, and with `groups`, `authorization` is optional. `groups:` with no value is an error. [Identity and access](identity-and-access.md#temporal-cloud-groups) describes the identity provider's setup.
+  - `claim_name` (string, required): The access token claim that lists the user's groups, such as `groups`, whose values the server matches with each group's `idp_id`. Write it as you would a rule's `claim_name`. `scope` and `scp` are not allowed, because they hold the token's scopes, not groups.
+  - `tools_deny` (list of strings, optional): The tools that groups do not give, as in a profile's `tools_deny`. Without it, a group gives every read-only tool. `tools_deny:` with no value or `[]` is an error.
+
+Each added target's `namespace` is the namespace ID, its `address` is the namespace's API key endpoint, and its `description` is the namespace's description in Temporal Cloud, or `Temporal Cloud namespace <namespace ID>` if it has none. Its `name` is the namespace's name, such as `payments`, unless another target already has that name, or an alias equal to it ignoring case, and then it is the namespace ID, such as `payments.a1b2c`. A namespace whose ID is taken too gets no target. Authorization profiles name added targets by these names, like any other target.
+
+A target in `targets` whose `namespace` is the ID of one of the account's namespaces, and whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io`, replaces that namespace's added target. So to read a namespace differently, for example to decode its payloads with another codec server or to give it another name, add it to `targets` with its namespace ID and Temporal Cloud endpoint. A target at any other address, such as a proxy, does not replace the added target even with the namespace's ID. A namespace that accepts only client certificates gets no target, so add it to `targets` with `tls`.
+
+After listing the namespaces, the server logs how many the API key listed, the target it added for each namespace, and why it added none for the others: a target in `targets` replaces it, `include` and `exclude` do not select it, it does not accept API keys, or its name and ID are both taken. If the config is then invalid, for example because a profile names a namespace that got no target, the error the server stops with ends with the same lines. At startup it also runs `check_connection` on each added target, in the background so that it does not delay serving, and logs each stage that fails.
+
+With `groups`, the server lists the account's user groups through the Cloud Ops API once it has added the targets, and does not start if it cannot. Each SCIM group gives its members the targets of the account's namespaces that it can read in Temporal Cloud: those on which it has the Admin, Write or Read permission, those in a project on which it has the Project Admin, Project Write or Project Read role, or all of them if it has the Owner or Global Admin account role. A namespace's target is its added target or the target in `targets` that replaces it, so a group never gives a target at another address or for a namespace outside the account, such as a self-hosted one. A group that is not a SCIM group, or none of whose namespaces has a target, gives nothing.
+
+A caller gets a group's targets when its token's `claim_name` claim is the group's `idp_id` in Temporal Cloud, or a list with it as an entry, matched exactly and case-sensitively as rules match. Each group works as a profile with those targets and `tools_deny`, and a rule for its `idp_id`, added to those of `authorization`, so a caller gets everything its groups and rules give, combined per target.
+
+Every 5 minutes, the server lists the groups and namespaces again and replaces what the groups give with the result, so that a change to a group's access or a namespace's project takes effect without a restart. Calls in progress finish with the access they started with. If a listing fails, callers keep what the last successful one gave and the server logs the error. Targets still change only at restart, so a group's namespace without a target gives nothing until a restart adds one. The server logs how many groups the API key listed, then one line for each group in group ID order: the targets it gives, the claim value that gets them and any of its namespaces that have no target, or why it gives none. It logs them at startup and again whenever a later listing changes them.
 
 ## Payloads and `codecs`
 
@@ -94,7 +134,7 @@ Payloads are your application's data in Temporal: workflow inputs and results, m
 - `passthrough` shows payloads as Temporal stores them, which the agent can read unless your application encrypts them. A payload with encoding `json/plain` or `json/protobuf`, such as one from the SDKs' default data converter, is shown as JSON, and a `binary/null` payload as JSON `null`. Any other payload, including one whose encoding says JSON but whose data is not valid JSON, is shown as its encoding and its data in base64.
 - `decode` has the target's codec server decode payloads, and shows a decoded payload the way `passthrough` shows a stored one, except that a decoded payload with a JSON encoding but data that is not valid JSON is left out as with `omit`, showing its encoding and size as stored. If the request to the codec server fails, every payload in that response is left out the same way. Either way, each payload left out has an `error` saying why, such as `could not connect to the codec server: connection refused`, and the full cause goes to the log. The `error` never includes the codec server's URL or response. For a target that decodes, `check_connection` also checks its codec server.
 
-A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets give in their `codec` field, to a codec server:
+A codec server is an HTTP service that decodes payloads, the same one the Temporal UI and CLI use. `codecs` is optional in both modes, and maps a name of your choosing, which targets and `temporal_cloud`'s `namespaces` give in their `codec` field, to a codec server:
 
 - `endpoint` (url, required): The codec server's URL without the `/decode` path, the same value as the CLI's `--codec-endpoint`. It must be an `https` URL, or an `http` one only for `localhost` or a loopback IP address (or for any host with `allow_plain_http: true`), with a host and no user info, query (`?`) or fragment (`#`). `{namespace}` in it is replaced with the target's `namespace`, and each request also carries the namespace in an `X-Namespace` header. The server does not follow redirects, so the endpoint must be the codec server's final URL.
 - `allow_plain_http` (boolean, default `false`): Allows an `http` endpoint on any host. Over plain HTTP, the decoded payloads, the `Authorization` header and any `passthrough_headers` travel unencrypted, so set it only when something else, such as a service mesh, encrypts the traffic. It has no effect on an `https` endpoint.
@@ -131,7 +171,7 @@ Optional in both modes, default `8s`; zero uses the default and negative values 
 
 ## `auth`
 
-Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from the identity provider that `issuer` names, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A server accepts tokens from one identity provider only, so to accept tokens from two, run two servers with different `resource` URLs. A config with `auth` must also have an [`authorization`](#authorization) section. `auth:` with no value is an error.
+Optional, HTTP mode only. With this section, every request to `/mcp` must carry a valid JWT access token from the identity provider that `issuer` names, and the server serves OAuth protected resource metadata, a JSON document that tells agents which identity provider to sign in with, at `/.well-known/oauth-protected-resource` followed by the path of `resource` (such as `/.well-known/oauth-protected-resource/mcp`). A server accepts tokens from one identity provider only, so to accept tokens from two, run two servers with different `resource` URLs. A config with `auth` must also have an [`authorization`](#authorization) section, unless [`temporal_cloud`](#temporal_cloud) has `groups`. `auth:` with no value is an error.
 
 An agent gets its access token by signing the user in to the identity provider that the metadata names. The server verifies each token itself with the provider's signing keys, so the provider must issue access tokens as JWTs rather than opaque strings, signed with RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512 or EdDSA, with `exp` and `sub` claims, carrying this server's `audience` in their `aud` claim and each of `required_scopes` in their `scope` or `scp` claim.
 
@@ -150,9 +190,9 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth`, unless [`temporal_cloud`](#temporal_cloud) has `groups`, and not allowed without `auth`, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
-- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
+- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. A profile name must not start with `cloud-group:`, which is reserved for the profiles of `temporal_cloud` groups. Without `tools`, a profile gives every read-only tool not in `tools_deny`, and every tool is read-only today. That includes the read-only tools that later versions of the server add, with or without `tools_deny`, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_workflow_history_summary`, `get_task_queues`, `search_workflows`, `count_workflows` and `list_search_attributes`. Any other name is an error.
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
@@ -167,7 +207,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization`, `temporal_cloud` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 
@@ -179,6 +219,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
+- `<glob>`: A pattern that must match a whole name, in which `*` matches any run of characters, `?` any one character, `[...]` one character from a set or range such as `[a-c]`, and `\` escapes the character after it, as Go's [`path.Match`](https://pkg.go.dev/path#Match) defines. A malformed pattern, such as `[` alone, is an error.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.

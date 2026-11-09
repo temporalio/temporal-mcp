@@ -24,6 +24,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -34,7 +35,7 @@ import (
 // connect writes the server's logs and audit records to out.
 func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +165,56 @@ func TestListAvailableTargets(t *testing.T) {
 	}
 }
 
+func TestTemporalCloudTargets(t *testing.T) {
+	closed := listen(t)
+	closed.Close()
+	address := closed.Addr().String()
+	payments, legacy := cloudNamespace("payments", address), cloudNamespace("legacy", address)
+	payments.Spec.Description = "Payments."
+	legacy.Spec.ApiKeyAuth.Enabled = false
+	fake := &fakeCloudService{pages: [][]*namespacepb.Namespace{{payments}, {cloudNamespace("orders", address), legacy}}}
+	cfg, clients, _, _ := serveCloud(t, fake, "listen: 127.0.0.1:0\ntemporal_cloud:\n  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}\n")
+	fake.mu.Lock()
+	if want := []string{" Bearer cloud-key", "1 Bearer cloud-key"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Errorf("GetNamespaces calls = %q, want %q", fake.calls, want)
+	}
+	if want := []bool{true, true}; !reflect.DeepEqual(fake.deadlines, want) {
+		t.Errorf("GetNamespaces calls with a deadline within temporal.CallTimeout = %v, want %v", fake.deadlines, want)
+	}
+	fake.mu.Unlock()
+
+	session := serveTools(t, cfg, clients, t.Output())
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []any{
+		map[string]any{"name": "payments", "aliases": []any{}, "namespace": "payments.acct1", "description": "Payments.", "payload_handling": "omit"},
+		map[string]any{"name": "orders", "aliases": []any{}, "namespace": "orders.acct1", "description": "Temporal Cloud namespace orders.acct1", "payload_handling": "omit"},
+	}
+	if got := res.StructuredContent.(map[string]any)["result"].(map[string]any)["targets"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("targets = %#v\nwant %#v", got, want)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	CheckConnections(t.Context(), cfg, clients, newRenderer(t, cfg, logger), cfg.TemporalCloud.Added, logger)
+	var failed []string
+	for line := range strings.Lines(logs.String()) {
+		var rec struct{ Msg, Target, Stage, Reason string }
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		failed = append(failed, rec.Msg+": "+rec.Target+" "+rec.Stage+": "+rec.Reason)
+	}
+	if want := []string{"connection check failed: payments server: Unavailable: could not connect to the Temporal server", "connection check failed: orders server: Unavailable: could not connect to the Temporal server"}; !reflect.DeepEqual(failed, want) {
+		t.Errorf("log = %q, want %q", failed, want)
+	}
+	if strings.Contains(logs.String(), "cloud-key") {
+		t.Errorf("log contains the API key:\n%s", &logs)
+	}
+}
+
 func TestToolCalls(t *testing.T) {
 	testTool := func(name string, err error) func(*toolServer) {
 		return func(s *toolServer) {
@@ -222,7 +273,7 @@ func TestToolCalls(t *testing.T) {
 
 func TestToolErrorHasResultType(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +340,7 @@ func TestNewMux(t *testing.T) {
 	noSlashCfg.Auth = &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp", Issuer: issuerURL, Audience: "operator"}
 	noSlash := httptest.NewServer(NewMux(s.Server, &noSlashCfg, logger))
 	t.Cleanup(noSlash.Close)
-	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	plain, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +438,7 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(configPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

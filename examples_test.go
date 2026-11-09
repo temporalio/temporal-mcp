@@ -27,7 +27,7 @@ func TestExamplesLoad(t *testing.T) {
 			continue
 		}
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			load := config.Load
+			load := func(path string) (*config.Config, error) { return config.Load(path, nil) }
 			if strings.HasPrefix(filepath.Base(path), "stdio") {
 				load = config.LoadStdio
 			}
@@ -36,7 +36,7 @@ func TestExamplesLoad(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The tools use the clients and payload renderer only when called.
-			if _, err := server.NewServer(t.Context(), t.Context(), serverName, version, cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler)); err != nil {
+			if _, err := server.NewServer(t.Context(), t.Context(), serverName, version, cfg, nil, nil, io.Discard, slog.New(slog.DiscardHandler), nil, nil); err != nil {
 				t.Error(err)
 			}
 		})

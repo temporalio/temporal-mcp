@@ -103,7 +103,7 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 				return nil, envelope[workflowSearch]{}, err
 			}
 		}
-		if err := checkFields(ctx, req, cfg, clients, names, t, fields); err != nil {
+		if err := checkFields(ctx, cfg, clients, names, t, fields); err != nil {
 			return nil, envelope[workflowSearch]{}, err
 		}
 		resp, err := callTemporal(ctx, t, func(ctx context.Context, opts ...grpc.CallOption) (*workflowservice.ListWorkflowExecutionsResponse, error) {
@@ -149,7 +149,7 @@ func searchWorkflows(cfg *config.Config, clients *temporal.Clients, names *searc
 // Temporal Cloud target with an API key, names with Temporal's reserved prefix (which may be built-ins newer than this
 // server's sadefs) need no call; otherwise t's search attributes are listed once, and if the listing fails or is
 // incomplete, every name passes unchecked.
-func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
+func checkFields(ctx context.Context, cfg *config.Config, clients *temporal.Clients, names *searchAttributeNames, t *config.Target, fields []string) error {
 	hasCloudOps := clients.CloudOps(t.Name) != nil
 	passes := func(f string) bool {
 		_, core := coreSearchAttributes[f]
@@ -173,7 +173,7 @@ func checkFields(ctx context.Context, req *mcp.CallToolRequest, cfg *config.Conf
 		return nil
 	}
 	msg := fmt.Sprintf("these fields are not search attributes on target %s: %s", t.Name, strings.Join(bad, ", "))
-	if mayUse(cfg, req, "list_search_attributes", t.Name) {
+	if mayUse(ctx, cfg, "list_search_attributes", t.Name) {
 		msg += "; call list_search_attributes for the target's search attributes"
 	} else {
 		msg += "; fix or remove them"

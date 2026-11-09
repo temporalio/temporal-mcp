@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
+	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
 	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -32,6 +35,16 @@ type fakeCloudService struct {
 	mu    sync.Mutex
 	calls []string
 	err   error
+	// namespacesErr is the error that GetNamespaces returns, if set.
+	namespacesErr error
+	pages         [][]*namespacepb.Namespace
+	deadlines     []bool
+	groups        [][]*identitypb.UserGroup
+	// namespaceListing and listing are pages and groups as they were when the latest listing of each read its first
+	// page; its later pages read from it, so a listing never mixes two versions.
+	namespaceListing [][]*namespacepb.Namespace
+	listing          [][]*identitypb.UserGroup
+	groupCalls       int
 }
 
 func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.GetNamespaceRequest) (*cloudservice.GetNamespaceResponse, error) {
@@ -53,6 +66,45 @@ func (f *fakeCloudService) GetNamespace(ctx context.Context, req *cloudservice.G
 			"Tags":     namespacepb.NamespaceSpec_SEARCH_ATTRIBUTE_TYPE_KEYWORD_LIST,
 		},
 	}}}, nil
+}
+
+func (f *fakeCloudService) GetNamespaces(ctx context.Context, req *cloudservice.GetNamespacesRequest) (*cloudservice.GetNamespacesResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, req.GetPageToken()+" "+strings.Join(md.Get("authorization"), ","))
+	deadline, ok := ctx.Deadline()
+	f.deadlines = append(f.deadlines, ok && time.Until(deadline) <= temporal.CallTimeout)
+	if f.namespacesErr != nil {
+		return nil, f.namespacesErr
+	}
+	if req.GetPageToken() == "" {
+		f.namespaceListing = f.pages
+	}
+	page, _ := strconv.Atoi(req.GetPageToken())
+	resp := &cloudservice.GetNamespacesResponse{Namespaces: f.namespaceListing[page]}
+	if page+1 < len(f.namespaceListing) {
+		resp.NextPageToken = strconv.Itoa(page + 1)
+	}
+	return resp, nil
+}
+
+func (f *fakeCloudService) GetUserGroups(_ context.Context, req *cloudservice.GetUserGroupsRequest) (*cloudservice.GetUserGroupsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groupCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if req.GetPageToken() == "" {
+		f.listing = f.groups
+	}
+	page, _ := strconv.Atoi(req.GetPageToken())
+	resp := &cloudservice.GetUserGroupsResponse{Groups: f.listing[page]}
+	if page+1 < len(f.listing) {
+		resp.NextPageToken = strconv.Itoa(page + 1)
+	}
+	return resp, nil
 }
 
 func TestListSearchAttributesOnCloud(t *testing.T) {
@@ -156,7 +208,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		if len(fake.calls) != 0 {
 			t.Errorf("Cloud Ops API calls = %q, want none", fake.calls)
 		}
-		if err := checkFields(t.Context(), nil, cfg, clients, &searchAttributeNames{}, &cfg.Targets[1], []string{"OrderId"}); err != nil {
+		if err := checkFields(t.Context(), cfg, clients, &searchAttributeNames{}, &cfg.Targets[1], []string{"OrderId"}); err != nil {
 			t.Errorf("checkFields = %v, want a field it cannot check to pass", err)
 		}
 	})

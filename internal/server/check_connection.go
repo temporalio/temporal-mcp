@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -25,6 +26,30 @@ import (
 )
 
 const stageTimeout = 5 * time.Second
+
+var checkConnectionRPCs = []string{
+	workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
+	workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
+}
+
+// CheckConnections runs check_connection on each of the named targets in turn,
+// and logs each stage that fails.
+func CheckConnections(ctx context.Context, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, targets []string, logger *slog.Logger) {
+	check := checkConnection(cfg, clients, payloads)
+	ctx = temporal.WithTool(context.WithValue(ctx, targetsKey{}, targets), "check_connection", checkConnectionRPCs, targets)
+	for _, name := range targets {
+		_, out, err := check(ctx, nil, checkConnectionInput{Target: name})
+		if err != nil {
+			logger.WarnContext(ctx, "connection check failed", "target", name, "error", err.Error())
+			continue
+		}
+		for _, s := range out.Result.Stages {
+			if s.Status == "failed" {
+				logger.WarnContext(ctx, "connection check failed", "target", name, "stage", s.Name, "reason", *s.Reason)
+			}
+		}
+	}
+}
 
 type checkConnectionInput struct {
 	Target string `json:"target" jsonschema:"the name or an alias of a target"`

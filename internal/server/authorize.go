@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,12 +21,15 @@ import (
 
 type targetsKey struct{}
 
+type grantsKey struct{}
+
 // authorize leaves out of tools/list the tools the caller may use on no target,
 // answers a call to one as the SDK answers a call to an unknown tool, and gives
 // every other tool call the targets its caller may use the tool on, or, for
-// list_available_targets, the targets its caller may use any tool on. Without
-// auth, every caller may use every tool on every target.
-func authorize(cfg *config.Config) mcp.Middleware {
+// list_available_targets, the targets its caller may use any tool on, under the
+// policy that each request starts with. Without auth, every caller may use
+// every tool on every target.
+func authorize(cfg *config.Config, policy *atomic.Pointer[config.Authorization]) mcp.Middleware {
 	all := make([]string, len(cfg.Targets))
 	for i, t := range cfg.Targets {
 		all[i] = t.Name
@@ -42,14 +46,15 @@ func authorize(cfg *config.Config) mcp.Middleware {
 				if !ok || list == nil {
 					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
 				}
-				g := grants(cfg.Authorization, req)
+				g := grants(policy.Load(), req)
 				list.Tools = slices.DeleteFunc(list.Tools, func(t *mcp.Tool) bool { return t == nil || len(g[t.Name]) == 0 })
 				list.CacheScope = "private"
 				return list, err
 			case *mcp.CallToolRequest:
 				targets := all
 				if cfg.Auth != nil {
-					g := grants(cfg.Authorization, req)
+					g := grants(policy.Load(), req)
+					ctx = context.WithValue(ctx, grantsKey{}, g)
 					if targets = g[r.Params.Name]; len(targets) == 0 {
 						if rec := auditRecordFrom(ctx); rec != nil {
 							rec.denied = true
@@ -73,9 +78,10 @@ func toolTargets(ctx context.Context) []string {
 	return targets
 }
 
-// mayUse reports whether the caller of req may use tool on the target with the given name.
-func mayUse(cfg *config.Config, req mcp.Request, tool, target string) bool {
-	return cfg.Auth == nil || slices.Contains(grants(cfg.Authorization, req)[tool], target)
+// mayUse reports whether the caller of the tool call in ctx may use tool on the target with the given name.
+func mayUse(ctx context.Context, cfg *config.Config, tool, target string) bool {
+	g, _ := ctx.Value(grantsKey{}).(map[string][]string)
+	return cfg.Auth == nil || slices.Contains(g[tool], target)
 }
 
 // grants returns, for each tool, the targets the caller of req may use it on:
@@ -119,23 +125,31 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
 		p := a.Profiles[name]
-		for _, f := range []struct {
-			key   string
-			tools []string
-		}{{"tools", p.Tools}, {"tools_deny", p.ToolsDeny}} {
-			for k, tool := range f.tools {
-				if !slices.Contains(tools, tool) {
-					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
-				}
-			}
-		}
-		if p.Tools == nil {
-			p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return access[t] != "read" || slices.Contains(p.ToolsDeny, t) })
-			if len(p.Tools) == 0 {
-				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools_deny: leaves the profile no tools", name))
-			}
-			a.Profiles[name] = p
-		}
+		errs = append(errs, resolveTools(fmt.Sprintf("authorization: profiles: %q", name), &p, tools, access)...)
+		a.Profiles[name] = p
 	}
 	return errors.Join(errs...)
+}
+
+// resolveTools checks that p names only the given tools, reporting each other name under label, and sets p's Tools,
+// if nil, to the read-only tools not in its ToolsDeny, reporting under label if that leaves none.
+func resolveTools(label string, p *config.Profile, tools []string, access map[string]string) []error {
+	var errs []error
+	for _, f := range []struct {
+		key   string
+		tools []string
+	}{{"tools", p.Tools}, {"tools_deny", p.ToolsDeny}} {
+		for k, tool := range f.tools {
+			if !slices.Contains(tools, tool) {
+				errs = append(errs, fmt.Errorf("%s: %s[%d]: unknown tool %q; the tools are %s", label, f.key, k, tool, strings.Join(tools, ", ")))
+			}
+		}
+	}
+	if p.Tools == nil {
+		p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return access[t] != "read" || slices.Contains(p.ToolsDeny, t) })
+		if len(p.Tools) == 0 {
+			errs = append(errs, fmt.Errorf("%s: tools_deny: leaves no tools", label))
+		}
+	}
+	return errs
 }

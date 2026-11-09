@@ -52,6 +52,9 @@ type Config struct {
 	AuditLogFile string `yaml:"audit_log_file"`
 	// ErrorLogFile is the path of the file the server appends its logs to; stderr if empty.
 	ErrorLogFile string `yaml:"error_log_file"`
+	// cloudErr is why decode could not add the targets of TemporalCloud. When
+	// set, validation skips the checks that those targets could satisfy.
+	cloudErr error
 }
 
 // Certificate is a certificate and its private key, in files that are read again
@@ -362,7 +365,9 @@ type keyNodes struct {
 }
 
 // decode decodes data, adds the targets of its temporal_cloud section if list
-// is not nil, and validates the result with validate and validateTargets.
+// is not nil, and validates the result with validate and validateTargets. If it
+// cannot add those targets, it reports why along with the other errors, leaving
+// out those that the missing targets would cause.
 func decode(data []byte, list ListNamespacesFunc, validate func(*Config, *keyNodes) error) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -443,15 +448,13 @@ func decode(data []byte, list ListNamespacesFunc, validate func(*Config, *keyNod
 		cfg.Codecs[name] = codec
 	}
 	if cfg.TemporalCloud != nil && list != nil {
-		if err := cfg.addCloudTargets(list); err != nil {
-			return nil, err
-		}
+		cfg.cloudErr = cfg.addCloudTargets(list)
 	}
 	var shutdownErr error
 	if cfg.ShutdownTimeout < 0 {
 		shutdownErr = fmt.Errorf("shutdown_timeout: %s is negative", cfg.ShutdownTimeout)
 	}
-	if err := errors.Join(validate(&cfg, &keys), shutdownErr, cfg.validateTargets()); err != nil {
+	if err := errors.Join(cfg.cloudErr, validate(&cfg, &keys), shutdownErr, cfg.validateTargets()); err != nil {
 		if cfg.TemporalCloud != nil && len(cfg.TemporalCloud.Report) > 0 {
 			errs := []error{err}
 			for _, line := range cfg.TemporalCloud.Report {
@@ -558,7 +561,7 @@ func (c *Config) validateHTTP() error {
 // validateTargets validates the targets and the codecs they use.
 func (c *Config) validateTargets() error {
 	var errs []error
-	if len(c.Targets) == 0 {
+	if len(c.Targets) == 0 && c.cloudErr == nil {
 		errs = append(errs, errors.New("targets: at least one target is required"))
 	}
 	names := map[string]int{}
@@ -898,7 +901,7 @@ func (a *Authorization) validate(c *Config) []error {
 			errs = append(errs, fmt.Errorf("%s: targets: at least one target is required", label))
 		}
 		for k, target := range p.Targets {
-			if !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Name == target }) {
+			if c.cloudErr == nil && !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Name == target }) {
 				errs = append(errs, fmt.Errorf("%s: targets[%d]: unknown target %q; profiles name targets by name, not alias", label, k, target))
 			}
 		}

@@ -309,6 +309,7 @@ func TestParseTemporalCloudInvalid(t *testing.T) {
 			"temporal_cloud: namespaces listed by the API key: 1",
 			"temporal_cloud: namespace mtls-only.acct1: added no target, because it does not accept API keys",
 		}},
+		{"profile names an unlisted namespace", "temporal_cloud:\n" + key + "auth: {resource: \"https://mcp.example.com/mcp\", issuer: \"https://idp.example.com\", audience: a, required_scopes: [s]}\nauthorization:\n  profiles: {p: {targets: [orders]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n", listing(t, cloudNamespace("payments", "a:7233", "")), []string{`unknown target "orders"`}},
 		{"no namespaces listed", "temporal_cloud:\n" + key, listing(t), []string{"targets: at least one target is required", "temporal_cloud: namespaces listed by the API key: 0"}},
 		{"groups with no value", "temporal_cloud:\n" + key + "  groups:\n", nil, []string{"temporal_cloud: groups: claim_name is required"}},
 		{"bad groups", "temporal_cloud:\n" + key + "  groups: {claim_name: \" groups\", tools_deny: []}\n", nil, []string{
@@ -337,6 +338,41 @@ func TestParseTemporalCloudInvalid(t *testing.T) {
 			}
 			if err != nil && strings.Contains(err.Error(), "cloud-key") {
 				t.Errorf("error %v contains the API key", err)
+			}
+		})
+	}
+}
+
+func TestParseTemporalCloudFailureKeepsOtherErrors(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_CLOUD_KEY", "cloud-key")
+	const data = `listen: 127.0.0.1:8080
+shutdown_timeout: -1s
+auth: {resource: "https://mcp.example.com/mcp", issuer: "https://idp.example.com", audience: a, required_scopes: [s]}
+authorization:
+  profiles: {p: {targets: [payments]}}
+  rules: [{claim_name: sub, claim_value: alice, profile: p}]
+temporal_cloud:
+  api_key: {env: TEMPORAL_MCP_TEST_CLOUD_KEY}
+`
+	failing := func(string) ([]*namespacepb.Namespace, error) { return nil, errors.New("connection refused") }
+	for _, tt := range []struct{ name, yaml, cloudErr string }{
+		{"listing fails", data, "temporal_cloud: listing the account's namespaces: connection refused"},
+		{"malformed include", data + "  namespaces: {include: [\"[\"]}\n", `temporal_cloud: namespaces: include[0]: "[" is not a valid pattern`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parse([]byte(tt.yaml), failing)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			for _, want := range []string{tt.cloudErr, "shutdown_timeout: -1s is negative"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			for _, unwanted := range []string{"unknown target", "at least one target is required"} {
+				if strings.Contains(err.Error(), unwanted) {
+					t.Errorf("error %q contains %q", err, unwanted)
+				}
 			}
 		})
 	}

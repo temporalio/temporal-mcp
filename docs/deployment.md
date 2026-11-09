@@ -84,8 +84,7 @@ These are independent trust relationships:
    instead give each group the namespaces it has there, as
    [Temporal Cloud groups](identity-and-access.md#temporal-cloud-groups)
    describes. The server then keeps listing the groups through the Cloud Ops API
-   while it runs, so its API key must be able to list them and the server must
-   keep reaching that API.
+   while it runs, so it must keep reaching that API.
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
    or `omit` when payload contents should not be returned.

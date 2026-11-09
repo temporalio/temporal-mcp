@@ -80,7 +80,9 @@ These are independent trust relationships:
    See [Identity and access](identity-and-access.md).
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
-   or `omit` when payload contents should not be returned.
+   or `omit` when payload contents should not be returned. A target whose
+   payloads are encrypted needs a codec server even without `decode`, or the
+   input of runs that agents start is stored unencrypted.
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.

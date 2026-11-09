@@ -78,7 +78,7 @@ The server writes one JSON line to stdout for every tool call from a signed-in u
 
 ### 5. Encrypted payloads
 
-Payloads are your application's data: workflow inputs and results, memos, heartbeat details, and failure details. Each namespace target in the config file has a `payload_handling` setting that controls how tool responses show them. By default (`omit`) they're left out. `passthrough` returns them as Temporal stores them, still encoded. `decode` sends them to your codec server, the same URL you pass to the Temporal CLI as `--codec-endpoint`. Codec servers are defined in a `codecs` section.
+Payloads are your application's data: workflow inputs and results, memos, heartbeat details, and failure details. Each namespace target in the config file has a `payload_handling` setting that controls how tool responses show them. By default (`omit`) they're left out. `passthrough` returns them as Temporal stores them, still encoded. `decode` sends them to your codec server, the same URL you pass to the Temporal CLI as `--codec-endpoint`. Codec servers are defined in a `codecs` section. A target whose payloads are encrypted needs a codec server even without `decode`, or the input of workflows that agents start is stored unencrypted.
 
 Your codec server must accept requests from the MCP server itself. The server can't pass on a user's Temporal Cloud login the way the Temporal UI does, so give it its own `Authorization` header value, such as a bearer token. If a payload can't be decoded, it's left out of the response and the reason is logged.
 

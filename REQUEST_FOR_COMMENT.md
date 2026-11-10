@@ -5,11 +5,11 @@
 
 ## What it is
 
-An open-source MCP server that gives your AI agents read-only, governed access to Temporal. You run it in your own environment, alongside your other internal tools.
+An open-source MCP server that gives your AI agents governed access to Temporal. You run it in your own environment, alongside your other internal tools.
 
 When something breaks in production, the first questions tend to be the same. Why did this workflow fail? Why is this run stuck? Did the last deploy cause non-determinism errors? Which workflows did the incident affect? With this server, an agent in Claude Code, Cursor, Codex, or your own tooling can look up workflows, search and count them by status or search attribute, and read failure details. The server can use your organizational SSO and doesn’t require distributing Temporal keys or certificates to end users.
 
-Using the MCP server, agents never hold production credentials. The server connects with one read-only service account, and your internal identity provider decides who can use which tools on which namespaces. It also supports codec decryption for encrypted payloads.
+Using the MCP server, agents never hold production credentials. The server connects with one service account, read-only unless you let agents start workflows, and your internal identity provider decides who can use which tools on which namespaces. It also supports codec decryption for encrypted payloads.
 
 ## Become a design partner
 
@@ -47,7 +47,7 @@ To upgrade, replace the binary with a newer release and restart it. The server i
 The server connects to Temporal as its own identity, not as the person using the agent. It can authenticate with either an API key or an mTLS client certificate. The MCP server keeps its own auditable logs.
 
 1. Create a service account for the server in Temporal Cloud.
-2. Give it Read permission on each Namespace you list as a target.
+2. Give it Read permission on each Namespace you list as a target, or Write where agents may start workflows.
 3. Create an API key for the service account, or issue an mTLS client certificate from a CA the Namespace trusts.
 4. Make the credential available to the server through an environment variable or a mounted file, and reference it from each target in the config file. The server connects over TLS and never puts credentials in tool output.
 
@@ -78,11 +78,11 @@ The server writes one JSON line to stdout for every tool call from a signed-in u
 
 ### 5. Encrypted payloads
 
-Payloads are your application's data: workflow inputs and results, memos, heartbeat details, and failure details. Each namespace target in the config file has a `payload_handling` setting that controls how tool responses show them. By default (`omit`) they're left out. `passthrough` returns them as Temporal stores them, still encoded. `decode` sends them to your codec server, the same URL you pass to the Temporal CLI as `--codec-endpoint`. Codec servers are defined in a `codecs` section.
+Payloads are your application's data: workflow inputs and results, memos, heartbeat details, and failure details. Each namespace target in the config file has a `payload_handling` setting that controls how tool responses show them. By default (`omit`) they're left out. `passthrough` returns them as Temporal stores them, still encoded. `decode` sends them to your codec server, the same URL you pass to the Temporal CLI as `--codec-endpoint`. Codec servers are defined in a `codecs` section. A target whose payloads are encrypted needs a codec server even without `decode`, or the input of workflows that agents start is stored unencrypted.
 
-With `decode`, your codec server must accept requests from the MCP server itself. The server can't pass on a user's Temporal Cloud login the way the Temporal UI does, so give it its own `Authorization` header value, such as a bearer token. If a payload can't be decoded, it's left out of the response and the reason is logged.
+Your codec server must accept requests from the MCP server itself. The server can't pass on a user's Temporal Cloud login the way the Temporal UI does, so give it its own `Authorization` header value, such as a bearer token. If a payload can't be decoded, it's left out of the response and the reason is logged.
 
 ## What it does not do (first release)
 
-- No changes to workflows (no resets, signals, or terminations)
+- No changes to workflows besides starting them (no resets, signals, or terminations)
 - No Temporal-hosted version

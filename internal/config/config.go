@@ -130,7 +130,7 @@ type Auth struct {
 	AuthorizationServer string `yaml:"authorization_server"`
 }
 
-// Target is a named Temporal namespace at an address that the server can read from.
+// Target is a named Temporal namespace at an address that the server connects to.
 type Target struct {
 	Name        string   `yaml:"name"`
 	Aliases     []string `yaml:"aliases"`
@@ -146,8 +146,9 @@ type Target struct {
 	// PayloadHandling says how tool responses show the target's payloads:
 	// PayloadOmit, PayloadPassthrough or PayloadDecode. Empty means PayloadOmit.
 	PayloadHandling string `yaml:"payload_handling"`
-	// Codec is the name of the codec server in Config.Codecs that decodes the
-	// target's payloads. It is required when PayloadHandling is PayloadDecode.
+	// Codec is the name of the target's codec server in Config.Codecs, which
+	// encodes start_workflow's input and, when PayloadHandling is PayloadDecode,
+	// decodes the target's payloads. It is required with PayloadDecode.
 	Codec string `yaml:"codec"`
 }
 
@@ -218,10 +219,10 @@ const (
 	PayloadDecode = "decode"
 )
 
-// Codec is a codec server, which decodes payloads over HTTP for the Temporal UI and CLI.
+// Codec is a codec server, which encodes and decodes payloads over HTTP for the Temporal UI and CLI.
 type Codec struct {
-	// Endpoint is the codec server's URL, without the /decode path. The
-	// placeholder {namespace} in it stands for the namespace of the target.
+	// Endpoint is the codec server's URL, without the /decode or /encode path.
+	// The placeholder {namespace} in it stands for the namespace of the target.
 	Endpoint string `yaml:"endpoint"`
 	// AllowPlainHTTP allows an http Endpoint on any host, not only a loopback one.
 	AllowPlainHTTP bool `yaml:"allow_plain_http"`

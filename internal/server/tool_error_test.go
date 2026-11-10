@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.temporal.io/api/workflowservice/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
@@ -27,7 +29,7 @@ func TestTemporalError(t *testing.T) {
 		{codes.DeadlineExceeded, "timeout", true},
 		{codes.ResourceExhausted, "rate_limited", true},
 		{codes.Unavailable, "temporal_unavailable", true},
-		{codes.PermissionDenied, "temporal_unavailable", false},
+		{codes.PermissionDenied, "permission_denied", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.code.String(), func(t *testing.T) {
@@ -44,15 +46,35 @@ func TestTemporalError(t *testing.T) {
 
 type flakyWorkflowService struct {
 	workflowservice.UnimplementedWorkflowServiceServer
-	failures int32
-	calls    atomic.Int32
+	failures   int32
+	calls      atomic.Int32
+	mu         sync.Mutex
+	requestIDs []string
+}
+
+// unavailable returns Unavailable for the first f.failures calls, and nil after.
+func (f *flakyWorkflowService) unavailable() error {
+	if f.calls.Add(1) <= f.failures {
+		return status.Error(codes.Unavailable, "x")
+	}
+	return nil
 }
 
 func (f *flakyWorkflowService) CountWorkflowExecutions(context.Context, *workflowservice.CountWorkflowExecutionsRequest) (*workflowservice.CountWorkflowExecutionsResponse, error) {
-	if f.calls.Add(1) <= f.failures {
-		return nil, status.Error(codes.Unavailable, "x")
+	if err := f.unavailable(); err != nil {
+		return nil, err
 	}
 	return &workflowservice.CountWorkflowExecutionsResponse{Count: 7}, nil
+}
+
+func (f *flakyWorkflowService) StartWorkflowExecution(_ context.Context, req *workflowservice.StartWorkflowExecutionRequest) (*workflowservice.StartWorkflowExecutionResponse, error) {
+	f.mu.Lock()
+	f.requestIDs = append(f.requestIDs, req.GetRequestId())
+	f.mu.Unlock()
+	if err := f.unavailable(); err != nil {
+		return nil, err
+	}
+	return &workflowservice.StartWorkflowExecutionResponse{RunId: "r", Started: true}, nil
 }
 
 func TestCallServerRetriesUnavailable(t *testing.T) {
@@ -90,5 +112,28 @@ func TestCallServerRetriesUnavailable(t *testing.T) {
 				t.Errorf("calls = %d, want %d", got, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestStartWorkflowRetriesWithOneRequestID(t *testing.T) {
+	fake := &flakyWorkflowService{failures: 1}
+	ln := listen(t)
+	serve(t, ln, fake)
+	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: ln.Addr().String(), Namespace: "default"}}}
+	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := temporal.WithTool(context.WithValue(t.Context(), targetsKey{}, []string{"a"}), "start_workflow", []string{workflowservice.WorkflowService_StartWorkflowExecution_FullMethodName}, []string{"a"})
+
+	_, env, err := startWorkflow(cfg, clients, newRenderer(t, cfg, slog.New(slog.DiscardHandler)))(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{}}, startWorkflowInput{Target: "a", WorkflowID: "w", WorkflowType: "T", TaskQueue: "q"})
+
+	if err != nil || !env.Result.Started {
+		t.Fatalf("result = %+v, error = %v; want a started run", env.Result, err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if ids := fake.requestIDs; len(ids) != 2 || ids[0] == "" || ids[0] != ids[1] {
+		t.Errorf("request IDs = %q, want one request ID on both attempts", ids)
 	}
 }

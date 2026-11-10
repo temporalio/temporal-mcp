@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -18,6 +20,11 @@ import (
 
 func TestShutdownCancellationResult(t *testing.T) {
 	temporalCancelled := temporalError(status.Error(codes.Canceled, "context canceled"), &config.Target{Address: "a:7233"}, &peer.Peer{}, temporalServer)
+	// start_workflow's error when its codec request ends with its context.
+	codecTarget := &config.Config{Codecs: map[string]config.Codec{"c": {Endpoint: "http://127.0.0.1:1"}}, Targets: []config.Target{{Name: "a", Namespace: "default", Codec: "c"}}}
+	ended, end := context.WithCancel(context.WithValue(t.Context(), targetsKey{}, []string{"a"}))
+	end()
+	_, _, encodeCancelled := startWorkflow(codecTarget, nil, newRenderer(t, codecTarget, slog.New(slog.DiscardHandler)))(ended, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"input":[1]}`)}}, startWorkflowInput{Target: "a"})
 	tests := []struct {
 		name          string
 		shutdown      bool
@@ -28,10 +35,11 @@ func TestShutdownCancellationResult(t *testing.T) {
 	}{
 		{"shutdown during raw cancellation", true, false, context.Canceled, "server_shutting_down", true},
 		{"shutdown during Temporal cancellation", true, false, temporalCancelled, "server_shutting_down", true},
+		{"shutdown during codec encoding", true, false, encodeCancelled, "server_shutting_down", true},
 		{"client cancellation", false, true, temporalCancelled, "temporal_unavailable", false},
 		{"client cancels before shutdown", true, true, temporalCancelled, "temporal_unavailable", false},
 		{"unrelated failure during shutdown", true, false, errors.New("unrelated failure"), "internal", false},
-		{"permission denied during shutdown", true, false, temporalError(status.Error(codes.PermissionDenied, "denied"), &config.Target{Address: "a:7233"}, &peer.Peer{}, temporalServer), "temporal_unavailable", false},
+		{"permission denied during shutdown", true, false, temporalError(status.Error(codes.PermissionDenied, "denied"), &config.Target{Address: "a:7233"}, &peer.Peer{}, temporalServer), "permission_denied", false},
 		{"success during shutdown", true, false, nil, "", false},
 	}
 	for _, tt := range tests {

@@ -32,6 +32,7 @@ import (
 
 // Clients holds a Temporal client for each target.
 type Clients struct {
+	name   string
 	byName map[string]client.Client
 	cloud  map[string]cloudservice.CloudServiceClient
 }
@@ -64,7 +65,7 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 	for _, opt := range opts {
 		opt(&o)
 	}
-	c := &Clients{byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
+	c := &Clients{name: name, byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
 	var errs []error
 	for i, t := range targets {
 		cred := apiKeyCredential(t.APIKey, logger)
@@ -147,6 +148,16 @@ func lazyClient(t config.Target, name, version string, cred credential, rootCAs 
 // Client returns the client for the target with the given name.
 func (c *Clients) Client(name string) client.Client {
 	return c.byName[name]
+}
+
+// Identity returns the identity field of a Temporal request made in ctx, which
+// Temporal records on the events the request causes: the name passed to
+// NewClients, followed by a colon and the caller's subject when ctx has a caller.
+func (c *Clients) Identity(ctx context.Context) string {
+	if caller := identity.CallerFrom(ctx); caller != nil {
+		return c.name + ":" + caller.Subject
+	}
+	return c.name
 }
 
 // CloudOps returns the Temporal Cloud Ops API client for the target with the given name, or nil if the target is not on Temporal Cloud or has no API key.

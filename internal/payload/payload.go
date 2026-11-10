@@ -1,8 +1,8 @@
-// Package payload renders the payloads in tool responses. Payloads are Temporal's
-// customer application data, such as workflow inputs and results, memos, heartbeat
-// details and failure details. Each target's payload_handling says how a response
-// shows them: omitted, passed through as stored, or decoded by the target's codec
-// server.
+// Package payload renders the payloads in tool responses, and encodes the payloads
+// of workflow input. Payloads are Temporal's customer application data, such as
+// workflow inputs and results, memos, heartbeat details and failure details. Each
+// target's payload_handling says how a response shows them: omitted, passed through
+// as stored, or decoded by the target's codec server.
 //
 // A tool adds each payload of a response to one Batch, which returns the Field that
 // stands for the payload in the response, and then renders the Batch once, which
@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -35,7 +36,7 @@ type Field struct {
 	Error     string  `json:"error,omitempty" jsonschema:"with reason decode_failed: why the payload was not decoded, such as that the codec server could not be reached or responded with an HTTP error"`
 }
 
-// Renderer renders the payloads of each target's tool responses.
+// Renderer renders the payloads of each target's tool responses and encodes start_workflow's input.
 type Renderer struct {
 	targets map[string]*target
 	logger  *slog.Logger
@@ -44,11 +45,11 @@ type Renderer struct {
 type target struct {
 	name     string
 	handling string
-	codec    *codec // set when handling is decode
+	codec    *codec // set when the target names a codec
 }
 
 // NewRenderer returns the Renderer for cfg's targets. logger gets the cause of
-// each payload that is not decoded.
+// each failed codec request.
 func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	authorization := map[string]func() (string, error){}
 	for name, c := range cfg.Codecs {
@@ -59,7 +60,7 @@ func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	r := &Renderer{targets: map[string]*target{}, logger: logger}
 	for _, t := range cfg.Targets {
 		rt := &target{name: t.Name, handling: t.PayloadHandling}
-		if t.PayloadHandling == config.PayloadDecode {
+		if t.Codec != "" {
 			rt.codec = &codec{
 				endpoint:           strings.ReplaceAll(cfg.Codecs[t.Codec].Endpoint, "{namespace}", t.Namespace),
 				namespace:          t.Namespace,
@@ -72,15 +73,53 @@ func NewRenderer(cfg *config.Config, logger *slog.Logger) (*Renderer, error) {
 	return r, nil
 }
 
-// CheckCodec sends the codec server of the named target, which must decode
-// payloads, a decode request with no payloads, and returns why it failed, worded
-// for agents, or "" if it succeeded. The cause of a failure goes to the log.
+// CheckCodec sends a request with no payloads to the named target's codec server,
+// which the target must have, on each path this server uses: /decode if the target
+// decodes payloads, then /encode. It returns the path of the first failed request
+// and why it failed, worded for agents, such as "/encode: the codec server responded
+// HTTP 404 Not Found", or "" if every request succeeded. The cause of a failure goes
+// to the log.
 func (r *Renderer) CheckCodec(ctx context.Context, target string) string {
-	if _, err := r.targets[target].codec.decode(ctx, nil); err != nil {
-		r.logger.ErrorContext(ctx, "codec check failed", "target", target, "error", err.Error())
-		return err.reason
+	t := r.targets[target]
+	paths := []string{"/encode"}
+	if t.handling == config.PayloadDecode {
+		paths = []string{"/decode", "/encode"}
+	}
+	for _, path := range paths {
+		if _, err := t.codec.send(ctx, path, nil); err != nil {
+			r.logger.ErrorContext(ctx, "codec check failed", "target", target, "path", path, "error", err.Error())
+			return path + ": " + err.reason
+		}
 	}
 	return ""
+}
+
+// Encode returns values, which are JSON, as the named target's payloads, in order:
+// binary/null for null and json/plain for any other value, encoded in one request
+// by the target's codec server if it names a codec. If ctx ends before the codec
+// server encodes them, the error is ctx's. Otherwise, if the codec server does not
+// encode them, the error says why, worded for agents, and the cause goes to the log.
+func (r *Renderer) Encode(ctx context.Context, target string, values []json.RawMessage) ([]*commonpb.Payload, error) {
+	ps := make([]*commonpb.Payload, len(values))
+	for i, v := range values {
+		ps[i] = &commonpb.Payload{Metadata: map[string][]byte{converter.MetadataEncoding: []byte(converter.MetadataEncodingJSON)}, Data: v}
+		if string(v) == "null" {
+			ps[i] = &commonpb.Payload{Metadata: map[string][]byte{converter.MetadataEncoding: []byte(converter.MetadataEncodingNil)}}
+		}
+	}
+	c := r.targets[target].codec
+	if c == nil || len(ps) == 0 {
+		return ps, nil
+	}
+	encoded, err := c.send(ctx, "/encode", ps)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		r.logger.ErrorContext(ctx, "input not encoded", "target", target, "error", err.Error())
+		return nil, errors.New(err.reason)
+	}
+	return encoded, nil
 }
 
 // A Batch holds the payloads of one tool response, so that they are rendered together.
@@ -129,7 +168,7 @@ func (b *Batch) Render(ctx context.Context) error {
 			// A payload whose data is not the JSON its encoding says is shown as stored.
 			*b.fields[i], _ = field("passthrough", p)
 		}
-	case b.target != nil && b.target.codec != nil:
+	case b.target != nil && b.target.handling == config.PayloadDecode:
 		if len(b.payloads) > 0 {
 			return b.decode(ctx)
 		}
@@ -140,7 +179,7 @@ func (b *Batch) Render(ctx context.Context) error {
 }
 
 func (b *Batch) decode(ctx context.Context) error {
-	decoded, err := b.target.codec.decode(ctx, b.payloads)
+	decoded, err := b.target.codec.send(ctx, "/decode", b.payloads)
 	if err != nil {
 		b.omit("decode_failed", err.reason)
 		if ctx.Err() != nil {

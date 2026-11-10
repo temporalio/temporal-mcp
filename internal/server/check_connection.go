@@ -90,8 +90,8 @@ func checkConnection(cfg *config.Config, clients *temporal.Clients, payloads *pa
 				return nil, envelope[connectionCheck]{}, err
 			}
 		}
-		codec := stage{Name: "codec", Status: "skipped", Reason: new("not run because the target does not decode payloads")}
-		if t.PayloadHandling == config.PayloadDecode {
+		codec := stage{Name: "codec", Status: "skipped", Reason: new("not run because the target has no codec")}
+		if t.Codec != "" {
 			codec, err = runStage(ctx, "codec", func(ctx context.Context) string { return payloads.CheckCodec(ctx, t.Name) })
 			if err != nil {
 				return nil, envelope[connectionCheck]{}, err

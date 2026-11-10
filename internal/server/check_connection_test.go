@@ -11,9 +11,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,6 +94,22 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 	unavailable := listen(t)
 	serve(t, unavailable, fakeWorkflowService{describeNamespaceErr: status.Error(codes.Unavailable, "namespace ns1 is unavailable on "+unavailable.Addr().String())})
 
+	reachable := listen(t)
+	serve(t, reachable, fakeWorkflowService{})
+	// onlyPath serves a codec server that answers a request with no payloads on path, and no other path.
+	onlyPath := func(path string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != path {
+				http.NotFound(w, r)
+				return
+			}
+			io.WriteString(w, `{"payloads":[]}`)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	codecs := map[string]config.Codec{"decode-only": {Endpoint: onlyPath("/decode")}, "encode-only": {Endpoint: onlyPath("/encode")}}
+
 	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
 	tests := []struct {
 		name                  string
@@ -98,6 +117,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		wantServer            string
 		wantNamespacePrefix   string
 		wantNamespaceContains string
+		wantCodec             string
 	}{
 		{
 			name:       "TLS handshake fails",
@@ -115,11 +135,30 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 			target:     config.Target{Address: silent.Addr().String()},
 			wantServer: "DeadlineExceeded: timed out waiting for the Temporal server",
 		},
+		{
+			name:      "codec server that only decodes, for a target that does not decode",
+			target:    config.Target{Address: reachable.Addr().String(), PayloadHandling: config.PayloadPassthrough, Codec: "decode-only"},
+			wantCodec: "/encode: the codec server responded HTTP 404 Not Found",
+		},
+		{
+			name:      "codec server that only decodes, for a target that decodes",
+			target:    config.Target{Address: reachable.Addr().String(), PayloadHandling: config.PayloadDecode, Codec: "decode-only"},
+			wantCodec: "/encode: the codec server responded HTTP 404 Not Found",
+		},
+		{
+			name:   "codec server that only encodes, for a target that does not decode",
+			target: config.Target{Address: reachable.Addr().String(), Codec: "encode-only"},
+		},
+		{
+			name:      "codec server that only encodes, for a target that decodes",
+			target:    config.Target{Address: reachable.Addr().String(), PayloadHandling: config.PayloadDecode, Codec: "encode-only"},
+			wantCodec: "/decode: the codec server responded HTTP 404 Not Found",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.target.Name, tt.target.Description, tt.target.Namespace = "a", "x", "default"
-			cfg := &config.Config{Targets: []config.Target{tt.target}}
+			cfg := &config.Config{Codecs: codecs, Targets: []config.Target{tt.target}}
 			clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
@@ -148,6 +187,10 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 				if got := reason(namespace); namespace.Status != "failed" || !strings.HasPrefix(got, tt.wantNamespacePrefix) || !strings.Contains(got, tt.wantNamespaceContains) {
 					t.Errorf("namespace stage = %s %q, want failed with reason starting %q and containing %q", namespace.Status, got, tt.wantNamespacePrefix, tt.wantNamespaceContains)
 				}
+			}
+
+			if codec := env.Result.Stages[2]; tt.target.Codec != "" && reason(codec) != tt.wantCodec {
+				t.Errorf("codec stage = %s %q, want reason %q", codec.Status, reason(codec), tt.wantCodec)
 			}
 
 			out, err := json.Marshal(env)

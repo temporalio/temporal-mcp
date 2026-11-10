@@ -354,7 +354,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows", "start_workflow"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }
@@ -430,28 +430,6 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 		}
 		if err := <-errs; serviceerror.ToStatus(err).Code() != codes.PermissionDenied {
 			t.Errorf("%s: err = %v, want PermissionDenied", name, err)
-		}
-	}
-}
-
-func TestProfileWithoutToolsGetsReadOnlyToolsOnly(t *testing.T) {
-	a := &config.Authorization{Profiles: map[string]config.Profile{
-		"all":  {Targets: []string{"t"}},
-		"deny": {ToolsDeny: []string{"get_workflows"}, Targets: []string{"t"}},
-	}}
-	s, tools := newServer(t.Context(), t.Context(), "temporal", "0", &config.Config{Authorization: a}, nil, nil, io.Discard, slog.New(slog.DiscardHandler))
-	noop := func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
-		return nil, struct{}{}, nil
-	}
-	addTool(s, &mcp.Tool{Name: "read_tool", Annotations: readOnlyAnnotations}, nil, noop)
-	addTool(s, &mcp.Tool{Name: "write_tool"}, nil, noop)
-	if err := resolveProfileTools(a, append(tools, "read_tool", "write_tool"), s.access); err != nil {
-		t.Fatal(err)
-	}
-	for name, excluded := range map[string][]string{"all": {"write_tool"}, "deny": {"write_tool", "get_workflows"}} {
-		got := a.Profiles[name].Tools
-		if !slices.Contains(got, "read_tool") || slices.ContainsFunc(excluded, func(tool string) bool { return slices.Contains(got, tool) }) {
-			t.Errorf("profile %q: tools = %v, want read_tool and none of %v", name, got, excluded)
 		}
 	}
 }

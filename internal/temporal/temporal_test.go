@@ -251,3 +251,13 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 		t.Fatal("credential was not called")
 	}
 }
+
+func TestIdentity(t *testing.T) {
+	clients, err := NewClients(nil, "temporal-mcp", "0", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := clients.Identity(identity.WithCaller(t.Context(), &identity.Caller{Issuer: "https://idp.example", Subject: "alice"})); got != "temporal-mcp:alice" {
+		t.Errorf("identity of caller alice = %q, want temporal-mcp:alice", got)
+	}
+}

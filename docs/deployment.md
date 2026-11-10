@@ -43,7 +43,7 @@ sequenceDiagram
     User->>IdP: Sign in and request an access token
     IdP-->>User: Issue access token
     User->>MCP: Start MCP interaction with access token
-    MCP->>Temporal: Read using API key or mTLS certificate
+    MCP->>Temporal: Call using API key or mTLS certificate
     Temporal-->>MCP: Return Temporal data
     MCP-->>User: Return MCP result
 ```
@@ -69,8 +69,9 @@ These are independent trust relationships:
    namespace name, and API key or mTLS certificate. Keep file-backed credentials
    in protected paths on the host and use least-privileged credentials. For
    Temporal Cloud, prefer an API key from a read-only service account when API
-   keys are available; use mTLS when the namespace does not accept API keys.
-   Instead of listing a Temporal Cloud account's namespaces, a
+   keys are available; use mTLS when the namespace does not accept API keys. A
+   target that a profile grants `start_workflow` on needs a credential with
+   Write instead. Rather than listing a Temporal Cloud account's namespaces, a
    [`temporal_cloud`](config.md#temporal_cloud) section can add a target for
    each one that accepts API keys. The server then lists them through the
    Temporal Cloud Ops API at startup, so it must be able to reach that API,
@@ -88,7 +89,9 @@ These are independent trust relationships:
    the Cloud Ops API while it runs, so it must keep reaching that API.
 5. **Configure payload access.** Use `passthrough` to return payloads as Temporal
    stores them, `decode` with a codec server to return codec-encrypted payloads,
-   or `omit` when payload contents should not be returned.
+   or `omit` when payload contents should not be returned. A target whose
+   payloads are encrypted needs a codec server even without `decode`, or the
+   input of runs that agents start is stored unencrypted.
 6. **Create the config and start the server.** The
    [centrally hosted OIDC and mTLS
    example](../examples/http-oidc-mtls-config.yaml) shows the complete YAML.
@@ -134,14 +137,15 @@ test and verify the deployment.
 
 ## Access
 
-Every successful Temporal read must pass all of these controls:
+Every successful Temporal call must pass all of these controls:
 
-1. **The server's tool surface.** The server exposes a bounded set of read-only
-   operations rather than arbitrary Temporal gRPC calls.
+1. **The server's tool surface.** The server exposes a bounded set of
+   operations rather than arbitrary Temporal gRPC calls. Each one only reads,
+   except `start_workflow`, which starts a run and never terminates one.
 2. **The caller's MCP profile.** Authorization profiles, or the groups' access
    with `temporal_cloud.groups`, grant specific tools on specific configured
-   targets. A valid token that matches no rule or group receives no tools or
-   targets.
+   targets, and only a profile that lists `start_workflow` grants it. A valid
+   token that matches no rule or group receives no tools or targets.
 3. **The target credential.** Temporal accepts only the operations and
    namespaces allowed to the API key or mTLS identity used for that target.
 4. **The configured target boundary.** Tool calls cannot supply a different

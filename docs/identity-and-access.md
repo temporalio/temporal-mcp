@@ -12,7 +12,7 @@ For a complete configuration, see the
 
 ## Components
 
-- **User:** the person asking an AI application to investigate Temporal.
+- **User:** the person asking an AI application to work with Temporal.
 - **MCP client:** the AI application that connects to the MCP endpoint and
   obtains a token for the user.
 - **Identity provider:** the authorization server that authenticates the user
@@ -227,8 +227,9 @@ their client next lists tools. Every call is checked against the current access.
   tool.
 - **Matching group and tool, missing target:** the tool cannot be used on that
   target.
-- **MCP authorization succeeds, Temporal denies the call:** the target
-  credential lacks the required backend permission.
+- **MCP authorization succeeds, Temporal denies the call:** the tool reports
+  permission denied because the target credential lacks the required
+  backend permission, such as Write for `start_workflow`.
 
 This fail-closed behavior lets identity, MCP policy, and Temporal permissions
 be tested separately.

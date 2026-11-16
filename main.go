@@ -20,8 +20,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	identitypb "go.temporal.io/cloud-sdk/api/identity/v1"
-	namespacepb "go.temporal.io/cloud-sdk/api/namespace/v1"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/payload"
@@ -70,10 +68,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("unexpected arguments %q", flags.Args())
 	}
 
-	listNamespaces := func(apiKey string) ([]*namespacepb.Namespace, error) {
-		return temporal.ListNamespaces(context.Background(), apiKey, name, version)
-	}
-	load := func(path string) (*config.Config, error) { return config.Load(path, listNamespaces) }
+	load := config.Load
 	if *stdio {
 		// Broken client pipes must not stop calls before they are audited.
 		signal.Ignore(syscall.SIGPIPE)
@@ -100,11 +95,6 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
 	}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	if cfg.TemporalCloud != nil {
-		for _, line := range cfg.TemporalCloud.Report {
-			logger.Info(line)
-		}
-	}
 	clients, clientsErr := temporal.NewClients(cfg.Targets, name, version, logger)
 	if err := errors.Join(secretsErr, clientsErr); err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
@@ -120,14 +110,9 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	defer cancelCalls()
 	subscriptions, cancelSubscriptions := context.WithCancel(context.Background())
 	defer cancelSubscriptions()
-	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger, listNamespaces, func(apiKey string) ([]*identitypb.UserGroup, error) {
-		return temporal.ListUserGroups(context.Background(), apiKey, name, version)
-	})
+	s, err := server.NewServer(calls, subscriptions, serverName, version, cfg, clients, payloads, records, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
-	}
-	if cfg.TemporalCloud != nil {
-		go server.CheckConnections(context.Background(), cfg, clients, payloads, cfg.TemporalCloud.Added, logger)
 	}
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

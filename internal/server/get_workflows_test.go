@@ -2568,8 +2568,7 @@ func TestToolsOnDevServer(t *testing.T) {
 
 	t.Run("workflows by profile", func(t *testing.T) {
 		issuer, sign := newTestIssuer(t)
-		authConfig := filepath.Join(t.TempDir(), "config.yaml")
-		if err := os.WriteFile(authConfig, fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+		authCfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
 			"targets:\n"+
 			"  - {name: orders, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-orders-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-orders-waitForSignal}]}\n"+
 			"  - {name: signals, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-signals-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-signals-waitForSignal}]}\n"+
@@ -2582,10 +2581,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			"  rules:\n"+
 			"    - {claim_name: groups, claim_value: orders, profile: orders}\n"+
 			"    - {claim_name: groups, claim_value: signals, profile: signals}\n"+
-			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		authCfg, err := config.Load(authConfig)
+			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2598,7 +2594,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		mux := NewMux(s, authCfg, logger)
+		mux := NewMux(s.Server, authCfg, logger)
 		// Each declaration has its own task queue, so a run's task queue shows which declaration started it.
 		taskQueue := func(target, workflowType string) string { return "by-profile-" + target + "-" + workflowType }
 		workflow := func(target, workflowType string) any {

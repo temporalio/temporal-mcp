@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -76,7 +75,6 @@ func TestAuthorization(t *testing.T) {
 	go gs.Serve(staging)
 	t.Cleanup(gs.Stop)
 
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
@@ -106,10 +104,7 @@ authorization:
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.All, profile: all}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.NoHistory, profile: no-history}
 `, closed, idp, staging.Addr().String())
-	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Parse([]byte(yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +117,7 @@ authorization:
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewMux(s, cfg, logger))
+	srv := httptest.NewServer(NewMux(s.Server, cfg, logger))
 	t.Cleanup(srv.Close)
 	connectAs := func(t *testing.T, token string) *mcp.ClientSession {
 		t.Helper()
@@ -435,7 +430,8 @@ func TestToolsListFailsClosedOnUnexpectedResult(t *testing.T) {
 		next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			return result, nil
 		}
-		res, err := authorize(cfg)(next)(t.Context(), "tools/list", &mcp.ListToolsRequest{Params: &mcp.ListToolsParams{}})
+		ctx := context.WithValue(t.Context(), snapshotKey{}, newSnapshot(cfg, nil, nil))
+		res, err := authorize()(next)(ctx, "tools/list", &mcp.ListToolsRequest{Params: &mcp.ListToolsParams{}})
 		var wire *jsonrpc.Error
 		if res != nil || !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
 			t.Errorf("tools/list with next returning %#v = %#v, %v; want no result and an internal error", result, res, err)

@@ -14,6 +14,7 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -255,6 +256,32 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 		}
 	default:
 		t.Fatal("credential was not called")
+	}
+}
+
+func TestClose(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
+	clients, err := NewClients([]config.Target{
+		{Name: "a", Address: serve(t, &fakeWorkflowService{}), Namespace: "default"},
+		{Name: "cloud", Address: "payments.a1b2c.tmprl.cloud:7233", Namespace: "payments.a1b2c", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}},
+	}, "test", "0", slog.New(slog.DiscardHandler), WithPlaintextCloudOpsAPI(closedAddress(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName, cloudservice.CloudService_GetNamespace_FullMethodName}, []string{"a", "cloud"})
+	calls := func() (codes.Code, codes.Code) {
+		_, err := clients.Client("a").WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
+		_, opsErr := clients.CloudOps("cloud").GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: "payments.a1b2c"})
+		return serviceerror.ToStatus(err).Code(), serviceerror.ToStatus(opsErr).Code()
+	}
+	if temporal, ops := calls(); temporal != codes.OK || ops != codes.Unavailable {
+		t.Fatalf("codes before Close = %v and %v, want OK and Unavailable", temporal, ops)
+	}
+	clients.Close()
+	if temporal, ops := calls(); temporal != codes.Canceled || ops != codes.Canceled {
+		t.Errorf("codes after Close = %v and %v, want Canceled for both", temporal, ops)
 	}
 }
 

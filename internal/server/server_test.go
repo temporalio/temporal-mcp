@@ -34,7 +34,11 @@ import (
 // connect writes the server's logs and audit records to out.
 func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
-	cfg, err := config.Load(configPath)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +230,7 @@ func TestToolErrorHasResultType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewMux(s, &config.Config{}, logger))
+	srv := httptest.NewServer(NewMux(s.Server, &config.Config{}, logger))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if err != nil {
@@ -293,7 +297,7 @@ func TestNewMux(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutAuth := httptest.NewServer(NewMux(plain, &config.Config{}, logger))
+	withoutAuth := httptest.NewServer(NewMux(plain.Server, &config.Config{}, logger))
 	t.Cleanup(withoutAuth.Close)
 
 	tests := []struct {
@@ -377,17 +381,13 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 	t.Cleanup(codecServer.Close)
 	temporalServer := listen(t)
 	serve(t, temporalServer, memoWorkflowService{})
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+	cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
 		"targets:\n  - {name: orders, description: x, address: %q, namespace: orders, payload_handling: decode, codec: orders}\n"+
 		"codecs:\n  orders:\n    endpoint: %q\n    passthrough_headers:\n"+
 		"      - {name: x-tenant-id}\n"+
 		"      - {name: X-Codec-Authorization, send_as: Authorization}\n"+
 		"      - {name: X-Roles}\n"+
-		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(configPath)
+		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL))
 	if err != nil {
 		t.Fatal(err)
 	}

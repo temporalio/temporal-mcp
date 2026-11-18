@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -101,9 +100,15 @@ func TestAudit(t *testing.T) {
 		panic("boom-value")
 	})
 	token := sign(map[string]any{})
-	var callToken atomic.Pointer[string]
-	callToken.Store(&token)
-	authed := connectTo(t, NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) { return bearer(*callToken.Load()).RoundTrip(r) }))
+	authed := connectTo(t, NewMux(s.Server, authCfg, logger), bearer(token))
+	var malformed atomic.Bool
+	rejected := connectTo(t, NewMux(s.Server, authCfg, logger), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if malformed.Load() {
+			return bearer("not-a-token").RoundTrip(r)
+		}
+		return bearer(token).RoundTrip(r)
+	}))
+	malformed.Store(true)
 	openCfg := &config.Config{Targets: targets}
 	open, _ := newServer(t.Context(), t.Context(), "temporal", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
 	unauthed := connectTo(t, NewMux(open.Server, openCfg, logger), http.DefaultTransport)
@@ -123,7 +128,6 @@ func TestAudit(t *testing.T) {
 	tests := []struct {
 		name      string
 		session   *mcp.ClientSession
-		token     string
 		tool      string
 		args      string
 		failWrite bool
@@ -161,7 +165,7 @@ func TestAudit(t *testing.T) {
 		{name: "cancelled call that panics", session: authed, tool: "cancel_and_panic", args: `{}`, callErr: "context canceled",
 			record: alice(map[string]any{"tool": "cancel_and_panic", "access": "write", "target": nil, "arguments": map[string]any{}, "outcome": "internal", "temporal_calls": 0.0}),
 			log:    `level=ERROR msg="tool call failed" tool=cancel_and_panic error="panic: boom-value\ngoroutine `},
-		{name: "rejected token", session: authed, token: "not-a-token", tool: "check_connection", args: `{"target":"g"}`, callErr: "Unauthorized",
+		{name: "rejected token", session: rejected, tool: "check_connection", args: `{"target":"g"}`, callErr: "Unauthorized",
 			log: `level=WARN msg="rejected access token" reason="malformed token"`},
 		{name: "write failure", session: unauthed, tool: "list_available_targets", failWrite: true, callErr: "internal error",
 			log: `level=ERROR msg="cannot write audit record" tool=list_available_targets error="disk full"`},
@@ -172,7 +176,6 @@ func TestAudit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logs.Reset()
-			callToken.Store(new(cmp.Or(tt.token, token)))
 			records.failNext = tt.failWrite
 			params := &mcp.CallToolParams{Name: tt.tool}
 			if tt.args != "" {

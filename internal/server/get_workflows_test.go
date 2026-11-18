@@ -221,6 +221,7 @@ func TestToFailureFailureInfo(t *testing.T) {
 		},
 		{
 			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
+				//lint:ignore SA1019 checks that operation_token wins over the deprecated operation_id
 				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1", OperationToken: "token-1",
 			}}},
 			kind: "NexusOperationFailure", info: "nexus_operation",
@@ -228,6 +229,7 @@ func TestToFailureFailureInfo(t *testing.T) {
 		},
 		{
 			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
+				//lint:ignore SA1019 covers the fallback to operation_id for failures written before operation_token
 				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1",
 			}}},
 			name: "NexusOperationFailure from before operation_token", kind: "NexusOperationFailure", info: "nexus_operation",

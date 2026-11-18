@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -34,6 +35,7 @@ func TestLoadValid(t *testing.T) {
         input_schema: [{type: object, required: [order_ids], properties: {order_ids: {type: array, items: {type: string}}}}]
       - {type: OrderWorkflow, task_queue: orders}
       - {type: OrderReportWorkflow, task_queue: reports, input_schema: [{type: string, format: date, default: 2026-01-01}]}
+      - file: testdata/workflow.json
 codecs:
   payments:
     endpoint: http://{namespace}.codec.internal
@@ -90,6 +92,11 @@ codecs:
 				Type:        "OrderReportWorkflow",
 				TaskQueue:   "reports",
 				InputSchema: []any{map[string]any{"type": "string", "format": "date", "default": "2026-01-01"}},
+			}, {
+				File:        "testdata/workflow.json",
+				Type:        "OrderRefundWorkflow",
+				TaskQueue:   "orders",
+				InputSchema: []any{map[string]any{"type": "integer", "maximum": json.Number("9007199254740993")}},
 			}},
 		}},
 		Codecs: map[string]Codec{
@@ -111,6 +118,7 @@ const validAuthorization = `
 authorization:
   profiles:
     oncall: {tools: [get_workflows], targets: [prod]}
+    refunds: {tools: [start_workflow], workflows: [OrderRefundWorkflow], targets: [prod]}
   rules:
     - {claim_name: "cognito:groups", claim_value: oncall, profile: oncall}
 `
@@ -134,7 +142,7 @@ func TestParseTargetAddress(t *testing.T) {
 
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
-		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json}]\nauth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
 		if _, err := parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
@@ -763,7 +771,9 @@ func TestParseInvalid(t *testing.T) {
 				"      - {}\n" +
 				"      - {type: W, task_queue: q}\n" +
 				"      - {type: W, task_queue: \" \"}\n" +
-				"      - {type: X, task_queue: q, input_schema: [{type: object}, {type: object, properties: {true: {}}}, .inf]}\n",
+				"      - {type: X, task_queue: q, input_schema: [{type: object}, {type: object, properties: {true: {}}}, .inf]}\n" +
+				"      - {type: OrderRefundWorkflow, task_queue: q}\n" +
+				"      - file: testdata/workflow.json\n",
 			want: []string{
 				"targets[0]: workflows[0]: type is required",
 				"targets[0]: workflows[0]: task_queue is required",
@@ -771,7 +781,38 @@ func TestParseInvalid(t *testing.T) {
 				"targets[0]: workflows[2]: task_queue is required",
 				"targets[0]: workflows[3]: input_schema[1] cannot be written as JSON; its map keys must be strings or integers, and its numbers finite: ",
 				"targets[0]: workflows[3]: input_schema[2] cannot be written as JSON; its map keys must be strings or integers, and its numbers finite: ",
+				`targets[0]: workflows[5]: file: testdata/workflow.json: type "OrderRefundWorkflow" conflicts with the type of workflows[4]`,
 			},
+		},
+		{
+			name: "workflow file with another field",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json, task_queue: orders}]\n",
+			want: []string{"targets[0]: workflows[0]: file: not allowed with other fields, which go in the file"},
+		},
+		{
+			name: "workflow file with an empty type",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json, type: \"\"}]\n",
+			want: []string{"targets[0]: workflows[0]: file: not allowed with other fields, which go in the file"},
+		},
+		{
+			name: "workflow file key with no value",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: }]\n",
+			want: []string{"targets[0]: workflows[0]: file is empty"},
+		},
+		{
+			name: "empty workflow file",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-empty.json}]\n",
+			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-empty.json is empty"},
+		},
+		{
+			name: "missing workflow file",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/missing.json}]\n",
+			want: []string{"targets[0]: workflows[0]: file: open testdata/missing.json: "},
+		},
+		{
+			name: "workflow file with an unknown key",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-unknown-key.json}]\n",
+			want: []string{`targets[0]: workflows[0]: file: testdata/workflow-unknown-key.json: json: unknown field "taskQueue"`},
 		},
 		{
 			name: "profile workflows that its targets do not declare",

@@ -150,12 +150,36 @@ type Target struct {
 
 // Workflow is a workflow type that start_workflow may start, on its task queue.
 type Workflow struct {
-	Type        string `yaml:"type"`
-	TaskQueue   string `yaml:"task_queue"`
-	Description string `yaml:"description"`
+	// File, when set, is the path of the JSON file that the other fields were read from.
+	File        string `yaml:"file" json:"-"`
+	Type        string `yaml:"type" json:"type"`
+	TaskQueue   string `yaml:"task_queue" json:"task_queue"`
+	Description string `yaml:"description" json:"description"`
 	// InputSchema is a JSON Schema for each of the workflow's arguments, in order,
 	// which the server shows agents as given and does not validate as JSON Schemas.
-	InputSchema []any `yaml:"input_schema"`
+	InputSchema []any `yaml:"input_schema" json:"input_schema"`
+}
+
+// readFile sets w's other fields from the JSON object in File.
+func (w *Workflow) readFile() error {
+	data, err := os.ReadFile(w.File)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	// Keep numbers as written, since a float64 rounds integers above 2^53.
+	dec.UseNumber()
+	if err := dec.Decode(w); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("%s is empty", w.File)
+		}
+		return fmt.Errorf("%s: %w", w.File, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%s: must hold one JSON object", w.File)
+	}
+	return nil
 }
 
 // The values of Target.PayloadHandling.
@@ -307,6 +331,10 @@ type keyNodes struct {
 		APIKey    yaml.Node `yaml:"api_key"`
 		TLS       yaml.Node `yaml:"tls"`
 		Workflows []struct {
+			File        yaml.Node `yaml:"file"`
+			Type        yaml.Node `yaml:"type"`
+			TaskQueue   yaml.Node `yaml:"task_queue"`
+			Description yaml.Node `yaml:"description"`
 			InputSchema yaml.Node `yaml:"input_schema"`
 		} `yaml:"workflows"`
 	} `yaml:"targets"`
@@ -361,6 +389,19 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 			timestampsAsWritten(&w.InputSchema)
 			if err := w.InputSchema.Decode(&cfg.Targets[i].Workflows[k].InputSchema); err != nil {
 				return nil, err
+			}
+			if w.File.Kind == 0 {
+				continue
+			}
+			label := fmt.Sprintf("targets[%d]: workflows[%d]: file", i, k)
+			if w.Type.Kind != 0 || w.TaskQueue.Kind != 0 || w.Description.Kind != 0 || w.InputSchema.Kind != 0 {
+				return nil, fmt.Errorf("%s: not allowed with other fields, which go in the file", label)
+			}
+			if cfg.Targets[i].Workflows[k].File == "" {
+				return nil, fmt.Errorf("%s is empty", label)
+			}
+			if err := cfg.Targets[i].Workflows[k].readFile(); err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
 			}
 		}
 	}
@@ -553,6 +594,9 @@ func (c *Config) validateTargets() error {
 		types := map[string]int{}
 		for k, w := range t.Workflows {
 			label := fmt.Sprintf("%s: workflows[%d]", label, k)
+			if w.File != "" {
+				label += ": file: " + w.File
+			}
 			if strings.TrimSpace(w.Type) == "" {
 				errs = append(errs, fmt.Errorf("%s: type is required", label))
 			} else if j, ok := types[w.Type]; ok {

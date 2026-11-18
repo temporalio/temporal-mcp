@@ -124,7 +124,9 @@ test and verify the deployment.
    or ingress health check can use `/healthz`, which answers 200 without a
    token.
 6. **Change the config.** Run `helm upgrade` with the same arguments and the
-   edited file. The pods restart with it.
+   edited file. The pods restart with it. Changing only a workflow file that
+   the config names does not restart them, so run
+   `kubectl rollout restart deployment/temporal-mcp` to load the new file.
 
 ## Access
 
@@ -151,8 +153,9 @@ and restarting the process.
 
 ## Changes
 
-The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart.
+The server loads its overall configuration at startup, including the workflow
+files that targets name. Changes to targets, workflow files, identity provider
+settings, profiles, or rules require a restart.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The

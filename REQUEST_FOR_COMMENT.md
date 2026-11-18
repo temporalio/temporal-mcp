@@ -5,11 +5,11 @@
 
 ## What it is
 
-An open-source MCP server that gives your AI agents governed access to Temporal. You run it in your own environment, alongside your other internal tools.
+An open-source MCP server that gives your AI agents governed access to Temporal (read-only by default). You run it in your own environment, alongside your other internal tools.
 
 When something breaks in production, the first questions tend to be the same. Why did this workflow fail? Why is this run stuck? Did the last deploy cause non-determinism errors? Which workflows did the incident affect? With this server, an agent in Claude Code, Cursor, Codex, or your own tooling can look up workflows, search and count them by status or search attribute, and read failure details. The server can use your organizational SSO and doesn’t require distributing Temporal keys or certificates to end users.
 
-Using the MCP server, agents never hold production credentials. The server connects with one service account, read-only unless you let agents start workflows, and your internal identity provider decides who can use which tools on which namespaces. It also supports codec decryption for encrypted payloads.
+Using the MCP server, agents never hold production credentials. The server connects with one service account, read-only unless you choose to allow agents to start workflows, and your internal identity provider decides who can use which tools on which namespaces. It also supports codec decryption for encrypted payloads.
 
 ## Become a design partner
 
@@ -84,5 +84,5 @@ Your codec server must accept requests from the MCP server itself. The server ca
 
 ## What it does not do (first release)
 
-- No changes to workflows besides starting them (no resets, signals, or terminations)
+- No changes to workflows, except starting the ones you explicitly allow (no resets, signals, or terminations)
 - No Temporal-hosted version

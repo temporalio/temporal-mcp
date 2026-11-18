@@ -1,6 +1,6 @@
 # temporal-mcp ([Pre-release])
 
-`temporal-mcp` is an MCP server that gives AI agents access to the Temporal namespaces listed in its config, over streamable HTTP or, for one developer, over stdio. Its tools let an agent list the namespaces it can use and check that the server can reach each one, read a workflow run's state and event history or a summary of that history, see a task queue's pollers and backlog, list a namespace's search attributes, search and count workflow runs with Visibility queries, and list and start the workflows that the config declares. Every tool but `start_workflow` only reads.
+`temporal-mcp` is a configurable MCP server that gives AI agents access to Temporal backends over either streamable HTTP or stdio. Configure it with your desired backends (self-hosted or Temporal Cloud), and it provides an agent with tools to see namespaces, workflows, and history. This server is read-only by default, but you can also opt in to allow an agent to start workflows of your choosing.
 
 > [!NOTE]
 >

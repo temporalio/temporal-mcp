@@ -21,7 +21,7 @@ authorization:
     oncall:
       targets: [payments-prod, payments-staging, orders-prod]
     payments-dev:
-      tools: [list_available_targets, get_workflows, get_workflow_history]
+      tools: [list_available_targets, get_workflows, get_workflow_history, get_workflow_history_summary]
       targets: [payments-staging]
     # start_workflow comes with list_startable_workflows, which profiles do not list.
     orders-backfill:

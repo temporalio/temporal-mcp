@@ -64,6 +64,8 @@ Once your app runs workflows on the dev server, or once you add your own namespa
 
 To use your Temporal Cloud or self-hosted namespaces, add a target for each one to your config. The `payments-staging` target in [examples/stdio-config.yaml](examples/stdio-config.yaml) shows a Temporal Cloud namespace with an API key, and [docs/config.md](docs/config.md) documents every field.
 
+A self-hosted cluster needs Temporal Server 1.28 or later. On older servers, `get_task_queues` reports no backlog or rate stats, and Nexus links have no event IDs.
+
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first.
 
 The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.

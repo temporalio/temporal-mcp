@@ -23,9 +23,15 @@ authorization:
     payments-dev:
       tools: [list_available_targets, get_workflows, get_workflow_history]
       targets: [payments-staging]
+    # start_workflow comes with list_startable_workflows, which profiles do not list.
+    orders-backfill:
+      tools: [list_available_targets, get_workflows, start_workflow]
+      targets: [orders-prod]
+      workflows: [OrderBackfillWorkflow]
   rules:
     - {claim_name: groups, claim_value: temporal-oncall, profile: oncall}
     - {claim_name: groups, claim_value: payments-dev, profile: payments-dev}
+    - {claim_name: groups, claim_value: orders-backfill, profile: orders-backfill}
 
 targets:
   - name: payments-prod
@@ -43,3 +49,8 @@ targets:
     address: orders-prod.a1b2c.tmprl.cloud:7233
     namespace: orders-prod.a1b2c
     api_key: {env: ORDERS_PROD_API_KEY}
+    workflows:
+      - type: OrderBackfillWorkflow
+        task_queue: orders
+        description: Re-runs fulfillment for a list of order IDs.
+        input_schema: [{type: object, required: [order_ids], properties: {order_ids: {type: array, items: {type: string}}}}]

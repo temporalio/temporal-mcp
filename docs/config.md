@@ -17,6 +17,11 @@ targets:
         key_file: <filename> ]
     [ payload_handling: <string> | default = omit ]
     [ codec: <string> ]
+    [ workflows:
+        - type: <string>
+          task_queue: <string>
+          [ description: <string> ]
+          [ input_schema: [ <json_schema>, ... ] ] ]
 
 [ codecs:
     <string>:
@@ -56,6 +61,7 @@ listen: <host:port>
         [ tools: [ <string>, ... ] | default = every read-only tool not in tools_deny ]
         [ tools_deny: [ <string>, ... ] ]
         targets: [ <string>, ... ]
+        [ workflows: [ <string>, ... ] ]
     rules:
       - claim_name: <string>
         claim_value: <string>
@@ -79,6 +85,11 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
   - `key_file` (filename, required): Path of the certificate's PEM private key.
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the target's codec server in `codecs`. When set, it must be a key of `codecs`. With `payload_handling: decode` it decodes the target's payloads, and with any `payload_handling` it encodes the input of the runs that `start_workflow` starts. A target whose payloads are encrypted needs a `codec` even without `payload_handling: decode`, or that input is stored unencrypted.
+- `workflows` (list, optional): The workflows that agents may start on the target with `start_workflow`, which starts no others. Without `auth`, agents may start every one, and with it, only those that the caller's [profiles](#authorization) give. The `list_startable_workflows` tool shows agents the ones they may start.
+  - `type` (string, required): The workflow type, such as `OrderBackfillWorkflow`. Types must be unique within the target and are compared exactly.
+  - `task_queue` (string, required): The task queue that `start_workflow` starts the workflow's runs on.
+  - `description` (string, optional): What the workflow does, shown to agents.
+  - `input_schema` (list of JSON Schemas, optional): A [JSON Schema](https://json-schema.org/) for each of the workflow's arguments, in order, shown to agents so they can write its input. Like `description`, it is guidance for agents: the server does not check that the schemas are valid JSON Schemas, or check `start_workflow`'s input against them.
 
 With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
@@ -154,12 +165,13 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target, and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
-- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Without `tools`, a profile gives every read-only tool not in `tools_deny`, including those that later versions of the server add, while with `tools` a new tool stays unavailable until you list it. Every tool is read-only except `start_workflow`, which a profile gives only when its `tools` lists it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
+- `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Every tool is read-only except `start_workflow`, which a profile gives only when its `tools` lists it, and which brings `list_startable_workflows` with it; no other profile gives that tool. Without `tools`, a profile gives every other read-only tool not in `tools_deny`, including those that later versions of the server add, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_workflow_history_summary`, `get_task_queues`, `search_workflows`, `count_workflows`, `list_search_attributes` and `start_workflow`. Any other name is an error.
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
+  - `workflows` (list of strings, required with `start_workflow`): The workflow types the profile lets a caller start, each on every one of its `targets` that has that type in its `workflows`. It is not allowed without `start_workflow`, and each type must be in the `workflows` of at least one of the profile's `targets`.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.
   - `claim_value` (string, required): The value the claim must equal, or one entry of it when the claim is a list. It must be a YAML string, so an unquoted number or boolean such as `42` or `true` is rejected; quote it (`"42"`) to match the string. A `scope` or `scp` claim that is a string counts as a list of its space-separated entries, so a value matching one of them must not contain a space, and each scope needs its own rule.
@@ -171,7 +183,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs, and they can start only the workflows in the targets' `workflows`. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## Trusted CAs
 
@@ -183,6 +195,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
+- `<json_schema>`: A [JSON Schema](https://json-schema.org/) written in YAML; flow style, such as `{type: string}`, keeps it to one line. The server shows it to agents as JSON, so its numbers must be finite and its map keys strings or integers.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.

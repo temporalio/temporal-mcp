@@ -346,7 +346,7 @@ func TestNoAuthAllowsEveryTool(t *testing.T) {
 	for _, tool := range list.Tools {
 		tools = append(tools, tool.Name)
 	}
-	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows", "start_workflow"}; !slices.Equal(tools, want) {
+	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "list_startable_workflows", "search_workflows", "start_workflow"}; !slices.Equal(tools, want) {
 		t.Errorf("tools/list = %v, want %v", tools, want)
 	}
 }

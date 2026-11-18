@@ -51,6 +51,7 @@ import (
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/fixture"
 	"github.com/temporalio/temporal-mcp/internal/payload"
+	mcptemporal "github.com/temporalio/temporal-mcp/internal/temporal"
 )
 
 func describeWithSearchAttributes(fields map[string]*commonpb.Payload) *workflowservice.DescribeWorkflowExecutionResponse {
@@ -654,12 +655,18 @@ func TestToolsOnDevServer(t *testing.T) {
 		"  unauthorized: {endpoint: %[1]q}\n"+
 		"targets:\n"+
 		"  - {name: dev, aliases: [local], description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: test}\n"+
-		"  - {name: dev-passthrough, description: x, address: %[3]q, namespace: default, payload_handling: passthrough, codec: test}\n"+
-		"  - {name: dev-omit, description: x, address: %[3]q, namespace: default}\n"+
-		"  - {name: dev-unauthorized, description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: unauthorized}\n"+
+		"  - {name: dev-passthrough, description: x, address: %[3]q, namespace: default, payload_handling: passthrough, codec: test, workflows: [{type: OrderWorkflow, task_queue: %[6]s}]}\n"+
+		"  - name: dev-omit\n"+
+		"    description: x\n"+
+		"    address: %[3]q\n"+
+		"    namespace: default\n"+
+		"    workflows:\n"+
+		"      - {type: OrderWorkflow, task_queue: start-unpolled, description: Authorizes payment for an order., input_schema: [{type: object, required: [order_id], properties: {order_id: {type: string}}}, {}]}\n"+
+		"      - {type: waitForSignal, task_queue: %[6]s}\n"+
+		"  - {name: dev-unauthorized, description: x, address: %[3]q, namespace: default, payload_handling: decode, codec: unauthorized, workflows: [{type: OrderWorkflow, task_queue: %[6]s}]}\n"+
 		"  - {name: down, description: x, address: %[4]q, namespace: default}\n"+
 		"  - {name: misconfigured, description: x, address: %[3]q, namespace: nosuchns}\n"+
-		"  - {name: dev-handler, description: x, address: %[3]q, namespace: %[5]s}\n", codecServer.URL, codecAuthorization, dev.FrontendHostPort(), unreachable, handlerNamespace)), 0o600); err != nil {
+		"  - {name: dev-handler, description: x, address: %[3]q, namespace: %[5]s}\n", codecServer.URL, codecAuthorization, dev.FrontendHostPort(), unreachable, handlerNamespace, fixture.TaskQueue)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	addresses := []string{dev.FrontendHostPort(), unreachable, strings.TrimPrefix(codecServer.URL, "http://")}
@@ -2411,6 +2418,26 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 	})
 
+	t.Run("list_startable_workflows", func(t *testing.T) {
+		if got, want := callTool(t, "list_startable_workflows", map[string]any{"target": "dev-omit"}), map[string]any{
+			"target": "dev-omit",
+			"result": map[string]any{"workflows": []any{
+				map[string]any{"type": "OrderWorkflow", "task_queue": "start-unpolled", "description": "Authorizes payment for an order.", "input_schema": []any{
+					map[string]any{"type": "object", "required": []any{"order_id"}, "properties": map[string]any{"order_id": map[string]any{"type": "string"}}},
+					map[string]any{},
+				}},
+				map[string]any{"type": "waitForSignal", "task_queue": fixture.TaskQueue, "description": nil, "input_schema": nil},
+			}},
+			"complete":  true,
+			"next_call": nil,
+		}; !reflect.DeepEqual(got, want) {
+			t.Errorf("dev-omit: structuredContent = %#v\nwant %#v", got, want)
+		}
+		if got := callTool(t, "list_startable_workflows", map[string]any{"target": "local"}); got["target"] != "dev" || !reflect.DeepEqual(got["result"], map[string]any{"workflows": []any{}}) {
+			t.Errorf("local: structuredContent = %#v, want target dev and no workflows", got)
+		}
+	})
+
 	t.Run("start_workflow", func(t *testing.T) {
 		startedEvent := func(t *testing.T, id, runID string) *historypb.WorkflowExecutionStartedEventAttributes {
 			t.Helper()
@@ -2431,7 +2458,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 
 		t.Run("input through a codec", func(t *testing.T) {
-			runID := startRun(t, map[string]any{"target": "dev-passthrough", "workflow_id": "start-order", "workflow_type": "OrderWorkflow", "task_queue": fixture.TaskQueue, "input": []any{map[string]any{"order_id": "s1"}}})
+			runID := startRun(t, map[string]any{"target": "dev-passthrough", "workflow_id": "start-order", "workflow_type": "OrderWorkflow", "input": []any{map[string]any{"order_id": "s1"}}})
 			var result map[string]string
 			if err := c.GetWorkflow(ctx, "start-order", runID).Get(ctx, &result); err != nil {
 				t.Fatal(err)
@@ -2443,19 +2470,36 @@ func TestToolsOnDevServer(t *testing.T) {
 		})
 
 		t.Run("input without a codec", func(t *testing.T) {
-			runID := startRun(t, map[string]any{"target": "dev-omit", "workflow_id": "start-unpolled", "workflow_type": "OrderWorkflow", "task_queue": "start-unpolled", "input": []any{map[string]any{"order_id": json.Number("9007199254740993")}, nil}})
+			runID := startRun(t, map[string]any{"target": "dev-omit", "workflow_id": "start-unpolled", "workflow_type": "OrderWorkflow", "input": []any{map[string]any{"order_id": json.Number("9007199254740993")}, nil}})
 			a := startedEvent(t, "start-unpolled", runID)
 			want := &commonpb.Payloads{Payloads: []*commonpb.Payload{
 				{Metadata: map[string][]byte{"encoding": []byte("json/plain")}, Data: []byte(`{"order_id":9007199254740993}`)},
 				{Metadata: map[string][]byte{"encoding": []byte("binary/null")}},
 			}}
-			if !proto.Equal(a.GetInput(), want) || a.GetIdentity() != "test" {
-				t.Errorf("started event = %v, want input %v and identity test", a, want)
+			if !proto.Equal(a.GetInput(), want) || a.GetIdentity() != "test" || a.GetTaskQueue().GetName() != "start-unpolled" {
+				t.Errorf("started event = %v, want input %v, identity test and task queue start-unpolled", a, want)
+			}
+		})
+
+		t.Run("workflow type the target does not declare", func(t *testing.T) {
+			for _, tt := range []struct{ target, name, workflowType, workflowID string }{
+				{"dev-passthrough", "dev-passthrough", "waitForSignal", "start-declared-elsewhere"},
+				{"dev-omit", "dev-omit", "continueOnce", "start-declared-nowhere"},
+				{"local", "dev", "OrderWorkflow", "start-on-target-without-workflows"},
+			} {
+				got := callToolError(t, "start_workflow", map[string]any{"target": tt.target, "workflow_id": tt.workflowID, "workflow_type": tt.workflowType})
+				want := map[string]any{"code": "not_found", "message": fmt.Sprintf("workflow type %q is not one you can start on target %s, so no run was started; list_startable_workflows lists the ones you can", tt.workflowType, tt.name), "retryable": false}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("%s on %s: error = %#v, want %#v", tt.workflowType, tt.target, got, want)
+				}
+				if _, err := c.DescribeWorkflowExecution(ctx, tt.workflowID, ""); !errors.As(err, new(*serviceerror.NotFound)) {
+					t.Errorf("describing %s: err = %v, want NotFound", tt.workflowID, err)
+				}
 			}
 		})
 
 		t.Run("input the codec server does not encode", func(t *testing.T) {
-			got := callToolError(t, "start_workflow", map[string]any{"target": "dev-unauthorized", "workflow_id": "start-unencoded", "workflow_type": "OrderWorkflow", "task_queue": fixture.TaskQueue, "input": []any{"s2"}})
+			got := callToolError(t, "start_workflow", map[string]any{"target": "dev-unauthorized", "workflow_id": "start-unencoded", "workflow_type": "OrderWorkflow", "input": []any{"s2"}})
 			want := map[string]any{"code": "encode_failed", "message": "input was not encoded, so no run was started: the codec server responded HTTP 401 Unauthorized", "retryable": false}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("error = %#v, want %#v", got, want)
@@ -2468,7 +2512,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		t.Run("workflow ID policies", func(t *testing.T) {
 			const id, conflict, reuse = "start-policies", "workflow_id_conflict_policy", "workflow_id_reuse_policy"
 			args := func(policy, value string) map[string]any {
-				a := map[string]any{"target": "dev-omit", "workflow_id": id, "workflow_type": "waitForSignal", "task_queue": fixture.TaskQueue}
+				a := map[string]any{"target": "dev-omit", "workflow_id": id, "workflow_type": "waitForSignal"}
 				if policy != "" {
 					a[policy] = value
 				}
@@ -2520,5 +2564,149 @@ func TestToolsOnDevServer(t *testing.T) {
 			release(t, third)
 			startRun(t, args("", ""))
 		})
+	})
+
+	t.Run("workflows by profile", func(t *testing.T) {
+		issuer, sign := newTestIssuer(t)
+		authConfig := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(authConfig, fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+			"targets:\n"+
+			"  - {name: orders, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-orders-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-orders-waitForSignal}]}\n"+
+			"  - {name: signals, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-signals-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-signals-waitForSignal}]}\n"+
+			"auth: {resource: https://mcp.example.com/mcp, issuer: %[2]q, audience: operator, required_scopes: [temporal.read]}\n"+
+			"authorization:\n"+
+			"  profiles:\n"+
+			"    orders: {tools: [start_workflow], workflows: [OrderWorkflow], targets: [orders]}\n"+
+			"    signals: {tools: [start_workflow], workflows: [waitForSignal], targets: [orders, signals]}\n"+
+			"    readers: {targets: [orders, signals]}\n"+
+			"  rules:\n"+
+			"    - {claim_name: groups, claim_value: orders, profile: orders}\n"+
+			"    - {claim_name: groups, claim_value: signals, profile: signals}\n"+
+			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		authCfg, err := config.Load(authConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authClients, err := mcptemporal.NewClients(authCfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatal(err)
+		}
+		logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+		s, err := NewServer(t.Context(), t.Context(), "temporal", "0", authCfg, authClients, newRenderer(t, authCfg, logger), t.Output(), logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux := NewMux(s, authCfg, logger)
+		// Each declaration has its own task queue, so a run's task queue shows which declaration started it.
+		taskQueue := func(target, workflowType string) string { return "by-profile-" + target + "-" + workflowType }
+		workflow := func(target, workflowType string) any {
+			return map[string]any{"type": workflowType, "task_queue": taskQueue(target, workflowType), "description": nil, "input_schema": nil}
+		}
+		readTools := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}
+		tests := []struct {
+			groups  []any
+			tools   []string
+			listed  map[string][]any
+			started [][2]string
+			refused [][2]string
+		}{
+			{
+				groups:  []any{"orders"},
+				tools:   []string{"list_startable_workflows", "start_workflow"},
+				listed:  map[string][]any{"orders": {workflow("orders", "OrderWorkflow")}},
+				started: [][2]string{{"orders", "OrderWorkflow"}},
+				refused: [][2]string{{"orders", "waitForSignal"}, {"orders", "continueOnce"}},
+			},
+			{
+				groups:  []any{"signals"},
+				tools:   []string{"list_startable_workflows", "start_workflow"},
+				listed:  map[string][]any{"orders": {workflow("orders", "waitForSignal")}, "signals": {workflow("signals", "waitForSignal")}},
+				started: [][2]string{{"orders", "waitForSignal"}, {"signals", "waitForSignal"}},
+				refused: [][2]string{{"orders", "OrderWorkflow"}, {"signals", "OrderWorkflow"}},
+			},
+			{
+				groups:  []any{"orders", "signals"},
+				tools:   []string{"list_startable_workflows", "start_workflow"},
+				listed:  map[string][]any{"orders": {workflow("orders", "OrderWorkflow"), workflow("orders", "waitForSignal")}, "signals": {workflow("signals", "waitForSignal")}},
+				started: [][2]string{{"orders", "OrderWorkflow"}},
+				refused: [][2]string{{"signals", "OrderWorkflow"}},
+			},
+			{
+				groups: []any{"readers"},
+				tools:  readTools,
+			},
+			{
+				groups: []any{"readers", "orders"},
+				tools:  slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow"))),
+				listed: map[string][]any{"orders": {workflow("orders", "OrderWorkflow")}},
+			},
+		}
+		for i, tt := range tests {
+			t.Run(fmt.Sprint(tt.groups), func(t *testing.T) {
+				session := connectTo(t, mux, bearer(sign(map[string]any{"groups": tt.groups})))
+				list, err := session.ListTools(ctx, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var tools []string
+				for _, tool := range list.Tools {
+					tools = append(tools, tool.Name)
+				}
+				if !slices.Equal(tools, tt.tools) {
+					t.Errorf("tools/list = %v, want %v", tools, tt.tools)
+				}
+				if !slices.Contains(tools, "list_startable_workflows") {
+					return
+				}
+				validate := outputValidator(t, session)
+				call := func(t *testing.T, name string, args map[string]any) *mcp.CallToolResult {
+					t.Helper()
+					res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !res.IsError {
+						validate(t, name, res)
+					}
+					return res
+				}
+				for _, target := range []string{"orders", "signals"} {
+					res := call(t, "list_startable_workflows", map[string]any{"target": target})
+					want, ok := tt.listed[target]
+					if !ok {
+						if got := errorContent(t, res); got["code"] != "not_found" || got["message"] != fmt.Sprintf("unknown target %q", target) {
+							t.Errorf("list_startable_workflows on %s: error = %#v, want unknown target", target, got)
+						}
+						continue
+					}
+					if got := res.StructuredContent; res.IsError || !reflect.DeepEqual(got, map[string]any{"target": target, "result": map[string]any{"workflows": want}, "complete": true, "next_call": nil}) {
+						t.Errorf("list_startable_workflows on %s = %v, want workflows %#v", target, res.Content[0].(*mcp.TextContent).Text, want)
+					}
+				}
+				workflowID := func(start [2]string) string { return fmt.Sprintf("by-profile-%d-%s-%s", i, start[0], start[1]) }
+				for _, start := range tt.started {
+					res := call(t, "start_workflow", map[string]any{"target": start[0], "workflow_id": workflowID(start), "workflow_type": start[1], "input": []any{map[string]any{"order_id": "p1"}}})
+					if res.IsError || res.StructuredContent.(map[string]any)["result"].(map[string]any)["started"] != true {
+						t.Errorf("starting %s on %s = %s, want a started run", start[1], start[0], res.Content[0].(*mcp.TextContent).Text)
+					}
+					desc, err := c.DescribeWorkflowExecution(ctx, workflowID(start), "")
+					if info := desc.GetWorkflowExecutionInfo(); err != nil || info.GetType().GetName() != start[1] || info.GetTaskQueue() != taskQueue(start[0], start[1]) {
+						t.Errorf("describing %s: info = %v, err = %v; want a run of %s on task queue %s", workflowID(start), info, err, start[1], taskQueue(start[0], start[1]))
+					}
+				}
+				for _, start := range tt.refused {
+					got := errorContent(t, call(t, "start_workflow", map[string]any{"target": start[0], "workflow_id": workflowID(start), "workflow_type": start[1]}))
+					want := map[string]any{"code": "not_found", "message": fmt.Sprintf("workflow type %q is not one you can start on target %s, so no run was started; list_startable_workflows lists the ones you can", start[1], start[0]), "retryable": false}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("starting %s on %s: error = %#v, want %#v", start[1], start[0], got, want)
+					}
+					if _, err := c.DescribeWorkflowExecution(ctx, workflowID(start), ""); !errors.As(err, new(*serviceerror.NotFound)) {
+						t.Errorf("describing %s: err = %v, want NotFound", workflowID(start), err)
+					}
+				}
+			})
+		}
 	})
 }

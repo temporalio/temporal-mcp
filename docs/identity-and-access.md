@@ -92,7 +92,7 @@ The identity provider and MCP configuration answer different questions:
 | Is this token authentic and intended for the MCP API? | `auth.issuer` and `auth.audience` validate issuer, signature, time, and audience |
 | Was this token granted the MCP API's scope? | `auth.required_scopes` checks the token's `scope` or `scp` claim |
 | Which users belong to a group? | Identity-provider group membership |
-| What may that group do in MCP? | `authorization.profiles` lists tools and targets |
+| What may that group do in MCP? | `authorization.profiles` lists tools, targets, and startable workflows |
 | Which token claim grants which MCP profile? | `authorization.rules` maps a claim value to a profile |
 | What may the server do in Temporal? | The API key or mTLS identity configured on each target |
 
@@ -147,6 +147,11 @@ token; depending on the provider, that may be a name or an ID.
   tool.
 - **Matching group and tool, missing target:** the tool cannot be used on that
   target.
+- **Matching group and `start_workflow`, missing workflow type:**
+  `start_workflow` returns `not_found` and starts no run, because the target's
+  `workflows` does not declare the type or none of the caller's profiles for
+  that target lists it in `workflows`. `list_startable_workflows` shows the
+  types the caller can start there.
 - **MCP authorization succeeds, Temporal denies the call:** the tool reports
   permission denied because the target credential lacks the required
   backend permission, such as Write for `start_workflow`.

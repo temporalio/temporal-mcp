@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -26,8 +27,7 @@ import (
 type startWorkflowInput struct {
 	Target                   string `json:"target" jsonschema:"the name or an alias of a target"`
 	WorkflowID               string `json:"workflow_id" jsonschema:"the workflow ID of the run to start"`
-	WorkflowType             string `json:"workflow_type" jsonschema:"the workflow type, such as OrderWorkflow"`
-	TaskQueue                string `json:"task_queue" jsonschema:"the task queue whose workers run the workflow"`
+	WorkflowType             string `json:"workflow_type" jsonschema:"the workflow type, one that list_startable_workflows lists for the target"`
 	Input                    []any  `json:"input,omitempty" jsonschema:"the workflow's arguments, in order, as JSON values"`
 	WorkflowIDConflictPolicy string `json:"workflow_id_conflict_policy,omitempty" jsonschema:"fail or use_existing; fail if omitted"`
 	WorkflowIDReusePolicy    string `json:"workflow_id_reuse_policy,omitempty" jsonschema:"allow_duplicate, allow_duplicate_failed_only or reject_duplicate; allow_duplicate if omitted"`
@@ -64,7 +64,7 @@ func enumOf[V any](m map[string]V) []any {
 
 func startWorkflowInputSchema() *jsonschema.Schema {
 	schema := schemaFor[startWorkflowInput]("start_workflow", "input", nil)
-	for _, name := range []string{"workflow_id", "workflow_type", "task_queue"} {
+	for _, name := range []string{"workflow_id", "workflow_type"} {
 		schema.Properties[name].MinLength = new(1)
 	}
 	schema.Properties["workflow_id_conflict_policy"].Enum = enumOf(conflictPolicies)
@@ -78,6 +78,14 @@ func startWorkflow(cfg *config.Config, clients *temporal.Clients, payloads *payl
 		t, err := lookupTarget(ctx, cfg, in.Target)
 		if err != nil {
 			return nil, none, err
+		}
+		workflows := startableWorkflows(cfg, req, t)
+		i := slices.IndexFunc(workflows, func(w config.Workflow) bool { return w.Type == in.WorkflowType })
+		if i < 0 {
+			if rec := auditRecordFrom(ctx); rec != nil {
+				rec.denied = true
+			}
+			return nil, none, &toolError{Code: "not_found", Message: fmt.Sprintf("workflow type %q is not one you can start on target %s, so no run was started; list_startable_workflows lists the ones you can", in.WorkflowType, t.Name)}
 		}
 		// The MCP SDK decodes arguments through float64, which rounds integers above 2^53, so input comes from the raw arguments.
 		var args struct {
@@ -93,7 +101,7 @@ func startWorkflow(cfg *config.Config, clients *temporal.Clients, payloads *payl
 			Namespace:                t.Namespace,
 			WorkflowId:               in.WorkflowID,
 			WorkflowType:             &commonpb.WorkflowType{Name: in.WorkflowType},
-			TaskQueue:                &taskqueuepb.TaskQueue{Name: in.TaskQueue},
+			TaskQueue:                &taskqueuepb.TaskQueue{Name: workflows[i].TaskQueue},
 			Input:                    &commonpb.Payloads{Payloads: input},
 			Identity:                 clients.Identity(ctx),
 			RequestId:                rand.Text(),

@@ -119,14 +119,14 @@ func TestStartWorkflowRetriesWithOneRequestID(t *testing.T) {
 	fake := &flakyWorkflowService{failures: 1}
 	ln := listen(t)
 	serve(t, ln, fake)
-	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: ln.Addr().String(), Namespace: "default"}}}
+	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: ln.Addr().String(), Namespace: "default", Workflows: []config.Workflow{{Type: "T", TaskQueue: "q"}}}}}
 	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := temporal.WithTool(context.WithValue(t.Context(), targetsKey{}, []string{"a"}), "start_workflow", []string{workflowservice.WorkflowService_StartWorkflowExecution_FullMethodName}, []string{"a"})
 
-	_, env, err := startWorkflow(cfg, clients, newRenderer(t, cfg, slog.New(slog.DiscardHandler)))(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{}}, startWorkflowInput{Target: "a", WorkflowID: "w", WorkflowType: "T", TaskQueue: "q"})
+	_, env, err := startWorkflow(cfg, clients, newRenderer(t, cfg, slog.New(slog.DiscardHandler)))(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{}}, startWorkflowInput{Target: "a", WorkflowID: "w", WorkflowType: "T"})
 
 	if err != nil || !env.Result.Started {
 		t.Fatalf("result = %+v, error = %v; want a started run", env.Result, err)

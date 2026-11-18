@@ -80,23 +80,49 @@ func mayUse(cfg *config.Config, req mcp.Request, tool, target string) bool {
 
 // grants returns, for each tool, the targets the caller of req may use it on:
 // those of every profile that gives it the tool through a rule its token matches.
+// A profile that gives start_workflow also gives list_startable_workflows.
 func grants(a *config.Authorization, req mcp.Request) map[string][]string {
 	g := map[string][]string{}
-	extra := req.GetExtra()
-	if extra == nil || extra.TokenInfo == nil {
-		return g
-	}
-	caller := identity.CallerFromTokenInfo(extra.TokenInfo)
-	for _, r := range a.Rules {
-		if !matches(r, caller) {
-			continue
-		}
-		p := a.Profiles[r.Profile]
+	for _, p := range callerProfiles(a, req) {
 		for _, tool := range p.Tools {
 			g[tool] = append(g[tool], p.Targets...)
+			if tool == "start_workflow" {
+				g["list_startable_workflows"] = append(g["list_startable_workflows"], p.Targets...)
+			}
 		}
 	}
 	return g
+}
+
+// callerProfiles returns the profile of each rule that the token of req matches.
+func callerProfiles(a *config.Authorization, req mcp.Request) []config.Profile {
+	extra := req.GetExtra()
+	if extra == nil || extra.TokenInfo == nil {
+		return nil
+	}
+	caller := identity.CallerFromTokenInfo(extra.TokenInfo)
+	var profiles []config.Profile
+	for _, r := range a.Rules {
+		if matches(r, caller) {
+			profiles = append(profiles, a.Profiles[r.Profile])
+		}
+	}
+	return profiles
+}
+
+// startableWorkflows returns the workflows of t that the caller of req may start: without auth, every one, and with
+// it, each one whose type is in the workflows of a caller's profile that has t in its targets.
+func startableWorkflows(cfg *config.Config, req mcp.Request, t *config.Target) []config.Workflow {
+	if cfg.Auth == nil {
+		return t.Workflows
+	}
+	var types []string
+	for _, p := range callerProfiles(cfg.Authorization, req) {
+		if slices.Contains(p.Targets, t.Name) {
+			types = append(types, p.Workflows...)
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(t.Workflows), func(w config.Workflow) bool { return !slices.Contains(types, w.Type) })
 }
 
 func matches(r config.Rule, caller *identity.Caller) bool {
@@ -116,6 +142,7 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 	if a == nil {
 		return nil
 	}
+	tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return t == "list_startable_workflows" })
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
 		p := a.Profiles[name]
@@ -124,7 +151,10 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 			tools []string
 		}{{"tools", p.Tools}, {"tools_deny", p.ToolsDeny}} {
 			for k, tool := range f.tools {
-				if !slices.Contains(tools, tool) {
+				switch {
+				case tool == "list_startable_workflows":
+					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: list_startable_workflows comes with start_workflow, so profiles do not list it", name, f.key, k))
+				case !slices.Contains(tools, tool):
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
 				}
 			}
@@ -135,6 +165,12 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools_deny: leaves the profile no tools", name))
 			}
 			a.Profiles[name] = p
+		}
+		switch start := slices.Contains(p.Tools, "start_workflow"); {
+		case start && len(p.Workflows) == 0:
+			errs = append(errs, fmt.Errorf("authorization: profiles: %q: workflows: required with start_workflow in tools", name))
+		case !start && len(p.Workflows) > 0:
+			errs = append(errs, fmt.Errorf("authorization: profiles: %q: workflows: not allowed without start_workflow in tools", name))
 		}
 	}
 	return errors.Join(errs...)

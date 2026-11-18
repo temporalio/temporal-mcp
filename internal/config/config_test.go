@@ -23,6 +23,17 @@ func TestLoadValid(t *testing.T) {
 	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n"+validTargets+`
   - {name: staging, description: Staging., address: "staging:7233", namespace: staging, payload_handling: decode, codec: payments}
   - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
+  - name: orders
+    description: Orders.
+    address: orders:7233
+    namespace: orders
+    workflows:
+      - type: OrderBackfillWorkflow
+        task_queue: orders
+        description: Re-runs fulfillment for a list of order IDs.
+        input_schema: [{type: object, required: [order_ids], properties: {order_ids: {type: array, items: {type: string}}}}]
+      - {type: OrderWorkflow, task_queue: orders}
+      - {type: OrderReportWorkflow, task_queue: reports, input_schema: [{type: string, format: date, default: 2026-01-01}]}
 codecs:
   payments:
     endpoint: http://{namespace}.codec.internal
@@ -62,6 +73,24 @@ codecs:
 			Address:     "dev:7233",
 			Namespace:   "dev",
 			Codec:       "payments",
+		}, {
+			Name:        "orders",
+			Description: "Orders.",
+			Address:     "orders:7233",
+			Namespace:   "orders",
+			Workflows: []Workflow{{
+				Type:        "OrderBackfillWorkflow",
+				TaskQueue:   "orders",
+				Description: "Re-runs fulfillment for a list of order IDs.",
+				InputSchema: []any{map[string]any{"type": "object", "required": []any{"order_ids"}, "properties": map[string]any{"order_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}},
+			}, {
+				Type:      "OrderWorkflow",
+				TaskQueue: "orders",
+			}, {
+				Type:        "OrderReportWorkflow",
+				TaskQueue:   "reports",
+				InputSchema: []any{map[string]any{"type": "string", "format": "date", "default": "2026-01-01"}},
+			}},
 		}},
 		Codecs: map[string]Codec{
 			"payments": {
@@ -119,6 +148,7 @@ func TestParseStdio(t *testing.T) {
 		want       []string
 	}{
 		{"targets only", validTargets, nil},
+		{"workflows", validTargets + "    workflows: [{type: W, task_queue: q}]\n", nil},
 		{"shutdown timeout", "shutdown_timeout: 500ms\n" + validTargets, nil},
 		{"negative shutdown timeout", "shutdown_timeout: -1s\n" + validTargets, []string{"shutdown_timeout: -1s is negative"}},
 		{"listen", "listen: 127.0.0.1:8080\n" + validTargets, []string{"listen: not allowed with --stdio"}},
@@ -725,6 +755,38 @@ func TestParseInvalid(t *testing.T) {
 				`authorization: rules[4]: claim_name " groups " has leading or trailing whitespace, which no claim name matches`,
 				`authorization: rules[5]: claim_value: true is not a string, and rules match only string claim values; quote it to match the string "true"`,
 				`authorization: rules[6]: claim_value "openid temporal.orders" contains a space, which no scp entry does; write one scope per rule`,
+			},
+		},
+		{
+			name: "bad workflows",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n  - name: a\n    description: x\n    address: a:7233\n    namespace: a\n    workflows:\n" +
+				"      - {}\n" +
+				"      - {type: W, task_queue: q}\n" +
+				"      - {type: W, task_queue: \" \"}\n" +
+				"      - {type: X, task_queue: q, input_schema: [{type: object}, {type: object, properties: {true: {}}}, .inf]}\n",
+			want: []string{
+				"targets[0]: workflows[0]: type is required",
+				"targets[0]: workflows[0]: task_queue is required",
+				`targets[0]: workflows[2]: type "W" conflicts with the type of workflows[1]`,
+				"targets[0]: workflows[2]: task_queue is required",
+				"targets[0]: workflows[3]: input_schema[1] cannot be written as JSON; its map keys must be strings or integers, and its numbers finite: ",
+				"targets[0]: workflows[3]: input_schema[2] cannot be written as JSON; its map keys must be strings or integers, and its numbers finite: ",
+			},
+		},
+		{
+			name: "profile workflows that its targets do not declare",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: prod, description: x, address: a:7233, namespace: a, workflows: [{type: W, task_queue: q}]}\n" +
+				"  - {name: staging, description: x, address: a:7233, namespace: b, workflows: [{type: V, task_queue: q}]}\n" +
+				"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: a\n" + `authorization:
+  profiles:
+    p: {tools: [start_workflow], workflows: [W, V, X], targets: [prod]}
+  rules:
+    - {claim_name: groups, claim_value: a, profile: p}
+`,
+			want: []string{
+				`authorization: profiles: "p": workflows[1]: workflow type "V" is not in the workflows of any of the profile's targets`,
+				`authorization: profiles: "p": workflows[2]: workflow type "X" is not in the workflows of any of the profile's targets`,
 			},
 		},
 		{

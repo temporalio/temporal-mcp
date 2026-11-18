@@ -21,10 +21,10 @@ import (
 func TestShutdownCancellationResult(t *testing.T) {
 	temporalCancelled := temporalError(status.Error(codes.Canceled, "context canceled"), &config.Target{Address: "a:7233"}, &peer.Peer{}, temporalServer)
 	// start_workflow's error when its codec request ends with its context.
-	codecTarget := &config.Config{Codecs: map[string]config.Codec{"c": {Endpoint: "http://127.0.0.1:1"}}, Targets: []config.Target{{Name: "a", Namespace: "default", Codec: "c"}}}
+	codecTarget := &config.Config{Codecs: map[string]config.Codec{"c": {Endpoint: "http://127.0.0.1:1"}}, Targets: []config.Target{{Name: "a", Namespace: "default", Codec: "c", Workflows: []config.Workflow{{Type: "T", TaskQueue: "q"}}}}}
 	ended, end := context.WithCancel(context.WithValue(t.Context(), targetsKey{}, []string{"a"}))
 	end()
-	_, _, encodeCancelled := startWorkflow(codecTarget, nil, newRenderer(t, codecTarget, slog.New(slog.DiscardHandler)))(ended, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"input":[1]}`)}}, startWorkflowInput{Target: "a"})
+	_, _, encodeCancelled := startWorkflow(codecTarget, nil, newRenderer(t, codecTarget, slog.New(slog.DiscardHandler)))(ended, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"input":[1]}`)}}, startWorkflowInput{Target: "a", WorkflowType: "T"})
 	tests := []struct {
 		name          string
 		shutdown      bool

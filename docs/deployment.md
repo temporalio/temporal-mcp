@@ -70,8 +70,8 @@ These are independent trust relationships:
    in protected paths on the host and use least-privileged credentials. For
    Temporal Cloud, prefer an API key from a read-only service account when API
    keys are available; use mTLS when the namespace does not accept API keys. A
-   target that a profile grants `start_workflow` on needs a credential with
-   Write instead.
+   target needs a credential with Write instead when its `workflows` has a
+   workflow type that is also in the `workflows` of a profile for that target.
 4. **Configure sign-in and access.** Add the identity provider's issuer and the
    audience for Temporal MCP. Register the canonical MCP URL as the API resource
    in the identity provider and expose a scope for it. In the MCP config, set
@@ -132,10 +132,13 @@ Every successful Temporal call must pass all of these controls:
 
 1. **The server's tool surface.** The server exposes a bounded set of
    operations rather than arbitrary Temporal gRPC calls. Each one only reads,
-   except `start_workflow`, which starts a run and never terminates one.
+   except `start_workflow`, which starts runs only of the workflow types in the
+   target's `workflows`, each on its declared task queue, and never terminates
+   one.
 2. **The caller's MCP profile.** Authorization profiles grant specific tools on
-   specific configured targets, and only a profile that lists `start_workflow`
-   grants it. A valid token that matches no rule receives no tools or targets.
+   specific configured targets. Only a profile that lists `start_workflow`
+   grants it, and only for the workflow types in the profile's `workflows`. A
+   valid token that matches no rule receives no tools or targets.
 3. **The target credential.** Temporal accepts only the operations and
    namespaces allowed to the API key or mTLS identity used for that target.
 4. **The configured target boundary.** Tool calls cannot supply a different

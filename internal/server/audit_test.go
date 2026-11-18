@@ -61,7 +61,7 @@ func TestAudit(t *testing.T) {
 	go hang.Serve(hanging)
 	t.Cleanup(hang.Stop)
 	targets := []config.Target{
-		{Name: "granted", Aliases: []string{"g"}, Description: "x", Address: closed, Namespace: "a"},
+		{Name: "granted", Aliases: []string{"g"}, Description: "x", Address: closed, Namespace: "a", Workflows: []config.Workflow{{Type: "W", TaskQueue: "q"}, {Type: "V", TaskQueue: "q"}}},
 		{Name: "ungranted", Aliases: []string{"u"}, Description: "x", Address: closed, Namespace: "b"},
 		{Name: "hanging", Description: "x", Address: hanging.Addr().String(), Namespace: "c"},
 	}
@@ -73,7 +73,7 @@ func TestAudit(t *testing.T) {
 		Targets: targets,
 		Auth:    &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: issuer, Audience: "operator"},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}}},
+			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "start_workflow", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}, Workflows: []string{"W"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -139,6 +139,10 @@ func TestAudit(t *testing.T) {
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "ungranted", "arguments": map[string]any{"target": "u"}, "outcome": "denied", "temporal_calls": 0.0})},
 		{name: "unknown target", session: authed, tool: "check_connection", args: `{"target":"nope"}`,
 			record: alice(map[string]any{"tool": "check_connection", "access": "read", "target": "nope", "arguments": map[string]any{"target": "nope"}, "outcome": "not_found", "temporal_calls": 0.0})},
+		{name: "denied workflow type", session: authed, tool: "start_workflow", args: `{"target":"g","workflow_id":"w","workflow_type":"V"}`,
+			record: alice(map[string]any{"tool": "start_workflow", "access": "write", "target": "granted", "arguments": map[string]any{"target": "g", "workflow_id": "w", "workflow_type": "V"}, "outcome": "denied", "temporal_calls": 0.0})},
+		{name: "undeclared workflow type", session: unauthed, tool: "start_workflow", args: `{"target":"g","workflow_id":"w","workflow_type":"U"}`,
+			record: map[string]any{"issuer": nil, "subject": nil, "tool": "start_workflow", "access": "write", "target": "granted", "arguments": map[string]any{"target": "g", "workflow_id": "w", "workflow_type": "U"}, "outcome": "denied", "temporal_calls": 0.0}},
 		{name: "unknown tool", session: authed, tool: "no_such_tool", args: `{"target":"g"}`, callErr: `unknown tool "no_such_tool"`,
 			record: alice(map[string]any{"tool": "no_such_tool", "access": nil, "target": "granted", "arguments": map[string]any{"target": "g"}, "outcome": "unknown_tool", "temporal_calls": 0.0})},
 		{name: "invalid arguments", session: authed, tool: "check_connection", args: `{"target":"g","extra":1}`,

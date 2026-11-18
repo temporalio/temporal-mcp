@@ -496,8 +496,7 @@ func toFailure(f *failurepb.Failure, batch *payload.Batch) *failure {
 			Endpoint:         n.GetEndpoint(),
 			Service:          n.GetService(),
 			Operation:        n.GetOperation(),
-			//lint:ignore SA1019 servers before 1.27 and older SDKs wrote the token only to operation_id, and history keeps it
-			OperationToken: cmp.Or(n.GetOperationToken(), n.GetOperationId()),
+			OperationToken:   n.GetOperationToken(),
 		}
 	}
 	if n := f.GetNexusHandlerFailureInfo(); n != nil {

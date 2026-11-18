@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -174,8 +173,8 @@ func TestToFailureEncodedAttributesAndLastHeartbeatDetails(t *testing.T) {
 func TestToFailureFailureInfo(t *testing.T) {
 	infos := []string{"application", "timeout", "canceled", "terminated", "server", "activity", "child_workflow_execution", "nexus_operation", "nexus_handler"}
 	tests := []struct {
-		in                     *failurepb.Failure
-		name, kind, info, want string
+		in               *failurepb.Failure
+		kind, info, want string
 	}{
 		{
 			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_ApplicationFailureInfo{ApplicationFailureInfo: &failurepb.ApplicationFailureInfo{
@@ -221,19 +220,10 @@ func TestToFailureFailureInfo(t *testing.T) {
 		},
 		{
 			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
-				//lint:ignore SA1019 checks that operation_token wins over the deprecated operation_id
-				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1", OperationToken: "token-1",
+				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationToken: "token-1",
 			}}},
 			kind: "NexusOperationFailure", info: "nexus_operation",
 			want: `{"scheduled_event_id":9,"endpoint":"billing","service":"Billing","operation":"charge","operation_token":"token-1"}`,
-		},
-		{
-			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusOperationExecutionFailureInfo{NexusOperationExecutionFailureInfo: &failurepb.NexusOperationFailureInfo{
-				//lint:ignore SA1019 covers the fallback to operation_id for failures written before operation_token
-				ScheduledEventId: 9, Endpoint: "billing", Service: "Billing", Operation: "charge", OperationId: "id-1",
-			}}},
-			name: "NexusOperationFailure from before operation_token", kind: "NexusOperationFailure", info: "nexus_operation",
-			want: `{"scheduled_event_id":9,"endpoint":"billing","service":"Billing","operation":"charge","operation_token":"id-1"}`,
 		},
 		{
 			in: &failurepb.Failure{FailureInfo: &failurepb.Failure_NexusHandlerFailureInfo{NexusHandlerFailureInfo: &failurepb.NexusHandlerFailureInfo{
@@ -244,7 +234,7 @@ func TestToFailureFailureInfo(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(cmp.Or(tt.name, tt.kind), func(t *testing.T) {
+		t.Run(tt.kind, func(t *testing.T) {
 			b, err := json.Marshal(toFailure(tt.in, new(payload.Renderer).Batch("t")))
 			if err != nil {
 				t.Fatal(err)
@@ -283,7 +273,7 @@ func TestToFailureGivesEveryFailureInfoField(t *testing.T) {
 		"nexus_operation_execution_failure_info": "nexus_operation",
 		"nexus_handler_failure_info":             "nexus_handler",
 	}
-	// Payloads are given at the top level of the failure, and the deprecated operation_id only as operation_token.
+	// Payloads are given at the top level of the failure, and the deprecated operation_id is left out.
 	elsewhere := map[string]bool{
 		"temporal.api.failure.v1.ApplicationFailureInfo.details":                  true,
 		"temporal.api.failure.v1.CanceledFailureInfo.details":                     true,

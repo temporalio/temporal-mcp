@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,12 +87,15 @@ type Authorization struct {
 	Rules    []Rule             `yaml:"rules"`
 }
 
-// Profile is permission to use its tools on each of Targets, which are target names.
-// Its tools are Tools, or, if Tools is nil, every read-only tool except those in ToolsDeny.
+// Profile is permission to use its tools on each of Targets, which are target names,
+// and to start each workflow type in Workflows on each of Targets that declares it.
+// Its tools are Tools, plus list_startable_workflows if Tools has start_workflow, or, if
+// Tools is nil, every read-only tool except list_startable_workflows and those in ToolsDeny.
 type Profile struct {
 	Tools     []string `yaml:"tools"`
 	ToolsDeny []string `yaml:"tools_deny"`
 	Targets   []string `yaml:"targets"`
+	Workflows []string `yaml:"workflows"`
 }
 
 // Rule gives Profile to callers whose access token has the top-level claim
@@ -140,6 +144,18 @@ type Target struct {
 	// encodes start_workflow's input and, when PayloadHandling is PayloadDecode,
 	// decodes the target's payloads. It is required with PayloadDecode.
 	Codec string `yaml:"codec"`
+	// Workflows are the workflows that start_workflow may start on the target.
+	Workflows []Workflow `yaml:"workflows"`
+}
+
+// Workflow is a workflow type that start_workflow may start, on its task queue.
+type Workflow struct {
+	Type        string `yaml:"type"`
+	TaskQueue   string `yaml:"task_queue"`
+	Description string `yaml:"description"`
+	// InputSchema is a JSON Schema for each of the workflow's arguments, in order,
+	// which the server shows agents as given and does not validate as JSON Schemas.
+	InputSchema []any `yaml:"input_schema"`
 }
 
 // The values of Target.PayloadHandling.
@@ -280,15 +296,19 @@ func parseStdio(data []byte) (*Config, error) {
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
 // no value, except a profile's tools and tools_deny, which decode reads from the
-// authorization node. A missing key's node has Kind 0.
+// authorization node. It also holds each workflow's input_schema, which decode
+// decodes again to keep timestamps as written. A missing key's node has Kind 0.
 type keyNodes struct {
 	Listen        yaml.Node `yaml:"listen"`
 	ListenTLS     yaml.Node `yaml:"listen_tls"`
 	Auth          yaml.Node `yaml:"auth"`
 	Authorization yaml.Node `yaml:"authorization"`
 	Targets       []struct {
-		APIKey yaml.Node `yaml:"api_key"`
-		TLS    yaml.Node `yaml:"tls"`
+		APIKey    yaml.Node `yaml:"api_key"`
+		TLS       yaml.Node `yaml:"tls"`
+		Workflows []struct {
+			InputSchema yaml.Node `yaml:"input_schema"`
+		} `yaml:"workflows"`
 	} `yaml:"targets"`
 	Codecs map[string]struct {
 		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
@@ -337,6 +357,12 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 	for i, t := range keys.Targets {
 		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
 		emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
+		for k, w := range t.Workflows {
+			timestampsAsWritten(&w.InputSchema)
+			if err := w.InputSchema.Decode(&cfg.Targets[i].Workflows[k].InputSchema); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for name, c := range keys.Codecs {
 		codec := cfg.Codecs[name]
@@ -381,6 +407,18 @@ func nonStringRuleValues(data []byte) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// timestampsAsWritten makes each scalar in n that YAML reads as a timestamp, such
+// as an unquoted date, decode as the string it is written as, not as a time that
+// JSON would show in another format.
+func timestampsAsWritten(n *yaml.Node) {
+	if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!timestamp" {
+		n.Tag = "!!str"
+	}
+	for _, c := range n.Content {
+		timestampsAsWritten(c)
+	}
 }
 
 func emptyIfPresent[T any](section **T, key yaml.Node) {
@@ -512,6 +550,25 @@ func (c *Config) validateTargets() error {
 		if t.PayloadHandling == PayloadDecode && t.Codec == "" {
 			errs = append(errs, fmt.Errorf("%s: codec is required with payload_handling %s", label, PayloadDecode))
 		}
+		types := map[string]int{}
+		for k, w := range t.Workflows {
+			label := fmt.Sprintf("%s: workflows[%d]", label, k)
+			if strings.TrimSpace(w.Type) == "" {
+				errs = append(errs, fmt.Errorf("%s: type is required", label))
+			} else if j, ok := types[w.Type]; ok {
+				errs = append(errs, fmt.Errorf("%s: type %q conflicts with the type of workflows[%d]", label, w.Type, j))
+			} else {
+				types[w.Type] = k
+			}
+			if strings.TrimSpace(w.TaskQueue) == "" {
+				errs = append(errs, fmt.Errorf("%s: task_queue is required", label))
+			}
+			for n, schema := range w.InputSchema {
+				if _, err := json.Marshal(schema); err != nil {
+					errs = append(errs, fmt.Errorf("%s: input_schema[%d] cannot be written as JSON; its map keys must be strings or integers, and its numbers finite: %w", label, n, err))
+				}
+			}
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Codecs)) {
 		codec, label := c.Codecs[name], fmt.Sprintf("codecs: %q", name)
@@ -611,6 +668,14 @@ func (a *Authorization) validate(c *Config) []error {
 		for k, target := range p.Targets {
 			if !slices.ContainsFunc(c.Targets, func(t Target) bool { return t.Name == target }) {
 				errs = append(errs, fmt.Errorf("%s: targets[%d]: unknown target %q; profiles name targets by name, not alias", label, k, target))
+			}
+		}
+		for k, workflowType := range p.Workflows {
+			declared := slices.ContainsFunc(c.Targets, func(t Target) bool {
+				return slices.Contains(p.Targets, t.Name) && slices.ContainsFunc(t.Workflows, func(w Workflow) bool { return w.Type == workflowType })
+			})
+			if !declared {
+				errs = append(errs, fmt.Errorf("%s: workflows[%d]: workflow type %q is not in the workflows of any of the profile's targets", label, k, workflowType))
 			}
 		}
 	}

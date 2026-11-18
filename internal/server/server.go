@@ -187,8 +187,12 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,
 		cloudservice.CloudService_GetNamespace_FullMethodName,
 	}, listSearchAttributes(cfg, clients, names)), addTool(s, &mcp.Tool{
+		Name:        "list_startable_workflows",
+		Description: "List the workflows you can start on a target with start_workflow: each one's type, the task queue its runs start on, and, if whoever runs this server gives them, a description and input_schema, a JSON Schema for each of the workflow's arguments in order. This server does not check start_workflow's input against input_schema.",
+		Annotations: readOnlyAnnotations,
+	}, nil, listStartableWorkflows(cfg)), addTool(s, &mcp.Tool{
 		Name:        "start_workflow",
-		Description: "Start a run of workflow_type on task_queue under workflow_id, with input, an array of JSON values, as the workflow's arguments in order. If a run of workflow_id is running, workflow_id_conflict_policy decides what happens: fail, the default, starts no run and returns error already_started, whose message gives the running run's run_id; use_existing starts no run and returns the running run, with started false. If workflow_id's latest run has closed, workflow_id_reuse_policy decides whether a new run may start: allow_duplicate, the default, always; allow_duplicate_failed_only, only if that run failed, timed out, was canceled or was terminated; reject_duplicate, never. When it may not, no run starts and the call returns error already_started with the closed run's run_id. The run makes no progress until a worker polls task_queue. If a call fails with error timeout, temporal_unavailable or server_shutting_down, the run may have started: check workflow_id with get_workflows before calling again.",
+		Description: "Start a run of workflow_type under workflow_id, with input, an array of JSON values, as the workflow's arguments in order. workflow_type must be one that list_startable_workflows lists for the target, and the run starts on the task queue listed with it; any other workflow type starts no run and returns error not_found. If a run of workflow_id is running, workflow_id_conflict_policy decides what happens: fail, the default, starts no run and returns error already_started, whose message gives the running run's run_id; use_existing starts no run and returns the running run, with started false. If workflow_id's latest run has closed, workflow_id_reuse_policy decides whether a new run may start: allow_duplicate, the default, always; allow_duplicate_failed_only, only if that run failed, timed out, was canceled or was terminated; reject_duplicate, never. When it may not, no run starts and the call returns error already_started with the closed run's run_id. The run makes no progress until a worker polls its task queue. If a call fails with error timeout, temporal_unavailable or server_shutting_down, the run may have started: check workflow_id with get_workflows before calling again.",
 		InputSchema: startWorkflowInputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_StartWorkflowExecution_FullMethodName,
@@ -207,10 +211,12 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // request it gets, whatever its MCP protocol version, so tool calls end with
 // outcome cancelled.
 // It fails if cfg has an auth section but no authorization, if an
-// authorization profile names a tool the server does not have, or if a
-// profile's ToolsDeny leaves it no tools. It sets the Tools of each
-// authorization profile without them to the server's read-only tools other
-// than those in the profile's ToolsDeny.
+// authorization profile names a tool the server does not have or
+// list_startable_workflows, if a profile's ToolsDeny leaves it no tools, or if a
+// profile has Workflows without start_workflow or start_workflow without
+// Workflows. It sets the Tools of each authorization profile without them to the
+// server's read-only tools other than list_startable_workflows and those in the
+// profile's ToolsDeny.
 func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return nil, errors.New("authorization: required with an auth section")

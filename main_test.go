@@ -309,7 +309,7 @@ func TestStdio(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dev.Stop() })
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default}\n", dev.FrontendHostPort())
+	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default, workflows: [{type: Declared, task_queue: q}]}\n", dev.FrontendHostPort())
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +345,15 @@ func TestStdio(t *testing.T) {
 	}
 	if want := map[string]string{"server": "ok", "namespace": "ok", "codec": "skipped"}; !maps.Equal(statuses, want) {
 		t.Errorf("check_connection = %s, want stage statuses %v", b, want)
+	}
+	for workflowType, wantStarted := range map[string]bool{"Declared": true, "Undeclared": false} {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "start_workflow", Arguments: map[string]any{"target": "dev", "workflow_id": "stdio-" + workflowType, "workflow_type": workflowType}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dev.Client().DescribeWorkflowExecution(ctx, "stdio-"+workflowType, ""); res.IsError == wantStarted || (err == nil) != wantStarted {
+			t.Errorf("start_workflow of %s: isError = %v, describing the run: err = %v; want a run: %v", workflowType, res.IsError, err, wantStarted)
+		}
 	}
 
 	// Closing the session closes the server's stdin and returns the error of the server's exit.
@@ -384,6 +393,10 @@ func TestExitsWithoutServing(t *testing.T) {
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}, q: {tools_deny: [terminate_workflow], targets: [a]},\n" +
 		"    r: {tools_deny: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_workflow_history_summary, get_task_queues, search_workflows, count_workflows, list_search_attributes], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
+	workflows := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n" +
+		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
+		"authorization:\n  profiles: {s: {tools: [start_workflow], targets: [a]}, w: {tools: [get_workflows], workflows: [W], targets: [a]}, d: {workflows: [W], targets: [a]},\n" +
+		"    l: {tools: [start_workflow, list_startable_workflows], workflows: [W], targets: [a]}, n: {tools_deny: [list_startable_workflows], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: s}]\n")
 	unsetKey := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
 	unsetCodecAuthorization := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, payload_handling: decode, codec: c}\n" +
 		"codecs:\n  c: {endpoint: https://codec.example.com, authorization_header: {env: TEMPORAL_MCP_TEST_UNSET_KEY}}\n")
@@ -433,6 +446,11 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unknown tool in a profile", []string{"--config", unknownTool}, 1, "invalid config " + unknownTool + `: authorization: profiles: "p": tools[1]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 		{"unknown tool in a profile's tools_deny", []string{"--config", unknownTool}, 1, `authorization: profiles: "q": tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 		{"tools_deny that leaves a profile no tools", []string{"--config", unknownTool}, 1, `authorization: profiles: "r": tools_deny: leaves the profile no tools`},
+		{"start_workflow without workflows", []string{"--config", workflows}, 1, `authorization: profiles: "s": workflows: required with start_workflow in tools`},
+		{"workflows without start_workflow", []string{"--config", workflows}, 1, `authorization: profiles: "w": workflows: not allowed without start_workflow in tools`},
+		{"workflows in a profile without tools", []string{"--config", workflows}, 1, `authorization: profiles: "d": workflows: not allowed without start_workflow in tools`},
+		{"list_startable_workflows in a profile's tools", []string{"--config", workflows}, 1, `authorization: profiles: "l": tools[1]: list_startable_workflows comes with start_workflow, so profiles do not list it`},
+		{"list_startable_workflows in a profile's tools_deny", []string{"--config", workflows}, 1, `authorization: profiles: "n": tools_deny[0]: list_startable_workflows comes with start_workflow, so profiles do not list it`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -67,11 +68,13 @@ func boundList(p, key *jsonschema.Schema) {
 var readOnlyAnnotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
 
 // A toolServer is an MCP server that knows the access, read or write, and the input schema of each tool addTool adds
-// to it.
+// to it, and the snapshot that each request starts with.
 type toolServer struct {
 	*mcp.Server
-	access map[string]string
-	inputs map[string]*jsonschema.Schema
+	access  map[string]string
+	inputs  map[string]*jsonschema.Schema
+	mu      sync.Mutex
+	current *snapshot
 }
 
 // schemaFor returns the schema inferred from T with opts, which may be nil, and panics naming tool and which schema, such as "input", if it cannot.
@@ -118,20 +121,23 @@ func addTool[In, Out any](s *toolServer, def *mcp.Tool, rpcs []string, h mcp.Too
 }
 
 // addTools registers the server's tools on s and returns their names.
-func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) []string {
-	names := &searchAttributeNames{}
+func addTools(s *toolServer) []string {
 	return []string{addTool(s, &mcp.Tool{
 		Name:        "list_available_targets",
 		Description: "List the Temporal targets you can use, and how tool responses show each one's payloads.",
 		Annotations: readOnlyAnnotations,
-	}, nil, listAvailableTargets(cfg)), addTool(s, &mcp.Tool{
+	}, nil, pinned(func(sn *snapshot) mcp.ToolHandlerFor[struct{}, envelope[targetList]] {
+		return listAvailableTargets(sn.cfg)
+	})), addTool(s, &mcp.Tool{
 		Name:        "check_connection",
 		Description: "Check that this server can reach a target's Temporal server and namespace, and its codec server if it has one.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
 		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-	}, checkConnection(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[checkConnectionInput, envelope[connectionCheck]] {
+		return checkConnection(sn.cfg, sn.clients, sn.payloads)
+	})), addTool(s, &mcp.Tool{
 		Name:         "get_workflows",
 		Description:  fmt.Sprintf("Get the current state of up to %d workflow runs: for each item of workflows, the run its run_id names, or the workflow's latest run if run_id is omitted. For a closed run, also its result if it completed, or the failure its close event records; a timed-out run has no failure, only status TimedOut. result has an entry for each item of workflows, in the order given. An item that the Temporal server reports not found or invalid, such as an unknown workflow or a malformed run_id, gets an error in its entry and no run, while the other entries are unaffected. Any other error reading an item fails the whole call, and its message starts with the item's path, such as workflows[3].", maxListItems),
 		Annotations:  readOnlyAnnotations,
@@ -140,7 +146,9 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
-	}, getWorkflows(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[getWorkflowsInput, envelope[[]workflowEntry]] {
+		return getWorkflows(sn.cfg, sn.clients, sn.payloads)
+	})), addTool(s, &mcp.Tool{
 		Name:        "get_workflow_history",
 		Description: "Get the events of a workflow run's history, oldest first unless order is newest_first, each with its event_id, event_time, event_type, attributes and links; run_id in the result is the run read. links point to related executions, such as the workflow run a Nexus operation started; read a linked run in another namespace with get_workflows on the target for that namespace (see list_available_targets). event_types (event types, or the category failures: every event type that ends in Failed or TimedOut) and event_range filter the events, and combine. A call can return fewer than limit events, even none, while more events still match: until complete is true, call next_call's tool with its arguments unchanged for the rest.",
 		Annotations: readOnlyAnnotations,
@@ -149,14 +157,18 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistory_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
-	}, getWorkflowHistory(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[getWorkflowHistoryInput, envelope[workflowHistory]] {
+		return getWorkflowHistory(sn.cfg, sn.clients, sn.payloads)
+	})), addTool(s, &mcp.Tool{
 		Name:        "get_workflow_history_summary",
 		Description: fmt.Sprintf("Summarize a workflow run's whole history, which this server reads in full: for each activity type, marker name, child workflow type, Nexus operation, signal name received or sent and update name, and for timers and workflow tasks, exact counts of their events by outcome, where open counts those scheduled or initiated that have no closing event. Event IDs to read with get_workflow_history are on activity types (first and last), marker names and received signal names (last), and each last_failure, unsuccessful entry and open timer. An activity type's max_attempt is the highest attempt that an ActivityTaskStarted event records, and last_failure can be an earlier attempt's failure that such an event records. Temporal writes that event only when the activity closes, and nothing about an open activity's retries, so an activity still retrying counts in open but not in max_attempt or last_failure (get_workflows has its attempt and last failure). Local activities appear in markers, without their activity types, named LocalActivity by the Go and Java SDKs and core_local_activity by the Python, TypeScript, .NET and Ruby SDKs, and one retried after a backoff timer records more than one marker. After a workflow task fails, its retries write no events until one completes, so workflow_tasks.failed counts a streak of failures once. unsuccessful lists the child workflows and Nexus operations that failed to start or ended without completing, the updates that failed, and the markers that recorded a failure, where a local activity's entry can be a failure it then retried after a backoff timer, so the local activity may still have completed. Each last_failure, and each update and marker in unsuccessful, has the failure's message and message_unavailable, which is null unless the SDK encoded the message and this server cannot show it, and then says why, payload_handling or decode_failed, while message is what was stored unencoded, often Encoded failure. timers.open lists, while the run is open, the timers that neither fired nor were canceled. close is the run's close event, null if the run was open when read, and coverage says which events were read. run_id in the result is the run read: the workflow's latest run if run_id is omitted. The summary has no payloads, such as inputs, results or failure details, and leaves the run's current state to get_workflows. Each list has up to %d entries, lists of counts most frequent first and the others newest first; a cut list gives in omitted how many entries it left out, and in next_call a get_workflow_history call whose events include all of them, and complete is false when any list is cut.", maxListItems),
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
 		workflowservice.WorkflowService_GetWorkflowExecutionHistoryReverse_FullMethodName,
-	}, getWorkflowHistorySummary(cfg, clients, payloads)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[getWorkflowHistorySummaryInput, envelope[historySummary]] {
+		return getWorkflowHistorySummary(sn.cfg, sn.clients, sn.payloads)
+	})), addTool(s, &mcp.Tool{
 		Name:         "get_task_queues",
 		Description:  fmt.Sprintf("Get the pollers and backlog of up to %d task queues, with a section in each for every task queue type asked for: up to %d of the type's pollers, most recently polled first, and poller_count, the number of pollers (complete is false when any section's list of pollers is cut); the approximate backlog count and the age of its oldest task; and the tasks added and dispatched per second, averaged over about the last 30 seconds. These stats are null if the Temporal server does not report them. A task queue that no worker polls and no task was added to gets sections with no pollers and no backlog, not an error. result has an entry for each name in task_queues, in the order given. A name that the Temporal server rejects as invalid, such as one that is too long, gets an error in its entry and no sections, while the other entries are unaffected. Any other error reading a task queue fails the whole call, and its message starts with the task queue's path, such as task_queues[3].", maxListItems, maxPollers),
 		Annotations:  readOnlyAnnotations,
@@ -164,7 +176,9 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		OutputSchema: getTaskQueuesOutputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_DescribeTaskQueue_FullMethodName,
-	}, getTaskQueues(cfg, clients)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[getTaskQueuesInput, envelope[[]taskQueue]] {
+		return getTaskQueues(sn.cfg, sn.clients)
+	})), addTool(s, &mcp.Tool{
 		Name:        "search_workflows",
 		Description: "Search a target's workflow runs with a Visibility query (every run without one) and return a page of them. Each run has workflow_id, run_id and the search attributes asked for in fields, which uses the same names as query (see list_search_attributes); one the run lacks is null (HistoryLength, HistorySizeBytes, StateTransitionCount and ExecutionDuration are null until the run closes). For the next page, call next_call's tool with its arguments unchanged.",
 		Annotations: readOnlyAnnotations,
@@ -173,30 +187,46 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 		workflowservice.WorkflowService_ListWorkflowExecutions_FullMethodName,
 		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,
 		cloudservice.CloudService_GetNamespace_FullMethodName,
-	}, searchWorkflows(cfg, clients, names)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[searchWorkflowsInput, envelope[workflowSearch]] {
+		return searchWorkflows(sn.cfg, sn.clients, &sn.names)
+	})), addTool(s, &mcp.Tool{
 		Name:        "count_workflows",
 		Description: "Count a target's workflow runs that match a Visibility query (every run without one), and with group_by, how many have each value of that search attribute. Counts are approximate.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		workflowservice.WorkflowService_CountWorkflowExecutions_FullMethodName,
-	}, countWorkflows(cfg, clients)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[countWorkflowsInput, envelope[workflowCount]] {
+		return countWorkflows(sn.cfg, sn.clients)
+	})), addTool(s, &mcp.Tool{
 		Name:        "list_search_attributes",
 		Description: "List the search attributes that a target's Visibility queries can use, with their types. complete is false when the target's custom search attributes cannot be listed.",
 		Annotations: readOnlyAnnotations,
 	}, []string{
 		operatorservice.OperatorService_ListSearchAttributes_FullMethodName,
 		cloudservice.CloudService_GetNamespace_FullMethodName,
-	}, listSearchAttributes(cfg, clients, names)), addTool(s, &mcp.Tool{
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[listSearchAttributesInput, envelope[searchAttributeList]] {
+		return listSearchAttributes(sn.cfg, sn.clients, &sn.names)
+	})), addTool(s, &mcp.Tool{
 		Name:        "list_startable_workflows",
 		Description: "List the workflows you can start on a target with start_workflow: each one's type, the task queue its runs start on, and, if whoever runs this server gives them, a description and input_schema, a JSON Schema for each of the workflow's arguments in order. This server does not check start_workflow's input against input_schema.",
 		Annotations: readOnlyAnnotations,
-	}, nil, listStartableWorkflows(cfg)), addTool(s, &mcp.Tool{
+	}, nil, pinned(func(sn *snapshot) mcp.ToolHandlerFor[listStartableWorkflowsInput, envelope[startableWorkflowList]] {
+		return listStartableWorkflows(sn.cfg)
+	})), addTool(s, &mcp.Tool{
 		Name:        "start_workflow",
 		Description: "Start a run of workflow_type under workflow_id, with input, an array of JSON values, as the workflow's arguments in order. workflow_type must be one that list_startable_workflows lists for the target, and the run starts on the task queue listed with it; any other workflow type starts no run and returns error not_found. If a run of workflow_id is running, workflow_id_conflict_policy decides what happens: fail, the default, starts no run and returns error already_started, whose message gives the running run's run_id; use_existing starts no run and returns the running run, with started false. If workflow_id's latest run has closed, workflow_id_reuse_policy decides whether a new run may start: allow_duplicate, the default, always; allow_duplicate_failed_only, only if that run failed, timed out, was canceled or was terminated; reject_duplicate, never. When it may not, no run starts and the call returns error already_started with the closed run's run_id. The run makes no progress until a worker polls its task queue. If a call fails with error timeout, temporal_unavailable or server_shutting_down, the run may have started: check workflow_id with get_workflows before calling again.",
 		InputSchema: startWorkflowInputSchema(),
 	}, []string{
 		workflowservice.WorkflowService_StartWorkflowExecution_FullMethodName,
-	}, startWorkflow(cfg, clients, payloads))}
+	}, pinned(func(sn *snapshot) mcp.ToolHandlerFor[startWorkflowInput, envelope[startWorkflowResult]] {
+		return startWorkflow(sn.cfg, sn.clients, sn.payloads)
+	}))}
+}
+
+// A Server is an MCP server whose config Reload can replace while it serves.
+type Server struct {
+	*toolServer
+	tools []string
 }
 
 // NewServer returns the MCP server for the given configuration, making
@@ -217,22 +247,44 @@ func addTools(s *toolServer, cfg *config.Config, clients *temporal.Clients, payl
 // Workflows. It sets the Tools of each authorization profile without them to the
 // server's read-only tools other than list_startable_workflows and those in the
 // profile's ToolsDeny.
-func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*mcp.Server, error) {
-	if cfg.Auth != nil && cfg.Authorization == nil {
-		return nil, errors.New("authorization: required with an auth section")
-	}
-	s, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
-	if err := resolveProfileTools(cfg.Authorization, tools, s.access); err != nil {
+func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*Server, error) {
+	ts, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
+	s := &Server{toolServer: ts, tools: tools}
+	if err := s.resolveAuthorization(cfg); err != nil {
 		return nil, err
 	}
-	return s.Server, nil
+	return s, nil
 }
 
-// NewMux returns an HTTP handler that serves s, a [NewServer] server for cfg,
-// over the MCP streamable HTTP transport at /mcp. With auth configured, /mcp
-// requires a valid access token, logger gets the reason for each rejected token
-// or verification failure, and the protected resource metadata is served at the
-// path the token challenge points to. GET /healthz gets 200 ok, without a token.
+// Reload makes the requests that start from now on use cfg, clients and
+// payloads instead, after checking cfg and setting its profiles' Tools as
+// NewServer does, and closes the clients the server used before once the tool
+// calls that started with them end. If cfg fails those checks, Reload closes
+// clients and the server keeps what it had. cfg must have the auth section of
+// the config that NewMux serves s with.
+func (s *Server) Reload(cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer) error {
+	if err := s.resolveAuthorization(cfg); err != nil {
+		clients.Close()
+		return err
+	}
+	s.replace(newSnapshot(cfg, clients, payloads))
+	return nil
+}
+
+// resolveAuthorization checks cfg's authorization and sets its profiles' Tools as NewServer describes.
+func (s *Server) resolveAuthorization(cfg *config.Config) error {
+	if cfg.Auth != nil && cfg.Authorization == nil {
+		return errors.New("authorization: required with an auth section")
+	}
+	return resolveProfileTools(cfg.Authorization, s.tools, s.access)
+}
+
+// NewMux returns an HTTP handler that serves s, the Server field of a
+// [NewServer] server for cfg, over the MCP streamable HTTP transport at /mcp.
+// With auth configured, /mcp requires a valid access token, logger gets the
+// reason for each rejected token or verification failure, and the protected
+// resource metadata is served at the path the token challenge points to. GET
+// /healthz gets 200 ok, without a token.
 func NewMux(s *mcp.Server, cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") })
@@ -262,9 +314,9 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 
 // newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
 func newServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
-	s := &toolServer{mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), map[string]string{}, map[string]*jsonschema.Schema{}}
-	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), audit(records, logger, cfg, s.access), normalizeToolCalls(s.inputs), authorize(cfg))
-	return s, addTools(s, cfg, clients, payloads)
+	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), access: map[string]string{}, inputs: map[string]*jsonschema.Schema{}, current: newSnapshot(cfg, clients, payloads)}
+	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), pin(s), audit(records, logger, s.access), normalizeToolCalls(s.inputs), authorize())
+	return s, addTools(s)
 }
 
 type targetList struct {

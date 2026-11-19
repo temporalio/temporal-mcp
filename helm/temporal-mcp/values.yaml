@@ -3,6 +3,16 @@
 # https://github.com/temporalio/temporal-mcp. Without auth, the server listens
 # only on loopback, so only kubectl port-forward reaches it.
 config: ""
+# Whether to pass --watch-config, so that the server reloads config when it
+# changes rather than its pods restarting. They still restart when listen,
+# listen_tls, auth, audit_log_file or error_log_file changes, since those take
+# effect only on a restart, and the values under those keys must be quoted
+# strings. Kubernetes can take a minute or more to update the
+# config that the pods see. Pods keep the environment they started with, so a
+# config that reads a new env secret needs them restarted: read Secrets mounted
+# through volumes as file secrets instead, and update a Secret before the config
+# that reads it.
+watchConfig: false
 
 image:
   # The image repository.

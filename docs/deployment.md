@@ -124,7 +124,17 @@ test and verify the deployment.
    or ingress health check can use `/healthz`, which answers 200 without a
    token.
 6. **Change the config.** Run `helm upgrade` with the same arguments and the
-   edited file. The pods restart with it.
+   edited file. The pods restart with it. With `watchConfig: true` in the
+   values file, they instead reload it with
+   [`--watch-config`](config.md#--watch-config) once Kubernetes updates the
+   config they see, which can take a minute or more, and restart only when
+   `listen`, `listen_tls`, `auth`, `audit_log_file` or `error_log_file`
+   changes. A pod keeps the environment it started with, so a config that
+   reads a new `env` secret, for example a key added to a Secret that
+   `envFrom` maps, takes effect only once the pods restart, such as with
+   `kubectl rollout restart deployment/temporal-mcp`. With `watchConfig`, mount
+   Secrets with `volumes` and `volumeMounts` and read them with `file` secrets
+   instead, and update a Secret before the config that reads it.
 
 ## Access
 
@@ -147,12 +157,18 @@ Every successful Temporal call must pass all of these controls:
 The identity provider supplies group membership in the access token. The MCP
 YAML decides what that group can use inside this server. There is no MCP
 administration UI: changing the mapping means changing the server configuration
-and restarting the process.
+and restarting the process, or having it reload the configuration with
+[`--watch-config`](config.md#--watch-config).
 
 ## Changes
 
 The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart.
+identity provider settings, profiles, or rules require a restart. With
+[`--watch-config`](config.md#--watch-config), the server instead reloads the
+configuration when the file changes or it gets SIGHUP, so only changes to
+`listen`, `listen_tls`, the identity provider settings in `auth`,
+`audit_log_file` and `error_log_file`, or a new `env` secret, require a
+restart.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The

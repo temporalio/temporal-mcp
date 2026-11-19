@@ -14,6 +14,7 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -255,6 +256,20 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 		}
 	default:
 		t.Fatal("credential was not called")
+	}
+}
+
+func TestCloseClosesCloudOpsClients(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
+	clients, err := NewClients([]config.Target{{Name: "cloud", Address: "payments.a1b2c.tmprl.cloud:7233", Namespace: "payments.a1b2c", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}}}, "test", "0", slog.New(slog.DiscardHandler), WithPlaintextCloudOpsAPI(closedAddress(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients.Close()
+	ctx := WithTool(t.Context(), "t", []string{cloudservice.CloudService_GetNamespace_FullMethodName}, []string{"cloud"})
+	_, err = clients.CloudOps("cloud").GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: "payments.a1b2c"})
+	if code := serviceerror.ToStatus(err).Code(); code != codes.Canceled {
+		t.Errorf("a Cloud Ops API call after Close = %v, want Canceled", code)
 	}
 }
 

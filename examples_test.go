@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,11 +28,15 @@ func TestExamplesLoad(t *testing.T) {
 			continue
 		}
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			load := config.Load
-			if strings.HasPrefix(filepath.Base(path), "stdio") {
-				load = config.LoadStdio
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
 			}
-			cfg, err := load(path)
+			parse := config.Parse
+			if strings.HasPrefix(filepath.Base(path), "stdio") {
+				parse = config.ParseStdio
+			}
+			cfg, err := parse(data)
 			if err != nil {
 				t.Fatal(err)
 			}

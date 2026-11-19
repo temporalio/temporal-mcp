@@ -33,6 +33,20 @@ jobs:
         with:
           version: v4.3.1
       - run: helm lint --strict -f examples/helm-values.yaml --set-file config=examples/http-auth-config.yaml helm/temporal-mcp
+      - run: helm lint --strict -f examples/helm-values.yaml --set-file config=examples/http-auth-config.yaml --set watchConfig=true helm/temporal-mcp
+      - run: |
+          checksum() { helm template temporal-mcp helm/temporal-mcp --set watchConfig=true --set-file config="$1" | grep 'checksum/config:'; }
+          sed 's/claim_value: payments-dev,/claim_value: payments-devs,/' examples/http-auth-config.yaml > "$RUNNER_TEMP/rules.yaml"
+          sed 's|issuer: https://login.example.com/|issuer: https://login2.example.com/|' examples/http-auth-config.yaml > "$RUNNER_TEMP/auth.yaml"
+          sed 's|audience: https://temporal-mcp.example.com/mcp|audience: 0123|' examples/http-auth-config.yaml > "$RUNNER_TEMP/unquoted.yaml"
+          sed 's|audience: https://temporal-mcp.example.com/mcp|audience: "0123"|' examples/http-auth-config.yaml > "$RUNNER_TEMP/quoted.yaml"
+          cmp -s examples/http-auth-config.yaml "$RUNNER_TEMP/rules.yaml" && exit 1
+          cmp -s examples/http-auth-config.yaml "$RUNNER_TEMP/auth.yaml" && exit 1
+          test "$(checksum examples/http-auth-config.yaml)" = "$(checksum "$RUNNER_TEMP/rules.yaml")"
+          test "$(checksum examples/http-auth-config.yaml)" != "$(checksum "$RUNNER_TEMP/auth.yaml")"
+          checksum "$RUNNER_TEMP/unquoted.yaml" && exit 1
+          checksum "$RUNNER_TEMP/quoted.yaml"
+          helm template temporal-mcp helm/temporal-mcp --set watchConfig=true --set-file config=examples/http-auth-config.yaml | grep -F 'args: [--config, /config/config.yaml, --watch-config]'
 
   build-and-test:
     needs: [test, helm]

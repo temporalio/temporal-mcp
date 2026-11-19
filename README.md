@@ -84,7 +84,7 @@ Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` 
 
 ## Build from source
 
-With Go 1.27.2 or later:
+With Go 1.27.4 or later:
 
 ```sh
 go build -o bin/ .

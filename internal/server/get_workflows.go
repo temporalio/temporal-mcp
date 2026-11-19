@@ -496,8 +496,7 @@ func toFailure(f *failurepb.Failure, batch *payload.Batch) *failure {
 			Endpoint:         n.GetEndpoint(),
 			Service:          n.GetService(),
 			Operation:        n.GetOperation(),
-			// A failure from before operation_token has the token in the deprecated operation_id.
-			OperationToken: cmp.Or(n.GetOperationToken(), n.GetOperationId()),
+			OperationToken:   n.GetOperationToken(),
 		}
 	}
 	if n := f.GetNexusHandlerFailureInfo(); n != nil {

@@ -17,13 +17,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	commonpb "go.temporal.io/api/common/v1"
+	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/grpc/codes"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -34,7 +37,11 @@ import (
 // connect writes the server's logs and audit records to out.
 func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*toolServer)) *mcp.ClientSession {
 	t.Helper()
-	cfg, err := config.Load(configPath)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +233,7 @@ func TestToolErrorHasResultType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewMux(s, &config.Config{}, logger))
+	srv := httptest.NewServer(NewMux(s.Server, &config.Config{}, logger))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if err != nil {
@@ -293,7 +300,7 @@ func TestNewMux(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutAuth := httptest.NewServer(NewMux(plain, &config.Config{}, logger))
+	withoutAuth := httptest.NewServer(NewMux(plain.Server, &config.Config{}, logger))
 	t.Cleanup(withoutAuth.Close)
 
 	tests := []struct {
@@ -351,6 +358,76 @@ func TestNewMux(t *testing.T) {
 	}
 }
 
+// ping returns the code of a GetSystemInfo call through the client for target in clients.
+func ping(ctx context.Context, clients *temporal.Clients, target string) codes.Code {
+	ctx = temporal.WithTool(ctx, "check_connection", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{target})
+	_, err := clients.Client(target).WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
+	return serviceerror.ToStatus(err).Code()
+}
+
+func TestReload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	ln := listen(t)
+	serve(t, ln, fakeWorkflowService{})
+	logger := slog.New(slog.DiscardHandler)
+	// load returns the config whose one target, name, has the alias alpha, with its clients.
+	load := func(name string) (*config.Config, *temporal.Clients) {
+		t.Helper()
+		cfg := &config.Config{Targets: []config.Target{{Name: name, Aliases: []string{"alpha"}, Description: "x", Address: ln.Addr().String(), Namespace: "default"}}}
+		clients, err := temporal.NewClients(cfg, "http", "test", "0", logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, clients
+	}
+	cfg, clients := load("a")
+	s, err := NewServer(ctx, ctx, "temporal", "0", cfg, clients, nil, io.Discard, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, nextClients := load("b")
+	// reload reloads next once the call is pinned, before audit and authorize run.
+	reload := func(h mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if err := s.Reload(next, nextClients, nil); err != nil {
+				t.Fatal(err)
+			}
+			return h(ctx, method, req)
+		}
+	}
+	var sn *snapshot
+	var targets []string
+	var held codes.Code
+	handler := func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+		sn, targets = snapshotFrom(ctx), toolTargets(ctx)
+		held = ping(ctx, sn.clients, sn.targets[0])
+		return &mcp.CallToolResult{}, nil
+	}
+	call := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "count_workflows", Arguments: json.RawMessage(`{"target":"alpha"}`)}}
+	var records bytes.Buffer
+	if _, err := pin(s.toolServer)(reload(audit(&records, logger, s.access)(authorize()(handler))))(ctx, "tools/call", call); err != nil {
+		t.Fatal(err)
+	}
+	var rec struct{ Target string }
+	if err := json.Unmarshal(records.Bytes(), &rec); err != nil || rec.Target != "a" || !slices.Equal(targets, []string{"a"}) || sn.cfg != cfg || held != codes.OK {
+		t.Errorf("a call that a reload lands in gets audit record %s (%v), targets %v, the config with targets %v, and %v from its clients; want target a, [a], [a] and OK", records.Bytes(), err, targets, sn.targets, held)
+	}
+	waitUntil(ctx, t, "the old clients to close", func() bool { return ping(ctx, clients, "a") == codes.Canceled })
+
+	bad, badClients := load("c")
+	bad.Authorization = &config.Authorization{Profiles: map[string]config.Profile{"p": {Tools: []string{"terminate_workflow"}}}}
+	if err := s.Reload(bad, badClients, nil); err == nil || !strings.Contains(err.Error(), `unknown tool "terminate_workflow"`) {
+		t.Errorf("Reload with an unknown tool = %v, want an unknown tool error", err)
+	}
+	if code := ping(ctx, badClients, "c"); code != codes.Canceled {
+		t.Errorf("the clients of the failed reload: %v, want Canceled", code)
+	}
+	if _, err := pin(s.toolServer)(authorize()(handler))(ctx, "tools/call", call); err != nil || !slices.Equal(targets, []string{"b"}) || held != codes.OK {
+		t.Errorf("a call after the reloads = %v, with targets %v and %v from its clients; want [b] and OK", err, targets, held)
+	}
+}
+
 // memoWorkflowService describes each workflow as a running run with a JSON memo.
 type memoWorkflowService struct{ fakeWorkflowService }
 
@@ -377,17 +454,13 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 	t.Cleanup(codecServer.Close)
 	temporalServer := listen(t)
 	serve(t, temporalServer, memoWorkflowService{})
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+	cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
 		"targets:\n  - {name: orders, description: x, address: %q, namespace: orders, payload_handling: decode, codec: orders}\n"+
 		"codecs:\n  orders:\n    endpoint: %q\n    passthrough_headers:\n"+
 		"      - {name: x-tenant-id}\n"+
 		"      - {name: X-Codec-Authorization, send_as: Authorization}\n"+
 		"      - {name: X-Roles}\n"+
-		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(configPath)
+		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-// Package config loads and validates the server configuration file.
+// Package config parses and validates the contents of the server configuration file.
 package config
 
 import (
@@ -241,23 +241,10 @@ func (s *Secret) Read() (string, error) {
 	return v, nil
 }
 
-// Load reads the YAML file at path and returns the validated configuration for
-// serving MCP over HTTP.
-func Load(path string) (*Config, error) {
-	return load(path, parse)
-}
-
-// LoadStdio reads the YAML file at path and returns the validated configuration
-// for serving MCP over stdin and stdout, which must not have the sections that
-// configure HTTP.
-func LoadStdio(path string) (*Config, error) {
-	return load(path, parseStdio)
-}
-
 // CheckSecrets reads every secret in c once: each target's api_key and each
 // codec's authorization_header. It fails if an environment variable is unset or
 // empty, or a file cannot be read or is empty, and reports every such secret.
-// Load and LoadStdio read no secrets, so the server calls CheckSecrets after
+// Parse and ParseStdio read no secrets, so the server calls CheckSecrets after
 // loading its config.
 func (c *Config) CheckSecrets() error {
 	var errs []error
@@ -278,19 +265,16 @@ func (c *Config) CheckSecrets() error {
 	return errors.Join(errs...)
 }
 
-func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return parse(data)
-}
-
-func parse(data []byte) (*Config, error) {
+// Parse returns the validated configuration in data, the contents of a YAML
+// config file, for serving MCP over HTTP.
+func Parse(data []byte) (*Config, error) {
 	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
 }
 
-func parseStdio(data []byte) (*Config, error) {
+// ParseStdio returns the validated configuration in data, the contents of a
+// YAML config file, for serving MCP over stdin and stdout, which must not have
+// the sections that configure HTTP.
+func ParseStdio(data []byte) (*Config, error) {
 	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
 }
 

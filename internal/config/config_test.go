@@ -18,9 +18,8 @@ targets:
     namespace: prod.abc12
 `
 
-func TestLoadValid(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n"+validTargets+`
+func TestParseValid(t *testing.T) {
+	cfg, err := Parse([]byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n" + validTargets + `
   - {name: staging, description: Staging., address: "staging:7233", namespace: staging, payload_handling: decode, codec: payments}
   - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
   - name: orders
@@ -44,10 +43,7 @@ codecs:
   secure:
     endpoint: https://codec.example.com/{namespace}
     allow_plain_http: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
+`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +99,7 @@ codecs:
 		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
-		t.Errorf("Load = %+v, want %+v", cfg, want)
+		t.Errorf("Parse = %+v, want %+v", cfg, want)
 	}
 }
 
@@ -117,7 +113,7 @@ authorization:
 
 func TestParseLoopbackListen(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "127.0.0.1:0"} {
-		if _, err := parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
+		if _, err := Parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
 			t.Errorf("listen %s: %v", listen, err)
 		}
 	}
@@ -126,7 +122,7 @@ func TestParseLoopbackListen(t *testing.T) {
 func TestParseTargetAddress(t *testing.T) {
 	for _, address := range []string{"localhost:1", "localhost:65535", "dns:///prod.example.tmprl.cloud:7233"} {
 		data := "listen: 127.0.0.1:8080\ntargets:\n  - {name: a, description: x, address: \"" + address + "\", namespace: a}\n"
-		if _, err := parse([]byte(data)); err != nil {
+		if _, err := Parse([]byte(data)); err != nil {
 			t.Errorf("address %s: %v", address, err)
 		}
 	}
@@ -135,7 +131,7 @@ func TestParseTargetAddress(t *testing.T) {
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
 		data := "listen: 0.0.0.0:8080\n" + validTargets + "auth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
-		if _, err := parse([]byte(data)); err != nil {
+		if _, err := Parse([]byte(data)); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
@@ -165,7 +161,7 @@ func TestParseStdio(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseStdio([]byte(tt.yaml))
+			_, err := ParseStdio([]byte(tt.yaml))
 			if tt.want == nil {
 				if err != nil {
 					t.Fatal(err)
@@ -191,7 +187,7 @@ func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
 		"  - {name: prod, description: x, address: b:7233, namespace: b}\n"
-	if _, err := parse([]byte(data)); err != nil {
+	if _, err := Parse([]byte(data)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -200,7 +196,7 @@ func TestParseAPIKey(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}}\n" +
 		"  - {name: b, description: x, address: b:7233, namespace: b, api_key: {file: /keys/b}}\n"
-	cfg, err := parse([]byte(data))
+	cfg, err := Parse([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +798,7 @@ func TestParseInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parse([]byte(tt.yaml))
+			_, err := Parse([]byte(tt.yaml))
 			if err == nil {
 				t.Fatal("want an error")
 			}

@@ -12,7 +12,13 @@ spec:
   template:
     metadata:
       annotations:
+        {{- if .Values.watchConfig }}
+        {{- $restartOnly := pick (fromYaml .Values.config) "listen" "listen_tls" "auth" "audit_log_file" "error_log_file" }}
+        {{- include "temporal-mcp.requireStrings" (list "config" $restartOnly) }}
+        checksum/config: {{ $restartOnly | toYaml | sha256sum }}
+        {{- else }}
         checksum/config: {{ .Values.config | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -36,7 +42,7 @@ spec:
         - name: temporal-mcp
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: [--config, /config/config.yaml]
+          args: [--config, /config/config.yaml{{ if .Values.watchConfig }}, --watch-config{{ end }}]
           ports:
             - name: mcp
               containerPort: {{ include "temporal-mcp.listenPort" . }}

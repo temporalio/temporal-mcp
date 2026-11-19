@@ -33,7 +33,7 @@ import (
 type Clients struct {
 	name   string
 	byName map[string]client.Client
-	cloud  map[string]cloudservice.CloudServiceClient
+	cloud  map[string]*cloudclient.Client
 }
 
 // An Option changes how NewClients connects. Options are for tests.
@@ -63,7 +63,7 @@ func WithPlaintextCloudOpsAPI(address string) Option {
 // api_key, mtls or none. The gRPC user agent starts with name, a slash and the
 // client-version. The clients log to logger. It fails if a client certificate
 // cannot be loaded, if a target's address cannot be parsed, or if a Cloud Ops
-// API client cannot be created.
+// API client cannot be created, and then closes the clients it created.
 func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
 	var o options
 	for _, opt := range opts {
@@ -73,7 +73,7 @@ func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *
 	if cfg.Auth != nil {
 		sso = "sso=true; issuer=" + escapeIssuer(cfg.Auth.Issuer)
 	}
-	c := &Clients{name: name, byName: map[string]client.Client{}, cloud: map[string]cloudservice.CloudServiceClient{}}
+	c := &Clients{name: name, byName: map[string]client.Client{}, cloud: map[string]*cloudclient.Client{}}
 	var errs []error
 	for i, t := range cfg.Targets {
 		credentialMode := "none"
@@ -107,6 +107,7 @@ func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
+		c.Close()
 		return nil, err
 	}
 	return c, nil
@@ -126,6 +127,16 @@ func escapeIssuer(issuer string) string {
 		}
 	}
 	return b.String()
+}
+
+// Close closes the clients' connections, which fails the calls in progress through them.
+func (c *Clients) Close() {
+	for _, cl := range c.byName {
+		cl.Close()
+	}
+	for _, ops := range c.cloud {
+		ops.Close()
+	}
 }
 
 // A credential returns the API key for each Temporal call to target; caller is nil without auth.
@@ -192,7 +203,11 @@ func (c *Clients) Identity(ctx context.Context) string {
 
 // CloudOps returns the Temporal Cloud Ops API client for the target with the given name, or nil if the target is not on Temporal Cloud or has no API key.
 func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
-	return c.cloud[name]
+	ops, ok := c.cloud[name]
+	if !ok {
+		return nil
+	}
+	return ops.CloudService()
 }
 
 // IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
@@ -207,7 +222,7 @@ func IsCloud(address string) bool {
 }
 
 // cloudOpsClient returns a client for the Cloud Ops API that calls it with t's API key and the same limits and identity as t's Temporal client.
-func cloudOpsClient(t config.Target, name, clientVersion string, cred credential, cloudOpsAddress string) (cloudservice.CloudServiceClient, error) {
+func cloudOpsClient(t config.Target, name, clientVersion string, cred credential, cloudOpsAddress string) (*cloudclient.Client, error) {
 	o := cloudclient.Options{
 		APIKeyReader: apiKeyReader(func(ctx context.Context) (string, error) {
 			return cred(ctx, identity.CallerFrom(ctx), &t)
@@ -227,7 +242,7 @@ func cloudOpsClient(t config.Target, name, clientVersion string, cred credential
 	if err != nil {
 		return nil, fmt.Errorf("creating the Cloud Ops API client: %w", err)
 	}
-	return c.CloudService(), nil
+	return c, nil
 }
 
 type apiKeyReader func(context.Context) (string, error)

@@ -312,6 +312,20 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 	}
 }
 
+func TestCloseClosesCloudOpsClients(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
+	clients, err := NewClients(&config.Config{Targets: []config.Target{{Name: "cloud", Address: "payments.a1b2c.tmprl.cloud:7233", Namespace: "payments.a1b2c", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}}}}, "http", "test", "0", slog.New(slog.DiscardHandler), WithPlaintextCloudOpsAPI(closedAddress(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients.Close()
+	ctx := WithTool(t.Context(), "t", []string{cloudservice.CloudService_GetNamespace_FullMethodName}, []string{"cloud"})
+	_, err = clients.CloudOps("cloud").GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: "payments.a1b2c"})
+	if code := serviceerror.ToStatus(err).Code(); code != codes.Canceled {
+		t.Errorf("a Cloud Ops API call after Close = %v, want Canceled", code)
+	}
+}
+
 func TestIdentity(t *testing.T) {
 	clients, err := NewClients(&config.Config{}, "http", "temporal-mcp", "0", slog.New(slog.DiscardHandler))
 	if err != nil {

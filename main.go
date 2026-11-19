@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,6 +51,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the YAML config file (required)")
 	stdio := flags.Bool("stdio", false, "serve MCP over stdin and stdout, for an MCP client that launches the server, rather than over HTTP")
+	watch := flags.Bool("watch-config", false, "reload the --config file when it changes or the server gets SIGHUP, keeping the last good config when a reload fails")
 	printVersion := flags.Bool("version", false, "print the version and exit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -67,19 +69,29 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected arguments %q", flags.Args())
 	}
+	// With --watch-config, SIGHUP reloads the config, so it is caught from the start: one that arrives while the
+	// server starts reloads the config once the server has started, rather than stopping it.
+	var hup chan os.Signal
+	if *watch {
+		hup = make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+	}
 
-	load := config.Load
+	parse := config.Parse
 	if *stdio {
 		// Broken client pipes must not stop calls before they are audited.
 		signal.Ignore(syscall.SIGPIPE)
-		load = config.LoadStdio
+		parse = config.ParseStdio
 	}
-	cfg, err := load(*configPath)
+	data, err := os.ReadFile(*configPath)
+	var cfg *config.Config
+	if err == nil {
+		cfg, err = parse(data)
+	}
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
-	// Reported with NewClients' errors below, so that a bad secret doesn't hide them.
-	secretsErr := cfg.CheckSecrets()
 
 	// Over stdio, stdout carries only MCP messages, so the audit records default to stderr.
 	var records io.Writer = stdout
@@ -102,12 +114,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	case cfg.ListenTLS != nil:
 		mcpTransport = "https"
 	}
-	clients, clientsErr := temporal.NewClients(cfg, mcpTransport, name, version, logger)
-	if err := errors.Join(secretsErr, clientsErr); err != nil {
-		return fmt.Errorf("invalid config %s: %w", *configPath, err)
-	}
-
-	payloads, err := payload.NewRenderer(cfg, logger)
+	clients, payloads, err := openTargets(cfg, mcpTransport, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -123,7 +130,15 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	}
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	timeout := cmp.Or(cfg.ShutdownTimeout, config.DefaultShutdownTimeout)
+	var current atomic.Pointer[config.Config]
+	current.Store(cfg)
+	if *watch {
+		ticker := time.NewTicker(configPollInterval)
+		defer ticker.Stop()
+		read := func() ([]byte, error) { return os.ReadFile(*configPath) }
+		go watchConfig(signals, read, data, ticker.C, hup, reloadConfig(s, &current, parse, mcpTransport, logger))
+	}
+	timeout := func() time.Duration { return cmp.Or(current.Load().ShutdownTimeout, config.DefaultShutdownTimeout) }
 	if *stdio {
 		transport := &stdioTransport{
 			IOTransport: mcp.IOTransport{Reader: stdin, Writer: stdout},
@@ -155,10 +170,10 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-		}, timeout, cancelCalls, stderr, logger)
+		}, timeout(), cancelCalls, stderr, logger)
 	}
 
-	srv := &http.Server{Handler: server.NewMux(s, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
+	srv := &http.Server{Handler: server.NewMux(s.Server, cfg, logger), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn)}
 	// Shutdown waits up to 5s for a connection that has not sent a request yet, such
 	// as one a client dialed and left unused in its pool, so close those right away.
 	var unused sync.Map
@@ -207,7 +222,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	// A second signal stops the process at once.
 	stop()
 	cancelSubscriptions()
-	return shutdown(srv.Shutdown, timeout, cancelCalls, stderr, logger)
+	return shutdown(srv.Shutdown, timeout(), cancelCalls, stderr, logger)
 }
 
 // shutdown waits up to timeout for requests to drain, then cancels those still
@@ -227,6 +242,27 @@ func shutdown(drain func(context.Context) error, timeout time.Duration, cancelCa
 		return fmt.Errorf("requests still in progress %s after they were cancelled", cancelGrace)
 	}
 	return nil
+}
+
+// openTargets checks cfg's secrets and returns the clients and the payload
+// renderer for its targets.
+func openTargets(cfg *config.Config, mcpTransport string, logger *slog.Logger) (*temporal.Clients, *payload.Renderer, error) {
+	// Reported with NewClients' errors, so that a bad secret doesn't hide them.
+	secretsErr := cfg.CheckSecrets()
+	clients, err := temporal.NewClients(cfg, mcpTransport, name, version, logger)
+	if err != nil {
+		return nil, nil, errors.Join(secretsErr, err)
+	}
+	if secretsErr != nil {
+		clients.Close()
+		return nil, nil, secretsErr
+	}
+	payloads, err := payload.NewRenderer(cfg, logger)
+	if err != nil {
+		clients.Close()
+		return nil, nil, err
+	}
+	return clients, payloads, nil
 }
 
 func openLog(path string, fallback io.Writer) (io.Writer, error) {

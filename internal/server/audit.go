@@ -16,7 +16,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
 	"github.com/temporalio/temporal-mcp/internal/temporal"
 )
@@ -46,7 +45,7 @@ func auditRecordFrom(ctx context.Context) *auditRecord {
 
 // audit writes a record of each tools/call request to w. A call whose record cannot be
 // written fails with an internal error. access gives each tool's access, read or write.
-func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[string]string) mcp.Middleware {
+func audit(w io.Writer, logger *slog.Logger, access map[string]string) mcp.Middleware {
 	var mu sync.Mutex
 	var dirty bool
 	write := func(line []byte) error {
@@ -79,7 +78,7 @@ func audit(w io.Writer, logger *slog.Logger, cfg *config.Config, access map[stri
 			if json.Unmarshal(call.Params.Arguments, &fields) == nil {
 				var target *string
 				if json.Unmarshal(fields["target"], &target) == nil && target != nil {
-					if t, ok := cfg.Lookup(*target); ok {
+					if t, ok := snapshotFrom(ctx).cfg.Lookup(*target); ok {
 						target = &t.Name
 					}
 					rec.Target = target

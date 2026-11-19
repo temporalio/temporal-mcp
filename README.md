@@ -66,7 +66,7 @@ To use your Temporal Cloud or self-hosted namespaces, add a target for each one 
 
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first.
 
-The server reads its config only when it starts, so restart your agent after you change the config, then ask it to check its connection to each new target.
+The server reads its config when it starts, so restart your agent after you change the config, or add [`--watch-config`](docs/config.md#--watch-config) to the command to have the server reload the config when it changes. Then ask the agent to check its connection to each new target.
 
 ## Run a centrally hosted server
 
@@ -84,7 +84,7 @@ Without `--stdio`, `temporal-mcp` serves MCP at `/mcp` on the config's `listen` 
 
 ## Build from source
 
-With Go 1.27.2 or later:
+With Go 1.27.4 or later:
 
 ```sh
 go build -o bin/ .
@@ -96,6 +96,8 @@ This writes `bin/temporal-mcp`. To build a container image instead, whose entryp
 docker build -t temporal-mcp .
 docker run -v /path/to/config.yaml:/config.yaml:ro temporal-mcp --config /config.yaml
 ```
+
+With [`--watch-config`](docs/config.md#--watch-config), mount the config's directory rather than the file, such as `-v /path/to/dir:/config:ro` with `--config /config/config.yaml`, since a file mounted on its own keeps its old contents in the container once an editor replaces it.
 
 ## Shutdown
 

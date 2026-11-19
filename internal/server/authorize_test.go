@@ -321,6 +321,41 @@ authorization:
 			t.Errorf("tools/list with an invalid cursor: err = %v, want invalid params", err)
 		}
 	})
+
+	t.Run("reload", func(t *testing.T) {
+		session := connectAs(t, tests[1].token)
+		// The reload gives dev start_workflow for A on orders-prod in place of its read-only tools on payments-staging.
+		next, err := config.Parse([]byte(strings.NewReplacer(
+			"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}, {type: B, task_queue: q}]}",
+			"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", "dev: {tools: [start_workflow], workflows: [A], targets: [orders-prod]}",
+		).Replace(yaml)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextClients, err := temporal.NewClients(next.Targets, "test", "0", slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Reload(next, nextClients, newRenderer(t, next, logger)); err != nil {
+			t.Fatal(err)
+		}
+		list, err := session.ListTools(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tools []string
+		for _, tool := range list.Tools {
+			tools = append(tools, tool.Name)
+		}
+		res, _ := call(t, session, "list_startable_workflows", map[string]any{"target": "orders-prod"})
+		var out envelope[startableWorkflowList]
+		if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &out); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"list_startable_workflows", "start_workflow"}; !slices.Equal(tools, want) || len(out.Result.Workflows) != 1 || out.Result.Workflows[0].Type != "A" {
+			t.Errorf("after the reload, dev gets tools %v and startable workflows %+v; want %v and A", tools, out.Result.Workflows, want)
+		}
+	})
 }
 
 type fakeOperatorService struct {

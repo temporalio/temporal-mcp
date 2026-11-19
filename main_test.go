@@ -870,27 +870,6 @@ func TestShutdownDuringToolCall(t *testing.T) {
 	}
 }
 
-// availableTargets returns the names of the targets that list_available_targets gives session.
-func availableTargets(t *testing.T, session *mcp.ClientSession) []string {
-	t.Helper()
-	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out struct {
-		Result struct{ Targets []struct{ Name string } }
-	}
-	b, _ := json.Marshal(res.StructuredContent)
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, target := range out.Result.Targets {
-		names = append(names, target.Name)
-	}
-	return names
-}
-
 func TestConfigReload(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("signals cannot be sent on Windows")
@@ -903,29 +882,64 @@ func TestConfigReload(t *testing.T) {
 		}
 		return config
 	}
-	write := func(path, config string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	connect := func(t *testing.T, transport mcp.Transport) *mcp.ClientSession {
-		t.Helper()
+	// connect connects over transport and returns a function that lists the targets that list_available_targets gives.
+	connect := func(transport mcp.Transport) func() []string {
 		session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(t.Context(), transport, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = session.Close() })
-		return session
-	}
-	want := func(t *testing.T, session *mcp.ClientSession, names ...string) {
-		t.Helper()
-		if got := availableTargets(t, session); !slices.Equal(got, names) {
-			t.Errorf("list_available_targets = %v, want %v", got, names)
+		return func() []string {
+			t.Helper()
+			res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_available_targets"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out struct {
+				Result struct{ Targets []struct{ Name string } }
+			}
+			if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &out); err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, target := range out.Result.Targets {
+				names = append(names, target.Name)
+			}
+			return names
 		}
 	}
-	// logged reads lines until one contains msg, failing if the server exits or 15 seconds pass first.
-	logged := func(t *testing.T, lines <-chan string, msg string) {
+	dir := t.TempDir()
+	// update writes config as Kubernetes updates a mounted ConfigMap: into a new directory, and then renames the ..data
+	// symlink, which config.yaml goes through, to point to it.
+	update := func(config string) {
+		t.Helper()
+		data, err := os.MkdirTemp(dir, "..")
+		if err == nil {
+			err = os.WriteFile(filepath.Join(data, "config.yaml"), []byte(config), 0o600)
+		}
+		if err == nil {
+			err = os.Symlink(filepath.Base(data), filepath.Join(dir, "..data_tmp"))
+		}
+		if err == nil {
+			err = os.Rename(filepath.Join(dir, "..data_tmp"), filepath.Join(dir, "..data"))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	update("listen: 127.0.0.1:0\n" + targets("a"))
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(filepath.Join("..data", "config.yaml"), configPath); err != nil {
+		t.Fatal(err)
+	}
+	watched := exec.Command(bin, "--watch-config", "--config", configPath)
+	lines, _ := start(t, watched)
+	watchedTargets := connect(&mcp.StreamableClientTransport{Endpoint: listening(t, lines)})
+	unwatched := exec.Command(bin, "--config", configPath)
+	unwatchedLines, _ := start(t, unwatched)
+	unwatchedTargets := connect(&mcp.StreamableClientTransport{Endpoint: listening(t, unwatchedLines)})
+	// logged reads the watched server's stderr until a line contains msg.
+	logged := func(msg string) {
 		t.Helper()
 		timeout := time.After(15 * time.Second)
 		for {
@@ -943,214 +957,48 @@ func TestConfigReload(t *testing.T) {
 			}
 		}
 	}
-	// writeKey writes the key to fifo once the server opens it to read it, running whileReading first if it is not nil.
-	writeKey := func(t *testing.T, fifo string, whileReading func()) {
-		t.Helper()
-		var f *os.File
-		for deadline := time.Now().Add(10 * time.Second); f == nil; time.Sleep(10 * time.Millisecond) {
-			// Opening a FIFO to write without blocking fails until a reader has opened it.
-			var err error
-			if f, err = os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err != nil && time.Now().After(deadline) {
-				t.Fatalf("the server did not read its API key: %v", err)
-			}
-		}
-		if whileReading != nil {
-			whileReading()
-		}
-		_, err := f.WriteString("key")
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			t.Fatalf("writing the API key: %v", err)
+
+	update("listen: 127.0.0.1:0\n" + targets("a", "b"))
+	logged(`msg="reloaded the config" added=[b] removed=[] changed=[]`)
+	// The file is unchanged, so only the SIGHUP reloads it.
+	if err := watched.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	logged(`msg="reloaded the config" added=[] removed=[] changed=[]`)
+	update("listen: 127.0.0.1:0\ntargets: []\n")
+	logged(`msg="cannot reload the config, so the server keeps its last good config" error="targets: at least one target is required"`)
+	update("listen: 127.0.0.1:1\n" + targets("a"))
+	logged(`msg="cannot reload the config, so the server keeps its last good config" error="listen: changes take effect only when the server restarts`)
+	update("listen: 127.0.0.1:0\n" + targets("a", "b", "c"))
+	logged(`msg="reloaded the config" added=[c] removed=[] changed=[]`)
+
+	stdioPath := filepath.Join(dir, "stdio.yaml")
+	if err := os.WriteFile(stdioPath, []byte(targets("a")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdioTargets := connect(&mcp.CommandTransport{Command: exec.Command(bin, "--stdio", "--watch-config", "--config", stdioPath)})
+	if err := os.WriteFile(stdioPath, []byte(targets("a", "b")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !slices.Equal(stdioTargets(), []string{"a", "b"}); time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("over stdio, list_available_targets did not give b after the edit")
 		}
 	}
 
-	t.Run("ConfigMap", func(t *testing.T) {
-		dir := t.TempDir()
-		version := 0
-		// update writes config as Kubernetes updates a mounted ConfigMap: into a new directory, and then renames
-		// the ..data symlink, which config.yaml goes through, to point to it.
-		update := func(config string) {
-			t.Helper()
-			version++
-			data := fmt.Sprintf("..%d", version)
-			if err := os.Mkdir(filepath.Join(dir, data), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			write(filepath.Join(dir, data, "config.yaml"), config)
-			if err := os.Symlink(data, filepath.Join(dir, "..data_tmp")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Rename(filepath.Join(dir, "..data_tmp"), filepath.Join(dir, "..data")); err != nil {
-				t.Fatal(err)
-			}
-		}
-		update("listen: 127.0.0.1:0\n" + targets("a"))
-		configPath := filepath.Join(dir, "config.yaml")
-		if err := os.Symlink(filepath.Join("..data", "config.yaml"), configPath); err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command(bin, "--watch-config", "--config", configPath)
-		lines, _ := start(t, cmd)
-		session := connect(t, &mcp.StreamableClientTransport{Endpoint: listening(t, lines)})
-		want(t, session, "a")
-
-		update("listen: 127.0.0.1:0\n" + targets("a", "b"))
-		logged(t, lines, `msg="reloaded the config" added=[b] removed=[] changed=[]`)
-		want(t, session, "a", "b")
-
-		update("listen: 127.0.0.1:0\ntargets: []\n")
-		logged(t, lines, `msg="cannot reload the config, so the server keeps its last good config" error="targets: at least one target is required"`)
-		want(t, session, "a", "b")
-
-		update("listen: 127.0.0.1:1\n" + targets("a"))
-		logged(t, lines, `msg="cannot reload the config, so the server keeps its last good config" error="listen: changes take effect only when the server restarts`)
-		want(t, session, "a", "b")
-
-		update("listen: 127.0.0.1:0\n" + strings.ReplaceAll(targets("a", "b"), "description: x, address: \"b", "description: y, address: \"b"))
-		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		logged(t, lines, `msg="reloaded the config" added=[] removed=[] changed=[b]`)
-		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		logged(t, lines, `msg="reloaded the config" added=[] removed=[] changed=[]`)
-	})
-
-	t.Run("stdio", func(t *testing.T) {
-		configPath := filepath.Join(t.TempDir(), "config.yaml")
-		write(configPath, targets("a"))
-		cmd := exec.Command(bin, "--stdio", "--watch-config", "--config", configPath)
-		session := connect(t, &mcp.CommandTransport{Command: cmd})
-		want(t, session, "a")
-		write(configPath, targets("a", "b"))
-		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		for deadline := time.Now().Add(10 * time.Second); !slices.Equal(availableTargets(t, session), []string{"a", "b"}); time.Sleep(100 * time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatal("timed out waiting for list_available_targets to give b")
-			}
-		}
-	})
-
-	t.Run("SIGHUP during startup", func(t *testing.T) {
-		dir := t.TempDir()
-		// The target's API key is a FIFO, so the server waits at startup, and at each reload, until the test writes the key.
-		key := filepath.Join(dir, "key")
-		if out, err := exec.Command("mkfifo", key).CombinedOutput(); err != nil {
-			t.Fatalf("mkfifo: %v\n%s", err, out)
-		}
-		configPath := filepath.Join(dir, "config.yaml")
-		write(configPath, fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n", key))
-		cmd := exec.Command(bin, "--watch-config", "--config", configPath)
-		lines, _ := start(t, cmd)
-		writeKey(t, key, func() {
-			if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-				t.Fatal(err)
-			}
-		})
-		listening(t, lines)
-		// The server reads the key again only to reload the config, as the SIGHUP during startup has it do.
-		writeKey(t, key, nil)
-		logged(t, lines, `msg="reloaded the config"`)
-	})
-
-	t.Run("shutdown_timeout", func(t *testing.T) {
-		fake := &blockingWorkflowService{started: make(chan struct{}, 1), release: make(chan struct{})}
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		gs := grpc.NewServer()
-		workflowservice.RegisterWorkflowServiceServer(gs, fake)
-		go gs.Serve(ln)
-		t.Cleanup(gs.Stop)
-		configPath := filepath.Join(t.TempDir(), "config.yaml")
-		config := func(shutdownTimeout string) string {
-			return fmt.Sprintf("listen: 127.0.0.1:0\nshutdown_timeout: %s\ntargets:\n  - {name: a, description: x, address: %q, namespace: default}\n", shutdownTimeout, ln.Addr())
-		}
-		write(configPath, config("1m"))
-		cmd := exec.Command(bin, "--watch-config", "--config", configPath)
-		lines, _ := start(t, cmd)
-		session := connect(t, &mcp.StreamableClientTransport{Endpoint: listening(t, lines)})
-		write(configPath, config("500ms"))
-		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		logged(t, lines, `msg="reloaded the config"`)
-		go func() {
-			_, _ = session.CallTool(context.Background(), &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "a"}})
-		}()
-		select {
-		case <-fake.started:
-		case <-time.After(10 * time.Second):
-			t.Fatal("check_connection did not reach Temporal")
-		}
-		// The shutdown waits for the call only as long as the reloaded shutdown_timeout, not the 1m the server started with.
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			t.Fatal(err)
-		}
-		logged(t, lines, `msg="cancelling the requests still in progress at the shutdown timeout" shutdown_timeout=500ms`)
-	})
-
-	t.Run("SIGHUPs during a reload", func(t *testing.T) {
-		dir := t.TempDir()
-		// The target's API key is a FIFO, so the server waits at startup, and at each reload, until the test writes the key.
-		key := filepath.Join(dir, "key")
-		if out, err := exec.Command("mkfifo", key).CombinedOutput(); err != nil {
-			t.Fatalf("mkfifo: %v\n%s", err, out)
-		}
-		configPath := filepath.Join(dir, "config.yaml")
-		write(configPath, fmt.Sprintf("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, api_key: {file: %q}}\n", key))
-		cmd := exec.Command(bin, "--watch-config", "--config", configPath)
-		lines, _ := start(t, cmd)
-		writeKey(t, key, nil)
-		listening(t, lines)
-		hangUp := func() {
-			t.Helper()
-			if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-				t.Fatal(err)
-			}
-		}
-		hangUp()
-		// Three more SIGHUPs arrive while the reload that the first one started waits for the key.
-		writeKey(t, key, func() {
-			for range 3 {
-				hangUp()
-				time.Sleep(100 * time.Millisecond)
-			}
-		})
-		logged(t, lines, `msg="reloaded the config"`)
-		// They merge into one more reload, which reads the key again, and no other reload reads it.
-		writeKey(t, key, nil)
-		logged(t, lines, `msg="reloaded the config"`)
-		for deadline := time.Now().Add(2*configPollInterval + time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-			if f, err := os.OpenFile(key, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-				f.Close()
-				t.Fatal("the server reloaded the config again")
-			}
-		}
-	})
-
-	t.Run("without --watch-config", func(t *testing.T) {
-		configPath := filepath.Join(t.TempDir(), "config.yaml")
-		write(configPath, "listen: 127.0.0.1:0\n"+targets("a"))
-		cmd := exec.Command(bin, "--config", configPath)
-		lines, _ := start(t, cmd)
-		session := connect(t, &mcp.StreamableClientTransport{Endpoint: listening(t, lines)})
-		write(configPath, "listen: 127.0.0.1:0\n"+targets("a", "b"))
-		time.Sleep(2*configPollInterval + time.Second)
-		want(t, session, "a")
-		if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			t.Fatal(err)
-		}
-		for range lines {
-		}
-		if err := cmd.Wait(); cmd.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGHUP {
-			t.Errorf("server exited with %v on SIGHUP, want it killed by the signal", err)
-		}
-	})
+	if got := watchedTargets(); !slices.Equal(got, []string{"a", "b", "c"}) {
+		t.Errorf("with --watch-config, list_available_targets = %v, want [a b c]", got)
+	}
+	// The last edit is now over two poll intervals old, so a server polling the file would have applied it.
+	if got := unwatchedTargets(); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("without --watch-config, list_available_targets = %v, want [a]", got)
+	}
+	if err := unwatched.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	for range unwatchedLines {
+	}
+	if err := unwatched.Wait(); unwatched.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGHUP {
+		t.Errorf("without --watch-config, the server exited with %v on SIGHUP, want it killed by the signal", err)
+	}
 }

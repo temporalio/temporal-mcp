@@ -239,16 +239,12 @@ func shutdown(drain func(context.Context) error, timeout time.Duration, cancelCa
 	return nil
 }
 
-// newTargetClients is temporal.NewClients, which tests replace to see the
-// clients that openTargets creates.
-var newTargetClients = temporal.NewClients
-
 // openTargets checks cfg's secrets and returns the clients and the payload
 // renderer for its targets.
 func openTargets(cfg *config.Config, logger *slog.Logger) (*temporal.Clients, *payload.Renderer, error) {
 	// Reported with NewClients' errors, so that a bad secret doesn't hide them.
 	secretsErr := cfg.CheckSecrets()
-	clients, err := newTargetClients(cfg.Targets, name, version, logger)
+	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
 	if err != nil {
 		return nil, nil, errors.Join(secretsErr, err)
 	}

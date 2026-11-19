@@ -13,7 +13,9 @@ spec:
     metadata:
       annotations:
         {{- if .Values.watchConfig }}
-        checksum/config: {{ pick (fromYaml .Values.config) "listen" "listen_tls" "auth" "audit_log_file" "error_log_file" | toYaml | sha256sum }}
+        {{- $restartOnly := pick (fromYaml .Values.config) "listen" "listen_tls" "auth" "audit_log_file" "error_log_file" }}
+        {{- include "temporal-mcp.requireStrings" (list "config" $restartOnly) }}
+        checksum/config: {{ $restartOnly | toYaml | sha256sum }}
         {{- else }}
         checksum/config: {{ .Values.config | sha256sum }}
         {{- end }}

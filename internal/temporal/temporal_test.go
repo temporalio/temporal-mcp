@@ -2,22 +2,34 @@ package temporal
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
+	"os"
+	"path"
+	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/cloud-sdk/api/cloudservice/v1"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/temporalio/temporal-mcp/internal/config"
 	"github.com/temporalio/temporal-mcp/internal/identity"
@@ -35,7 +47,7 @@ func closedAddress(t *testing.T) string {
 }
 
 func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
-	clients, err := NewClients([]config.Target{{Name: "a", Address: closedAddress(t), Namespace: "default"}}, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := NewClients(&config.Config{Targets: []config.Target{{Name: "a", Address: closedAddress(t), Namespace: "default"}}}, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +77,7 @@ func TestToolCallsAreLimitedToDeclaredRPCsAndGrantedTargets(t *testing.T) {
 }
 
 func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
-	_, err := NewClients([]config.Target{{Name: "a", Address: "%zz.example:7233", Namespace: "default"}}, "test", "0", slog.New(slog.DiscardHandler))
+	_, err := NewClients(&config.Config{Targets: []config.Target{{Name: "a", Address: "%zz.example:7233", Namespace: "default"}}}, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if want := "targets[0]: address:"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v, want it to contain %q", err, want)
 	}
@@ -130,42 +142,19 @@ type call struct {
 	md     metadata.MD
 }
 
-type fakeWorkflowService struct {
-	workflowservice.UnimplementedWorkflowServiceServer
-	mu    sync.Mutex
-	calls []call
-}
-
-func (f *fakeWorkflowService) record(ctx context.Context, method string) {
-	md, _ := metadata.FromIncomingContext(ctx)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, call{method, md})
-}
-
-func (f *fakeWorkflowService) GetSystemInfo(ctx context.Context, _ *workflowservice.GetSystemInfoRequest) (*workflowservice.GetSystemInfoResponse, error) {
-	f.record(ctx, "GetSystemInfo")
-	return &workflowservice.GetSystemInfoResponse{}, nil
-}
-
-func (f *fakeWorkflowService) DescribeNamespace(ctx context.Context, _ *workflowservice.DescribeNamespaceRequest) (*workflowservice.DescribeNamespaceResponse, error) {
-	f.record(ctx, "DescribeNamespace")
-	return &workflowservice.DescribeNamespaceResponse{}, nil
-}
-
-func (f *fakeWorkflowService) DescribeWorkflowExecution(ctx context.Context, _ *workflowservice.DescribeWorkflowExecutionRequest) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
-	f.record(ctx, "DescribeWorkflowExecution")
-	return &workflowservice.DescribeWorkflowExecutionResponse{}, nil
-}
-
-func serve(t *testing.T, svc workflowservice.WorkflowServiceServer) string {
+// serve answers every gRPC call with an empty message and sends the call's method and metadata on calls.
+func serve(t *testing.T, calls chan<- call, opts ...grpc.ServerOption) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := grpc.NewServer()
-	workflowservice.RegisterWorkflowServiceServer(s, svc)
+	s := grpc.NewServer(append(opts, grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+		method, _ := grpc.MethodFromServerStream(stream)
+		md, _ := metadata.FromIncomingContext(stream.Context())
+		calls <- call{path.Base(method), md}
+		return stream.SendMsg(&emptypb.Empty{})
+	}))...)
 	go s.Serve(ln)
 	t.Cleanup(s.Stop)
 	return ln.Addr().String()
@@ -173,7 +162,7 @@ func serve(t *testing.T, svc workflowservice.WorkflowServiceServer) string {
 
 func newClient(t *testing.T, target config.Target) client.Client {
 	t.Helper()
-	clients, err := NewClients([]config.Target{target}, "temporal-mcp", "1.2.3", slog.New(slog.DiscardHandler))
+	clients, err := NewClients(&config.Config{Targets: []config.Target{target}}, "http", "temporal-mcp", "1.2.3", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,45 +172,110 @@ func newClient(t *testing.T, target config.Target) client.Client {
 }
 
 func TestClientIdentityHeaders(t *testing.T) {
-	fake := &fakeWorkflowService{}
-	target := config.Target{Name: "a", Address: serve(t, fake), Namespace: "default"}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	ctx = WithTool(ctx, "t", []string{
-		workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
-		workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
-		workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
-	}, []string{"a"})
+	const apiKey = "test-api-key-value"
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", apiKey)
+	dir := t.TempDir()
+	cert := &config.Certificate{CertFile: filepath.Join(dir, "tls.crt"), KeyFile: filepath.Join(dir, "tls.key")}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}, NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for file, block := range map[string]*pem.Block{cert.CertFile: {Type: "CERTIFICATE", Bytes: der}, cert.KeyFile: {Type: "PRIVATE KEY", Bytes: keyDER}} {
+		if err := os.WriteFile(file, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pair, err := cert.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(pair.Leaf)
 
-	raw := newClient(t, target).WorkflowService()
-	if _, err := raw.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err != nil {
-		t.Fatal(err)
+	calls := make(chan call, 10)
+	plain := serve(t, calls)
+	secure := serve(t, calls, grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{*pair}})))
+	tests := []struct {
+		name          string
+		transport     string
+		cfg           config.Config
+		clientVersion string
+	}{
+		{"stdio without credentials", "stdio", config.Config{Targets: []config.Target{{Name: "a", Address: plain, Namespace: "default"}}},
+			"1.2.3 (transport=stdio; sso=false; credential=none)"},
+		{"http with an API key", "http", config.Config{Targets: []config.Target{{Name: "a", Address: "orders.acct1.tmprl.cloud:7233", Namespace: "orders.acct1", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}}}},
+			"1.2.3 (transport=http; sso=false; credential=api_key)"},
+		{"https with auth, an issuer to escape and a client certificate", "https", config.Config{Auth: &config.Auth{Issuer: "https://id.example.com/(a b;é%)/"}, Targets: []config.Target{{Name: "a", Address: secure, Namespace: "default", TLS: cert}}},
+			"1.2.3 (transport=https; sso=true; issuer=https://id.example.com/%28a%20b%3B%C3%A9%25%29/; credential=mtls)"},
 	}
-	if _, err := raw.DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Namespace: "default"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newClient(t, target).DescribeWorkflowExecution(ctx, "wf", ""); err != nil {
-		t.Fatal(err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clients, err := NewClients(&tt.cfg, tt.transport, "temporal-mcp", "1.2.3", slog.New(slog.DiscardHandler), WithRootCAs(roots), WithPlaintextCloudOpsAPI(plain))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := clients.Client("a")
+			t.Cleanup(c.Close)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			ctx = WithTool(ctx, "t", []string{
+				workflowservice.WorkflowService_GetSystemInfo_FullMethodName,
+				workflowservice.WorkflowService_DescribeNamespace_FullMethodName,
+				workflowservice.WorkflowService_DescribeWorkflowExecution_FullMethodName,
+				cloudservice.CloudService_GetNamespace_FullMethodName,
+			}, []string{"a"})
 
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	var methods []string
-	for _, c := range fake.calls {
-		methods = append(methods, c.method)
-		if got, want := c.md.Get("client-name"), []string{"temporal-mcp"}; !slices.Equal(got, want) {
-			t.Errorf("%s client-name = %v, want %v", c.method, got, want)
-		}
-		if got, want := c.md.Get("client-version"), []string{"1.2.3"}; !slices.Equal(got, want) {
-			t.Errorf("%s client-version = %v, want %v", c.method, got, want)
-		}
-		if ua := c.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "temporal-mcp/1.2.3") {
-			t.Errorf("%s user-agent = %v, want prefix temporal-mcp/1.2.3", c.method, ua)
-		}
-	}
-	slices.Sort(methods)
-	if want := []string{"DescribeNamespace", "DescribeWorkflowExecution", "GetSystemInfo", "GetSystemInfo"}; !slices.Equal(methods, want) {
-		t.Errorf("methods = %v, want %v", methods, want)
+			wantMethods := []string{"GetNamespace"}
+			if ops := clients.CloudOps("a"); ops != nil {
+				if _, err := ops.GetNamespace(ctx, &cloudservice.GetNamespaceRequest{Namespace: "orders.acct1"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				wantMethods = []string{"DescribeNamespace", "DescribeWorkflowExecution", "GetSystemInfo", "GetSystemInfo"}
+				if _, err := c.WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.WorkflowService().DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Namespace: "default"}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.DescribeWorkflowExecution(ctx, "wf", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var methods []string
+			for len(calls) > 0 {
+				rpc := <-calls
+				methods = append(methods, rpc.method)
+				if got, want := rpc.md.Get("client-name"), []string{"temporal-mcp"}; !slices.Equal(got, want) {
+					t.Errorf("%s client-name = %v, want %v", rpc.method, got, want)
+				}
+				if got, want := rpc.md.Get("client-version"), []string{tt.clientVersion}; !slices.Equal(got, want) {
+					t.Errorf("%s client-version = %v, want %v", rpc.method, got, want)
+				}
+				if ua := rpc.md.Get("user-agent"); len(ua) == 0 || !strings.HasPrefix(ua[0], "temporal-mcp/"+tt.clientVersion) {
+					t.Errorf("%s user-agent = %v, want prefix temporal-mcp/%s", rpc.method, ua, tt.clientVersion)
+				}
+				for k, v := range rpc.md {
+					if s := strings.Join(v, ","); k != "authorization" && (strings.Contains(s, apiKey) || strings.Contains(s, dir)) {
+						t.Errorf("%s header %s = %q, want no API key or certificate path", rpc.method, k, s)
+					}
+				}
+			}
+			slices.Sort(methods)
+			if !slices.Equal(methods, wantMethods) {
+				t.Errorf("methods = %v, want %v", methods, wantMethods)
+			}
+		})
 	}
 }
 
@@ -259,7 +313,7 @@ func TestCredentialReceivesCallContext(t *testing.T) {
 }
 
 func TestIdentity(t *testing.T) {
-	clients, err := NewClients(nil, "temporal-mcp", "0", slog.New(slog.DiscardHandler))
+	clients, err := NewClients(&config.Config{}, "http", "temporal-mcp", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -159,7 +159,7 @@ func TestCheckConnectionFailureReasons(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.target.Name, tt.target.Description, tt.target.Namespace = "a", "x", "default"
 			cfg := &config.Config{Codecs: codecs, Targets: []config.Target{tt.target}}
-			clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+			clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -264,7 +264,7 @@ func TestUnreadableAPIKeyFile(t *testing.T) {
 	}
 	t.Cleanup(func() { logs.Close() })
 	cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: listen(t).Addr().String(), Namespace: "default", APIKey: &config.Secret{File: keyPath}}}}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.NewTextHandler(logs, nil)))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.NewTextHandler(logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestClientCertificate(t *testing.T) {
 	}}
 	roots := x509.NewCertPool()
 	roots.AddCert(serverRoot)
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler), temporal.WithRootCAs(roots))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler), temporal.WithRootCAs(roots))
 	if err != nil {
 		t.Fatal(err)
 	}

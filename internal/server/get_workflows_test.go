@@ -2589,7 +2589,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		authClients, err := mcptemporal.NewClients(authCfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+		authClients, err := mcptemporal.NewClients(authCfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 		if err != nil {
 			t.Fatal(err)
 		}

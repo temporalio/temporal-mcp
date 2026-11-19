@@ -95,7 +95,14 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
 	}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	clients, clientsErr := temporal.NewClients(cfg.Targets, name, version, logger)
+	mcpTransport := "http"
+	switch {
+	case *stdio:
+		mcpTransport = "stdio"
+	case cfg.ListenTLS != nil:
+		mcpTransport = "https"
+	}
+	clients, clientsErr := temporal.NewClients(cfg, mcpTransport, name, version, logger)
 	if err := errors.Join(secretsErr, clientsErr); err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -165,7 +172,6 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	srv.RegisterOnShutdown(func() {
 		unused.Range(func(c, _ any) bool { c.(net.Conn).Close(); return true })
 	})
-	scheme := "http"
 	if cfg.ListenTLS != nil {
 		if err := cfg.ListenTLS.Check(logger); err != nil {
 			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
@@ -177,14 +183,13 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 			}
 			return cert, err
 		}}
-		scheme = "https"
 	}
 
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, scheme, ln.Addr())
+	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, mcpTransport, ln.Addr())
 
 	served := make(chan error, 1)
 	go func() {

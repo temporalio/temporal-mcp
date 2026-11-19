@@ -78,7 +78,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 		{Name: "cloud", Description: "x", Address: "us-east-1.aws.api.temporal.io:7233", Namespace: "orders.acct1", APIKey: &config.Secret{File: keyPath}},
 		{Name: "cloud-mtls", Description: "x", Address: "orders.acct1.tmprl.cloud:7233", Namespace: "orders.acct1", TLS: certificate},
 	}}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(ln.Addr().String()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestListSearchAttributesOnCloud(t *testing.T) {
 	t.Run("Cloud Ops API unreachable", func(t *testing.T) {
 		closed := listen(t)
 		closed.Close()
-		unreachable, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(closed.Addr().String()))
+		unreachable, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler), temporal.WithPlaintextCloudOpsAPI(closed.Addr().String()))
 		if err != nil {
 			t.Fatal(err)
 		}

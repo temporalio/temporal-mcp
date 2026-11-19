@@ -113,7 +113,7 @@ authorization:
 	if err != nil {
 		t.Fatal(err)
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

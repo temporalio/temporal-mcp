@@ -22,7 +22,7 @@ targets:
           task_queue: <string>
           [ description: <string> ]
           [ input_schema: [ <json_schema>, ... ] ]
-        # Or a JSON file with the fields above.
+        # Or a YAML file with the fields above.
         - file: <filename> ]
 
 [ codecs:
@@ -93,7 +93,7 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
   - `description` (string, optional): What the workflow does, shown to agents.
   - `input_schema` (list of JSON Schemas, optional): A [JSON Schema](https://json-schema.org/) for each of the workflow's arguments, in order, shown to agents so they can write its input. Like `description`, it is guidance for agents: the server does not check that the schemas are valid JSON Schemas, or check `start_workflow`'s input against them.
 
-  An entry can instead have only a `file` key with the path of a JSON file that holds the workflow, so that a script can write each workflow to its own file rather than into the config. The file holds one JSON object with the keys above, such as `{"type": "OrderBackfillWorkflow", "task_queue": "orders"}`. The server matches its keys ignoring case, and any other key is an error. The server reads the files at startup and checks each one like an entry in the config, and does not start if a file is missing, cannot be read or is not valid. With [`--watch-config`](#--watch-config), each reload reads the files again, but the server watches only the `--config` file, so send it SIGHUP after changing only a workflow file. Several targets can name the same file.
+  An entry can instead have only a `file` key with the path of a YAML file that holds the workflow, so that a script can write each workflow to its own file rather than into the config. The file has the keys above, and any other key is an error. JSON is valid YAML, so the file can also be JSON, such as `{"type": "OrderBackfillWorkflow", "task_queue": "orders"}`. The server reads the files at startup and checks each one like an entry in the config, and does not start if a file is missing, cannot be read or is not valid. With [`--watch-config`](#--watch-config), each reload reads the files again, but the server watches only the `--config` file, so send it SIGHUP after changing only a workflow file. Several targets can name the same file.
 
 With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
@@ -211,7 +211,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<boolean>`: A YAML boolean, `true` or `false`.
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
-- `<json_schema>`: A [JSON Schema](https://json-schema.org/) written in YAML, or in JSON in a [workflow file](#targets). In YAML, flow style such as `{type: string}` keeps it to one line. The server shows it to agents as JSON, so its numbers must be finite and its map keys strings or integers.
+- `<json_schema>`: A [JSON Schema](https://json-schema.org/) written in YAML; flow style, such as `{type: string}`, keeps it to one line. The server shows it to agents as JSON, so its numbers must be finite and its map keys strings or integers.
 - `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.

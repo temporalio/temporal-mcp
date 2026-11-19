@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -34,7 +33,7 @@ func TestParseValid(t *testing.T) {
         input_schema: [{type: object, required: [order_ids], properties: {order_ids: {type: array, items: {type: string}}}}]
       - {type: OrderWorkflow, task_queue: orders}
       - {type: OrderReportWorkflow, task_queue: reports, input_schema: [{type: string, format: date, default: 2026-01-01}]}
-      - file: testdata/workflow.json
+      - file: testdata/workflow.yaml
 codecs:
   payments:
     endpoint: http://{namespace}.codec.internal
@@ -89,10 +88,10 @@ codecs:
 				TaskQueue:   "reports",
 				InputSchema: []any{map[string]any{"type": "string", "format": "date", "default": "2026-01-01"}},
 			}, {
-				File:        "testdata/workflow.json",
+				File:        "testdata/workflow.yaml",
 				Type:        "OrderRefundWorkflow",
 				TaskQueue:   "orders",
-				InputSchema: []any{map[string]any{"type": "integer", "maximum": json.Number("9007199254740993")}},
+				InputSchema: []any{map[string]any{"type": "string", "format": "date", "default": "2026-01-01"}},
 			}},
 		}},
 		Codecs: map[string]Codec{
@@ -798,7 +797,7 @@ func TestParseInvalid(t *testing.T) {
 		{
 			name: "empty workflow file",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-empty.json}]\n",
-			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-empty.json is empty"},
+			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-empty.json: workflow file is empty"},
 		},
 		{
 			name: "missing workflow file",
@@ -808,7 +807,12 @@ func TestParseInvalid(t *testing.T) {
 		{
 			name: "workflow file with an unknown key",
 			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-unknown-key.json}]\n",
-			want: []string{`targets[0]: workflows[0]: file: testdata/workflow-unknown-key.json: json: unknown field "taskQueue"`},
+			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-unknown-key.json: yaml: unmarshal errors:\n  line 1: field taskQueue not found in type config.Workflow"},
+		},
+		{
+			name: "workflow file with a file key",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-file-key.yaml}]\n",
+			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-file-key.yaml: file: not allowed in a workflow file"},
 		},
 		{
 			name: "profile workflows that its targets do not declare",

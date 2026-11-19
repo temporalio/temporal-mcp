@@ -1,1 +1,1 @@
-{"type": "OrderRefundWorkflow", "task_queue": "orders", "input_schema": [{"type": "integer", "maximum": 9007199254740993}]}
+{"type": "OrderRefundWorkflow", "task_queue": "orders"}

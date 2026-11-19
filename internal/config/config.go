@@ -150,36 +150,32 @@ type Target struct {
 
 // Workflow is a workflow type that start_workflow may start, on its task queue.
 type Workflow struct {
-	// File, when set, is the path of the JSON file that the other fields were read from.
-	File        string `yaml:"file" json:"-"`
-	Type        string `yaml:"type" json:"type"`
-	TaskQueue   string `yaml:"task_queue" json:"task_queue"`
-	Description string `yaml:"description" json:"description"`
+	// File, when set, is the path of the YAML file that the other fields were read from.
+	File        string `yaml:"file"`
+	Type        string `yaml:"type"`
+	TaskQueue   string `yaml:"task_queue"`
+	Description string `yaml:"description"`
 	// InputSchema is a JSON Schema for each of the workflow's arguments, in order,
 	// which the server shows agents as given and does not validate as JSON Schemas.
-	InputSchema []any `yaml:"input_schema" json:"input_schema"`
+	InputSchema []any `yaml:"input_schema"`
 }
 
-// readFile sets w's other fields from the JSON object in File.
-func (w *Workflow) readFile() error {
+// readFile sets w's other fields from the workflow in File, decoded like the
+// config, and returns the nodes of its keys.
+func (w *Workflow) readFile() (workflowKeyNodes, error) {
+	var keys workflowKeyNodes
 	data, err := os.ReadFile(w.File)
 	if err != nil {
-		return err
+		return keys, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	// Keep numbers as written, since a float64 rounds integers above 2^53.
-	dec.UseNumber()
-	if err := dec.Decode(w); err != nil {
-		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("%s is empty", w.File)
-		}
-		return fmt.Errorf("%s: %w", w.File, err)
+	path := w.File
+	if err := decodeYAML("workflow file", data, w, &keys); err != nil {
+		return keys, fmt.Errorf("%s: %w", path, err)
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return fmt.Errorf("%s: must hold one JSON object", w.File)
+	if keys.File.Kind != 0 {
+		return keys, fmt.Errorf("%s: file: not allowed in a workflow file", path)
 	}
-	return nil
+	return keys, nil
 }
 
 // The values of Target.PayloadHandling.
@@ -312,15 +308,9 @@ type keyNodes struct {
 	Auth          yaml.Node `yaml:"auth"`
 	Authorization yaml.Node `yaml:"authorization"`
 	Targets       []struct {
-		APIKey    yaml.Node `yaml:"api_key"`
-		TLS       yaml.Node `yaml:"tls"`
-		Workflows []struct {
-			File        yaml.Node `yaml:"file"`
-			Type        yaml.Node `yaml:"type"`
-			TaskQueue   yaml.Node `yaml:"task_queue"`
-			Description yaml.Node `yaml:"description"`
-			InputSchema yaml.Node `yaml:"input_schema"`
-		} `yaml:"workflows"`
+		APIKey    yaml.Node          `yaml:"api_key"`
+		TLS       yaml.Node          `yaml:"tls"`
+		Workflows []workflowKeyNodes `yaml:"workflows"`
 	} `yaml:"targets"`
 	Codecs map[string]struct {
 		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
@@ -328,24 +318,22 @@ type keyNodes struct {
 	} `yaml:"codecs"`
 }
 
+// workflowKeyNodes holds the YAML nodes of a workflow's keys, in the config or in a
+// workflow file.
+type workflowKeyNodes struct {
+	File        yaml.Node `yaml:"file"`
+	Type        yaml.Node `yaml:"type"`
+	TaskQueue   yaml.Node `yaml:"task_queue"`
+	Description yaml.Node `yaml:"description"`
+	InputSchema yaml.Node `yaml:"input_schema"`
+}
+
 // decode decodes data and validates it with validate and validateTargets.
 func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("config is empty")
-		}
-		return nil, err
-	}
-	var extra yaml.Node
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("config must contain exactly one YAML document")
-	}
 	// A key with no value decodes to nil; validate it as empty rather than ignore it.
 	var keys keyNodes
-	if err := yaml.Unmarshal(data, &keys); err != nil {
+	if err := decodeYAML("config", data, &cfg, &keys); err != nil {
 		return nil, err
 	}
 	emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
@@ -370,22 +358,22 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
 		emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
 		for k, w := range t.Workflows {
+			if w.File.Kind != 0 {
+				label := fmt.Sprintf("targets[%d]: workflows[%d]: file", i, k)
+				if w.Type.Kind != 0 || w.TaskQueue.Kind != 0 || w.Description.Kind != 0 || w.InputSchema.Kind != 0 {
+					return nil, fmt.Errorf("%s: not allowed with other fields, which go in the file", label)
+				}
+				if cfg.Targets[i].Workflows[k].File == "" {
+					return nil, fmt.Errorf("%s is empty", label)
+				}
+				var err error
+				if w, err = cfg.Targets[i].Workflows[k].readFile(); err != nil {
+					return nil, fmt.Errorf("%s: %w", label, err)
+				}
+			}
 			timestampsAsWritten(&w.InputSchema)
 			if err := w.InputSchema.Decode(&cfg.Targets[i].Workflows[k].InputSchema); err != nil {
 				return nil, err
-			}
-			if w.File.Kind == 0 {
-				continue
-			}
-			label := fmt.Sprintf("targets[%d]: workflows[%d]: file", i, k)
-			if w.Type.Kind != 0 || w.TaskQueue.Kind != 0 || w.Description.Kind != 0 || w.InputSchema.Kind != 0 {
-				return nil, fmt.Errorf("%s: not allowed with other fields, which go in the file", label)
-			}
-			if cfg.Targets[i].Workflows[k].File == "" {
-				return nil, fmt.Errorf("%s is empty", label)
-			}
-			if err := cfg.Targets[i].Workflows[k].readFile(); err != nil {
-				return nil, fmt.Errorf("%s: %w", label, err)
 			}
 		}
 	}
@@ -412,6 +400,24 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// decodeYAML decodes the one YAML document in data into v, rejecting keys that v
+// has no field for, and into nodes, and calls data name in its errors.
+func decodeYAML(name string, data []byte, v, nodes any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("%s is empty", name)
+		}
+		return err
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%s must contain exactly one YAML document", name)
+	}
+	return yaml.Unmarshal(data, nodes)
 }
 
 func nonStringRuleValues(data []byte) error {

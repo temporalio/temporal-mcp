@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -54,19 +55,37 @@ func WithPlaintextCloudOpsAPI(address string) Option {
 	return func(o *options) { o.cloudOpsAddress = address }
 }
 
-// NewClients returns the clients for targets. Calls identify this server by
-// name and version in the gRPC user agent and the client-name and
-// client-version headers. The clients log to logger. It fails if a client
-// certificate cannot be loaded, if a target's address cannot be parsed, or if a
-// Cloud Ops API client cannot be created, and then closes the clients it created.
-func NewClients(targets []config.Target, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
+// NewClients returns the clients for cfg's targets. Their calls carry name in
+// the client-name header, and version followed by the modes in the
+// client-version header, such as
+// "1.4.0 (transport=https; sso=true; issuer=id.example.com; credential=api_key)",
+// where transport is mcpTransport (stdio, http or https), sso and issuer come
+// from cfg.Auth with the issuer's host escaped by escapeIssuer, and credential is
+// api_key, mtls or none. The gRPC user agent starts with name, a slash and the
+// client-version. The clients log to logger. It fails if a client certificate
+// cannot be loaded, if a target's address cannot be parsed, or if a Cloud Ops
+// API client cannot be created, and then closes the clients it created.
+func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *slog.Logger, opts ...Option) (*Clients, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
 	}
+	sso := "sso=false"
+	if cfg.Auth != nil {
+		issuer, _ := url.Parse(cfg.Auth.Issuer)
+		sso = "sso=true; issuer=" + escapeIssuer(issuer.Hostname())
+	}
 	c := &Clients{name: name, byName: map[string]client.Client{}, cloud: map[string]*cloudclient.Client{}}
 	var errs []error
-	for i, t := range targets {
+	for i, t := range cfg.Targets {
+		credentialMode := "none"
+		switch {
+		case t.APIKey != nil:
+			credentialMode = "api_key"
+		case t.TLS != nil:
+			credentialMode = "mtls"
+		}
+		clientVersion := fmt.Sprintf("%s (transport=%s; %s; credential=%s)", version, mcpTransport, sso, credentialMode)
 		cred := apiKeyCredential(t.APIKey, logger)
 		if t.TLS != nil {
 			if err := t.TLS.Check(logger); err != nil {
@@ -74,14 +93,14 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 				continue
 			}
 		}
-		cl, err := lazyClient(t, name, version, cred, o.rootCAs, logger)
+		cl, err := lazyClient(t, name, clientVersion, cred, o.rootCAs, logger)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("targets[%d]: address: %w", i, err))
 			continue
 		}
 		c.byName[t.Name] = cl
 		if cred != nil && IsCloud(t.Address) {
-			ops, err := cloudOpsClient(t, name, version, cred, o.cloudOpsAddress)
+			ops, err := cloudOpsClient(t, name, clientVersion, cred, o.cloudOpsAddress)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: %w", i, err))
 				continue
@@ -94,6 +113,22 @@ func NewClients(targets []config.Target, name, version string, logger *slog.Logg
 		return nil, err
 	}
 	return c, nil
+}
+
+// escapeIssuer percent-encodes the bytes of issuer that a gRPC header cannot
+// carry (those outside printable ASCII), the space, semicolon and parentheses
+// that delimit the client-version's fields, and %, so that the result decodes
+// back to issuer exactly.
+func escapeIssuer(issuer string) string {
+	var b strings.Builder
+	for i := 0; i < len(issuer); i++ {
+		if c := issuer[i]; c <= ' ' || c > '~' || strings.IndexByte("%;()", c) >= 0 {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // Close closes the clients' connections, which fails the calls in progress through them.
@@ -123,7 +158,7 @@ func apiKeyCredential(k *config.Secret, logger *slog.Logger) credential {
 	}
 }
 
-func lazyClient(t config.Target, name, version string, cred credential, rootCAs *x509.CertPool, logger *slog.Logger) (client.Client, error) {
+func lazyClient(t config.Target, name, clientVersion string, cred credential, rootCAs *x509.CertPool, logger *slog.Logger) (client.Client, error) {
 	opts := client.Options{
 		HostPort:  t.Address,
 		Namespace: t.Namespace,
@@ -131,8 +166,8 @@ func lazyClient(t config.Target, name, version string, cred credential, rootCAs 
 		ConnectionOptions: client.ConnectionOptions{
 			DialOptions: []grpc.DialOption{
 				grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
-				grpc.WithChainUnaryInterceptor(identify(name, version)),
-				grpc.WithUserAgent(name + "/" + version),
+				grpc.WithChainUnaryInterceptor(identify(name, clientVersion)),
+				grpc.WithUserAgent(name + "/" + clientVersion),
 			},
 		},
 	}
@@ -189,17 +224,17 @@ func IsCloud(address string) bool {
 }
 
 // cloudOpsClient returns a client for the Cloud Ops API that calls it with t's API key and the same limits and identity as t's Temporal client.
-func cloudOpsClient(t config.Target, name, version string, cred credential, cloudOpsAddress string) (*cloudclient.Client, error) {
+func cloudOpsClient(t config.Target, name, clientVersion string, cred credential, cloudOpsAddress string) (*cloudclient.Client, error) {
 	o := cloudclient.Options{
 		APIKeyReader: apiKeyReader(func(ctx context.Context) (string, error) {
 			return cred(ctx, identity.CallerFrom(ctx), &t)
 		}),
-		UserAgent: name + "/" + version,
+		UserAgent: name + "/" + clientVersion,
 		// Its retries would hide a rate limit from the agent; the tools retry only an unavailable API themselves.
 		DisableRetry: true,
 		GRPCDialOptions: []grpc.DialOption{
 			grpc.WithUnaryInterceptor(restrictToTool(t.Name, t.Namespace)),
-			grpc.WithChainUnaryInterceptor(identify(name, version)),
+			grpc.WithChainUnaryInterceptor(identify(name, clientVersion)),
 		},
 	}
 	if cloudOpsAddress != "" {
@@ -245,14 +280,14 @@ func CountCalls(ctx context.Context, n *atomic.Int64) context.Context {
 	return context.WithValue(ctx, callsKey{}, n)
 }
 
-func identify(name, version string) grpc.UnaryClientInterceptor {
+func identify(name, clientVersion string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		md, _ := metadata.FromOutgoingContext(ctx)
 		if md == nil {
 			md = metadata.MD{}
 		}
 		md.Set("client-name", name)
-		md.Set("client-version", version)
+		md.Set("client-version", clientVersion)
 		return invoker(metadata.NewOutgoingContext(ctx, md), method, req, reply, cc, opts...)
 	}
 }

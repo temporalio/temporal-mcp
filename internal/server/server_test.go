@@ -45,7 +45,7 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestReload(t *testing.T) {
 	load := func(name string) (*config.Config, *temporal.Clients) {
 		t.Helper()
 		cfg := &config.Config{Targets: []config.Target{{Name: name, Aliases: []string{"alpha"}, Description: "x", Address: ln.Addr().String(), Namespace: "default"}}}
-		clients, err := temporal.NewClients(cfg.Targets, "test", "0", logger)
+		clients, err := temporal.NewClients(cfg, "http", "test", "0", logger)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -464,7 +464,7 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

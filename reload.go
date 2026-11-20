@@ -55,7 +55,7 @@ func watchConfig(ctx context.Context, read func() ([]byte, error), data []byte, 
 // reloadConfig returns watchConfig's reload function, which parses the contents,
 // refuses a change to a restart-only field, gives s the config with new clients
 // and stores it in current, logging the outcome.
-func reloadConfig(s *server.Server, current *atomic.Pointer[config.Config], parse func([]byte) (*config.Config, error), logger *slog.Logger) func([]byte, error) {
+func reloadConfig(s *server.Server, current *atomic.Pointer[config.Config], parse func([]byte) (*config.Config, error), mcpTransport string, logger *slog.Logger) func([]byte, error) {
 	apply := func(data []byte) error {
 		prev := current.Load()
 		cfg, err := parse(data)
@@ -65,7 +65,7 @@ func reloadConfig(s *server.Server, current *atomic.Pointer[config.Config], pars
 		if err := checkRestartOnly(prev, cfg); err != nil {
 			return err
 		}
-		clients, payloads, err := openTargets(cfg, logger)
+		clients, payloads, err := openTargets(cfg, mcpTransport, logger)
 		if err != nil {
 			return err
 		}

@@ -41,7 +41,7 @@ func connect(t *testing.T, configPath string, out io.Writer, extra ...func(*tool
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Parse(data)
+	cfg, err := config.Parse(data, filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestCodecPassthroughHeaders(t *testing.T) {
 		"      - {name: x-tenant-id}\n"+
 		"      - {name: X-Codec-Authorization, send_as: Authorization}\n"+
 		"      - {name: X-Roles}\n"+
-		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL))
+		"      - {name: X-Region}\n", temporalServer.Addr().String(), codecServer.URL), "")
 	if err != nil {
 		t.Fatal(err)
 	}

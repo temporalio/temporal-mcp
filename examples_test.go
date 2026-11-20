@@ -36,7 +36,7 @@ func TestExamplesLoad(t *testing.T) {
 			if strings.HasPrefix(filepath.Base(path), "stdio") {
 				parse = config.ParseStdio
 			}
-			cfg, err := parse(data)
+			cfg, err := parse(data, filepath.Dir(path))
 			if err != nil {
 				t.Fatal(err)
 			}

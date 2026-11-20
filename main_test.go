@@ -251,9 +251,9 @@ func TestLogFiles(t *testing.T) {
 			if err := os.Chmod(errorLog, 0o640); err != nil {
 				t.Fatal(err)
 			}
-			config := fmt.Sprintf("audit_log_file: %q\nerror_log_file: %q\n"+
+			config := fmt.Sprintf("audit_log_file: audit.log\nerror_log_file: error.log\n"+
 				"targets:\n  - {name: prod, description: x, address: %q, namespace: default, payload_handling: decode, codec: c}\n"+
-				"codecs:\n  c: {endpoint: \"http://%s\"}\n", auditLog, errorLog, closedAddr, closedAddr)
+				"codecs:\n  c: {endpoint: \"http://%s\"}\n", closedAddr, closedAddr)
 			if !stdio {
 				config = "listen: 127.0.0.1:0\n" + config
 			}
@@ -969,7 +969,11 @@ func TestConfigReload(t *testing.T) {
 	logged(`msg="cannot reload the config, so the server keeps its last good config" error="targets: at least one target is required"`)
 	update("listen: 127.0.0.1:1\n" + targets("a"))
 	logged(`msg="cannot reload the config, so the server keeps its last good config" error="listen: changes take effect only when the server restarts`)
-	update("listen: 127.0.0.1:0\n" + targets("a", "b", "c"))
+	// A relative path resolves against the directory config.yaml is in, not the one its ..data symlink points to.
+	if err := os.WriteFile(filepath.Join(dir, "workflow.yaml"), []byte("{type: W, task_queue: q}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	update("listen: 127.0.0.1:0\n" + targets("a", "b") + "  - {name: c, description: x, address: \"c:7233\", namespace: default, workflows: [{file: workflow.yaml}]}\n")
 	logged(`msg="reloaded the config" added=[c] removed=[] changed=[]`)
 
 	stdioPath := filepath.Join(dir, "stdio.yaml")

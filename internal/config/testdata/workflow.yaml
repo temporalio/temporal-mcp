@@ -1,0 +1,6 @@
+type: OrderRefundWorkflow
+task_queue: orders
+input_schema:
+  - type: string
+    format: date
+    default: 2026-01-01

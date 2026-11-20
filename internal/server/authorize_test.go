@@ -104,7 +104,7 @@ authorization:
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.All, profile: all}
     - {claim_name: "https://acme.example/roles", claim_value: Temporal.NoHistory, profile: no-history}
 `, closed, idp, staging.Addr().String())
-	cfg, err := config.Parse([]byte(yaml))
+	cfg, err := config.Parse([]byte(yaml), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ authorization:
 		next, err := config.Parse([]byte(strings.NewReplacer(
 			"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}, {type: B, task_queue: q}]}",
 			"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", "dev: {tools: [start_workflow], workflows: [A], targets: [orders-prod]}",
-		).Replace(yaml)))
+		).Replace(yaml)), "")
 		if err != nil {
 			t.Fatal(err)
 		}

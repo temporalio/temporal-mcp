@@ -21,7 +21,9 @@ targets:
         - type: <string>
           task_queue: <string>
           [ description: <string> ]
-          [ input_schema: [ <json_schema>, ... ] ] ]
+          [ input_schema: [ <json_schema>, ... ] ]
+        # Or a YAML file with the fields above.
+        - file: <filename> ]
 
 [ codecs:
     <string>:
@@ -90,6 +92,8 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
   - `task_queue` (string, required): The task queue that `start_workflow` starts the workflow's runs on.
   - `description` (string, optional): What the workflow does, shown to agents.
   - `input_schema` (list of JSON Schemas, optional): A [JSON Schema](https://json-schema.org/) for each of the workflow's arguments, in order, shown to agents so they can write its input. Like `description`, it is guidance for agents: the server does not check that the schemas are valid JSON Schemas, or check `start_workflow`'s input against them.
+
+  An entry can instead have only a `file` key ([filename](#types)) with the path of a YAML file that holds the workflow, so that a script can write each workflow to its own file rather than into the config. The file has the keys above, and any other key is an error. JSON is valid YAML, so the file can also be JSON, such as `{"type": "OrderBackfillWorkflow", "task_queue": "orders"}`. The server reads the files at startup and checks each one like an entry in the config, and does not start if a file is missing, cannot be read or is not valid. With [`--watch-config`](#--watch-config), each reload reads the files again, but the server watches only the `--config` file, so send it SIGHUP after changing only a workflow file. Several targets can name the same file.
 
 With an `api_key`, the server connects to the target over TLS and sends the key with each call, and with `tls` it connects over TLS and presents the certificate. With neither, it connects in plaintext with no credentials, as for a local dev server. Over TLS, the Temporal server's own certificate must chain to a [trusted CA](#trusted-cas), as Temporal Cloud's does. A target whose `address` host ends in `.tmprl.cloud` or `.api.temporal.io` and that has an `api_key` also connects to the Temporal Cloud Ops API at `saas-api.tmprl.cloud:443` with the same key, which `list_search_attributes` and `search_workflows` use. A Temporal Cloud target with `tls` does not connect to the Cloud Ops API, which takes only API keys, so `list_search_attributes` lists only the target's system search attributes, and `search_workflows` does not check that the names in its `fields` argument are search attributes on the target.
 
@@ -183,7 +187,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs, and they can start only the workflows in the targets' `workflows`. The agent picks the directory it starts the server in, so give the `--config` path and every file path in the config as absolute paths. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs, and they can start only the workflows in the targets' `workflows`. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## `--watch-config`
 
@@ -208,7 +212,7 @@ The server checks that the certificate of everything it connects to over TLS, wh
 - `<host:port>`: A host and port, such as `127.0.0.1:8080` or `my-namespace.a1b2c.tmprl.cloud:7233`.
 - `<url>`: An absolute URL. Each field that takes one says which schemes it allows.
 - `<json_schema>`: A [JSON Schema](https://json-schema.org/) written in YAML; flow style, such as `{type: string}`, keeps it to one line. The server shows it to agents as JSON, so its numbers must be finite and its map keys strings or integers.
-- `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the directory the server is started in, not the config file's directory.
+- `<filename>`: The path of a file on the machine the server runs on. A relative path resolves against the config file's directory, not the directory the server is started in.
 - `<secret>`: Where to read a secret, never the secret itself. It is a map with exactly one of these keys, and either form is trimmed of surrounding whitespace:
   - `env` (string): The name of an environment variable holding the secret. The server reads it at startup and on every use, and does not start if it is unset or empty.
   - `file` (filename): The path of a file holding only the secret itself, such as the API key. The server reads it at startup, and does not start if the file cannot be read or is empty. It reads the file again on every use, so a rotated secret takes effect without a restart, and a use fails if the file cannot be read or is empty, with the cause in the log.

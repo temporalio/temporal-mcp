@@ -134,7 +134,10 @@ test and verify the deployment.
    `envFrom` maps, takes effect only once the pods restart, such as with
    `kubectl rollout restart deployment/temporal-mcp`. With `watchConfig`, mount
    Secrets with `volumes` and `volumeMounts` and read them with `file` secrets
-   instead, and update a Secret before the config that reads it.
+   instead, and update a Secret before the config that reads it. Changing only
+   a workflow file that the config names neither restarts the pods nor reloads
+   their config, so run `kubectl rollout restart deployment/temporal-mcp` to
+   load the new file.
 
 ## Access
 
@@ -162,13 +165,15 @@ and restarting the process, or having it reload the configuration with
 
 ## Changes
 
-The server loads its overall configuration at startup. Changes to targets,
-identity provider settings, profiles, or rules require a restart. With
+The server loads its overall configuration at startup, including the workflow
+files that targets name. Changes to targets, workflow files, identity provider
+settings, profiles, or rules require a restart. With
 [`--watch-config`](config.md#--watch-config), the server instead reloads the
-configuration when the file changes or it gets SIGHUP, so only changes to
-`listen`, `listen_tls`, the identity provider settings in `auth`,
+configuration when the config file changes or it gets SIGHUP, so only changes
+to `listen`, `listen_tls`, the identity provider settings in `auth`,
 `audit_log_file` and `error_log_file`, or a new `env` secret, require a
-restart.
+restart. The server does not watch the workflow files, so with
+`--watch-config`, send it SIGHUP after changing only a workflow file.
 
 File-backed target secrets are read on use, and TLS certificates are loaded for
 new connections, so those files can be rotated without changing the YAML. The

@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -150,12 +151,32 @@ type Target struct {
 
 // Workflow is a workflow type that start_workflow may start, on its task queue.
 type Workflow struct {
+	// File, when set, is the path of the YAML file that the other fields were read from.
+	File        string `yaml:"file"`
 	Type        string `yaml:"type"`
 	TaskQueue   string `yaml:"task_queue"`
 	Description string `yaml:"description"`
 	// InputSchema is a JSON Schema for each of the workflow's arguments, in order,
 	// which the server shows agents as given and does not validate as JSON Schemas.
 	InputSchema []any `yaml:"input_schema"`
+}
+
+// readFile sets w's other fields from the workflow in File, decoded like the
+// config, and returns the nodes of its keys.
+func (w *Workflow) readFile() (workflowKeyNodes, error) {
+	var keys workflowKeyNodes
+	data, err := os.ReadFile(w.File)
+	if err != nil {
+		return keys, err
+	}
+	path := w.File
+	if err := decodeYAML("workflow file", data, w, &keys); err != nil {
+		return keys, fmt.Errorf("%s: %w", path, err)
+	}
+	if keys.File.Kind != 0 {
+		return keys, fmt.Errorf("%s: file: not allowed in a workflow file", path)
+	}
+	return keys, nil
 }
 
 // The values of Target.PayloadHandling.
@@ -266,16 +287,17 @@ func (c *Config) CheckSecrets() error {
 }
 
 // Parse returns the validated configuration in data, the contents of a YAML
-// config file, for serving MCP over HTTP.
-func Parse(data []byte) (*Config, error) {
-	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+// config file, for serving MCP over HTTP, with its relative file paths resolved
+// against dir.
+func Parse(data []byte, dir string) (*Config, error) {
+	return decode(data, dir, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
 }
 
 // ParseStdio returns the validated configuration in data, the contents of a
 // YAML config file, for serving MCP over stdin and stdout, which must not have
-// the sections that configure HTTP.
-func ParseStdio(data []byte) (*Config, error) {
-	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
+// the sections that configure HTTP, with its relative file paths resolved against dir.
+func ParseStdio(data []byte, dir string) (*Config, error) {
+	return decode(data, dir, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
 }
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
@@ -288,11 +310,9 @@ type keyNodes struct {
 	Auth          yaml.Node `yaml:"auth"`
 	Authorization yaml.Node `yaml:"authorization"`
 	Targets       []struct {
-		APIKey    yaml.Node `yaml:"api_key"`
-		TLS       yaml.Node `yaml:"tls"`
-		Workflows []struct {
-			InputSchema yaml.Node `yaml:"input_schema"`
-		} `yaml:"workflows"`
+		APIKey    yaml.Node          `yaml:"api_key"`
+		TLS       yaml.Node          `yaml:"tls"`
+		Workflows []workflowKeyNodes `yaml:"workflows"`
 	} `yaml:"targets"`
 	Codecs map[string]struct {
 		AuthorizationHeader yaml.Node `yaml:"authorization_header"`
@@ -300,26 +320,26 @@ type keyNodes struct {
 	} `yaml:"codecs"`
 }
 
-// decode decodes data and validates it with validate and validateTargets.
-func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
+// workflowKeyNodes holds the YAML nodes of a workflow's keys, in the config or in a
+// workflow file.
+type workflowKeyNodes struct {
+	File        yaml.Node `yaml:"file"`
+	Type        yaml.Node `yaml:"type"`
+	TaskQueue   yaml.Node `yaml:"task_queue"`
+	Description yaml.Node `yaml:"description"`
+	InputSchema yaml.Node `yaml:"input_schema"`
+}
+
+// decode decodes data, resolves its relative file paths against dir, and
+// validates it with validate and validateTargets.
+func decode(data []byte, dir string, validate func(*Config, *keyNodes) error) (*Config, error) {
 	var cfg Config
-	if err := dec.Decode(&cfg); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("config is empty")
-		}
-		return nil, err
-	}
-	var extra yaml.Node
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("config must contain exactly one YAML document")
-	}
 	// A key with no value decodes to nil; validate it as empty rather than ignore it.
 	var keys keyNodes
-	if err := yaml.Unmarshal(data, &keys); err != nil {
+	if err := decodeYAML("config", data, &cfg, &keys); err != nil {
 		return nil, err
 	}
+	cfg.resolvePaths(dir)
 	emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
 	emptyIfPresent(&cfg.Auth, keys.Auth)
 	emptyIfPresent(&cfg.Authorization, keys.Authorization)
@@ -342,6 +362,19 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		emptyIfPresent(&cfg.Targets[i].APIKey, t.APIKey)
 		emptyIfPresent(&cfg.Targets[i].TLS, t.TLS)
 		for k, w := range t.Workflows {
+			if w.File.Kind != 0 {
+				label := fmt.Sprintf("targets[%d]: workflows[%d]: file", i, k)
+				if w.Type.Kind != 0 || w.TaskQueue.Kind != 0 || w.Description.Kind != 0 || w.InputSchema.Kind != 0 {
+					return nil, fmt.Errorf("%s: not allowed with other fields, which go in the file", label)
+				}
+				if cfg.Targets[i].Workflows[k].File == "" {
+					return nil, fmt.Errorf("%s is empty", label)
+				}
+				var err error
+				if w, err = cfg.Targets[i].Workflows[k].readFile(); err != nil {
+					return nil, fmt.Errorf("%s: %w", label, err)
+				}
+			}
 			timestampsAsWritten(&w.InputSchema)
 			if err := w.InputSchema.Decode(&cfg.Targets[i].Workflows[k].InputSchema); err != nil {
 				return nil, err
@@ -371,6 +404,56 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolvePaths joins dir to each relative file path in c.
+func (c *Config) resolvePaths(dir string) {
+	resolve := func(paths ...*string) {
+		for _, p := range paths {
+			if *p != "" && !filepath.IsAbs(*p) {
+				*p = filepath.Join(dir, *p)
+			}
+		}
+	}
+	resolve(&c.AuditLogFile, &c.ErrorLogFile)
+	if c.ListenTLS != nil {
+		resolve(&c.ListenTLS.CertFile, &c.ListenTLS.KeyFile)
+	}
+	for i := range c.Targets {
+		t := &c.Targets[i]
+		if t.APIKey != nil {
+			resolve(&t.APIKey.File)
+		}
+		if t.TLS != nil {
+			resolve(&t.TLS.CertFile, &t.TLS.KeyFile)
+		}
+		for k := range t.Workflows {
+			resolve(&t.Workflows[k].File)
+		}
+	}
+	for _, codec := range c.Codecs {
+		if codec.AuthorizationHeader != nil {
+			resolve(&codec.AuthorizationHeader.File)
+		}
+	}
+}
+
+// decodeYAML decodes the one YAML document in data into v, rejecting keys that v
+// has no field for, and into nodes, and calls data name in its errors.
+func decodeYAML(name string, data []byte, v, nodes any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("%s is empty", name)
+		}
+		return err
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%s must contain exactly one YAML document", name)
+	}
+	return yaml.Unmarshal(data, nodes)
 }
 
 func nonStringRuleValues(data []byte) error {
@@ -537,6 +620,9 @@ func (c *Config) validateTargets() error {
 		types := map[string]int{}
 		for k, w := range t.Workflows {
 			label := fmt.Sprintf("%s: workflows[%d]", label, k)
+			if w.File != "" {
+				label += ": file: " + w.File
+			}
 			if strings.TrimSpace(w.Type) == "" {
 				errs = append(errs, fmt.Errorf("%s: type is required", label))
 			} else if j, ok := types[w.Type]; ok {

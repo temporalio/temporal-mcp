@@ -57,8 +57,8 @@ github.com/yuin/goldmark v1.2.1/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9dec
 github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
 go.temporal.io/api v1.64.0 h1:Wu7TMdVN/4KdU+v0As6SMm86uapnM1yI7PhC5Hvhqso=
 go.temporal.io/api v1.64.0/go.mod h1:acM0I9WPuYg8W3Pd9jOZvEgi7mRUttUQ4+e7fowKVnM=
-go.temporal.io/cloud-sdk v0.21.0 h1:netTthDj6WbnTIM0l0OJw3IIQCkBVuxAgOAdwUX8ntM=
-go.temporal.io/cloud-sdk v0.21.0/go.mod h1:W2O9t9tvo3Q/LhGgYdj8JijWbN5C84os+cz/BadIHYI=
+go.temporal.io/cloud-sdk v0.23.0 h1:15uh8IEi+L8YrGux93usWqwJ/vv1N4QsuS71drikqwc=
+go.temporal.io/cloud-sdk v0.23.0/go.mod h1:W2O9t9tvo3Q/LhGgYdj8JijWbN5C84os+cz/BadIHYI=
 go.temporal.io/sdk v1.50.0 h1:voD61vs0hfxXOI+evJ/rMdExDYf+I+YLhoawhwf1LVU=
 go.temporal.io/sdk v1.50.0/go.mod h1:xP0FulN5JJSfisESUP60LlWsrKz2tLSStGjVdk8r5cc=
 go.temporal.io/server v1.32.1 h1:grI5B5cBEMRJnDzGKtsxQRQpsNPisej1B6WgVksc9EM=

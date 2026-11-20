@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -286,16 +287,17 @@ func (c *Config) CheckSecrets() error {
 }
 
 // Parse returns the validated configuration in data, the contents of a YAML
-// config file, for serving MCP over HTTP.
-func Parse(data []byte) (*Config, error) {
-	return decode(data, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
+// config file, for serving MCP over HTTP, with its relative file paths resolved
+// against dir.
+func Parse(data []byte, dir string) (*Config, error) {
+	return decode(data, dir, func(c *Config, _ *keyNodes) error { return errors.Join(c.validateHTTP(), nonStringRuleValues(data)) })
 }
 
 // ParseStdio returns the validated configuration in data, the contents of a
 // YAML config file, for serving MCP over stdin and stdout, which must not have
-// the sections that configure HTTP.
-func ParseStdio(data []byte) (*Config, error) {
-	return decode(data, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
+// the sections that configure HTTP, with its relative file paths resolved against dir.
+func ParseStdio(data []byte, dir string) (*Config, error) {
+	return decode(data, dir, func(_ *Config, k *keyNodes) error { return httpOnlyKeys(k) })
 }
 
 // keyNodes holds the YAML nodes of the keys whose presence matters, even with
@@ -328,14 +330,16 @@ type workflowKeyNodes struct {
 	InputSchema yaml.Node `yaml:"input_schema"`
 }
 
-// decode decodes data and validates it with validate and validateTargets.
-func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, error) {
+// decode decodes data, resolves its relative file paths against dir, and
+// validates it with validate and validateTargets.
+func decode(data []byte, dir string, validate func(*Config, *keyNodes) error) (*Config, error) {
 	var cfg Config
 	// A key with no value decodes to nil; validate it as empty rather than ignore it.
 	var keys keyNodes
 	if err := decodeYAML("config", data, &cfg, &keys); err != nil {
 		return nil, err
 	}
+	cfg.resolvePaths(dir)
 	emptyIfPresent(&cfg.ListenTLS, keys.ListenTLS)
 	emptyIfPresent(&cfg.Auth, keys.Auth)
 	emptyIfPresent(&cfg.Authorization, keys.Authorization)
@@ -400,6 +404,38 @@ func decode(data []byte, validate func(*Config, *keyNodes) error) (*Config, erro
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolvePaths joins dir to each relative file path in c.
+func (c *Config) resolvePaths(dir string) {
+	resolve := func(paths ...*string) {
+		for _, p := range paths {
+			if *p != "" && !filepath.IsAbs(*p) {
+				*p = filepath.Join(dir, *p)
+			}
+		}
+	}
+	resolve(&c.AuditLogFile, &c.ErrorLogFile)
+	if c.ListenTLS != nil {
+		resolve(&c.ListenTLS.CertFile, &c.ListenTLS.KeyFile)
+	}
+	for i := range c.Targets {
+		t := &c.Targets[i]
+		if t.APIKey != nil {
+			resolve(&t.APIKey.File)
+		}
+		if t.TLS != nil {
+			resolve(&t.TLS.CertFile, &t.TLS.KeyFile)
+		}
+		for k := range t.Workflows {
+			resolve(&t.Workflows[k].File)
+		}
+	}
+	for _, codec := range c.Codecs {
+		if codec.AuthorizationHeader != nil {
+			resolve(&codec.AuthorizationHeader.File)
+		}
+	}
 }
 
 // decodeYAML decodes the one YAML document in data into v, rejecting keys that v

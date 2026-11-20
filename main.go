@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -78,11 +79,15 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		defer signal.Stop(hup)
 	}
 
-	parse := config.Parse
+	dir, err := filepath.Abs(filepath.Dir(*configPath))
+	if err != nil {
+		return err
+	}
+	parse := func(data []byte) (*config.Config, error) { return config.Parse(data, dir) }
 	if *stdio {
 		// Broken client pipes must not stop calls before they are audited.
 		signal.Ignore(syscall.SIGPIPE)
-		parse = config.ParseStdio
+		parse = func(data []byte) (*config.Config, error) { return config.ParseStdio(data, dir) }
 	}
 	data, err := os.ReadFile(*configPath)
 	var cfg *config.Config

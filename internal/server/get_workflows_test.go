@@ -2573,7 +2573,7 @@ func TestToolsOnDevServer(t *testing.T) {
 			"  rules:\n"+
 			"    - {claim_name: groups, claim_value: orders, profile: orders}\n"+
 			"    - {claim_name: groups, claim_value: signals, profile: signals}\n"+
-			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer))
+			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer), "")
 		if err != nil {
 			t.Fatal(err)
 		}

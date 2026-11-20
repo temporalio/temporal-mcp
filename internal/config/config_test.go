@@ -19,9 +19,9 @@ targets:
 `
 
 func TestParseValid(t *testing.T) {
-	cfg, err := Parse([]byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n" + validTargets + `
-  - {name: staging, description: Staging., address: "staging:7233", namespace: staging, payload_handling: decode, codec: payments}
-  - {name: dev, description: Dev., address: "dev:7233", namespace: dev, codec: payments}
+	cfg, err := Parse([]byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n"+validTargets+`
+  - {name: staging, description: Staging., address: "staging:7233", namespace: staging, tls: {cert_file: staging.crt, key_file: staging.key}, payload_handling: decode, codec: payments}
+  - {name: dev, description: Dev., address: "dev:7233", namespace: dev, api_key: {file: dev.key}, codec: payments}
   - name: orders
     description: Orders.
     address: orders:7233
@@ -33,7 +33,7 @@ func TestParseValid(t *testing.T) {
         input_schema: [{type: object, required: [order_ids], properties: {order_ids: {type: array, items: {type: string}}}}]
       - {type: OrderWorkflow, task_queue: orders}
       - {type: OrderReportWorkflow, task_queue: reports, input_schema: [{type: string, format: date, default: 2026-01-01}]}
-      - file: testdata/workflow.yaml
+      - file: workflow.yaml
 codecs:
   payments:
     endpoint: http://{namespace}.codec.internal
@@ -44,12 +44,17 @@ codecs:
   secure:
     endpoint: https://codec.example.com/{namespace}
     allow_plain_http: true
-`))
+    authorization_header: {file: codec-authorization}
+listen_tls: {cert_file: tls.crt, key_file: /etc/temporal-mcp/tls.key}
+audit_log_file: audit.log
+error_log_file: error.log
+`), "testdata")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := &Config{
 		Listen:          "127.0.0.1:8080",
+		ListenTLS:       &Certificate{CertFile: "testdata/tls.crt", KeyFile: "/etc/temporal-mcp/tls.key"},
 		ShutdownTimeout: 25 * time.Second,
 		Targets: []Target{{
 			Name:        "prod",
@@ -62,6 +67,7 @@ codecs:
 			Description:     "Staging.",
 			Address:         "staging:7233",
 			Namespace:       "staging",
+			TLS:             &Certificate{CertFile: "testdata/staging.crt", KeyFile: "testdata/staging.key"},
 			PayloadHandling: PayloadDecode,
 			Codec:           "payments",
 		}, {
@@ -69,6 +75,7 @@ codecs:
 			Description: "Dev.",
 			Address:     "dev:7233",
 			Namespace:   "dev",
+			APIKey:      &Secret{File: "testdata/dev.key"},
 			Codec:       "payments",
 		}, {
 			Name:        "orders",
@@ -101,8 +108,10 @@ codecs:
 				AuthorizationHeader: &Secret{Env: "CODEC_AUTHORIZATION"},
 			},
 			"local":  {Endpoint: "http://localhost:8081/{namespace}"},
-			"secure": {Endpoint: "https://codec.example.com/{namespace}", AllowPlainHTTP: true},
+			"secure": {Endpoint: "https://codec.example.com/{namespace}", AllowPlainHTTP: true, AuthorizationHeader: &Secret{File: "testdata/codec-authorization"}},
 		},
+		AuditLogFile: "testdata/audit.log",
+		ErrorLogFile: "testdata/error.log",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Parse = %+v, want %+v", cfg, want)
@@ -120,7 +129,7 @@ authorization:
 
 func TestParseLoopbackListen(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "127.0.0.1:0"} {
-		if _, err := Parse([]byte("listen: \"" + listen + "\"\n" + validTargets)); err != nil {
+		if _, err := Parse([]byte("listen: \""+listen+"\"\n"+validTargets), ""); err != nil {
 			t.Errorf("listen %s: %v", listen, err)
 		}
 	}
@@ -129,7 +138,7 @@ func TestParseLoopbackListen(t *testing.T) {
 func TestParseTargetAddress(t *testing.T) {
 	for _, address := range []string{"localhost:1", "localhost:65535", "dns:///prod.example.tmprl.cloud:7233"} {
 		data := "listen: 127.0.0.1:8080\ntargets:\n  - {name: a, description: x, address: \"" + address + "\", namespace: a}\n"
-		if _, err := Parse([]byte(data)); err != nil {
+		if _, err := Parse([]byte(data), ""); err != nil {
 			t.Errorf("address %s: %v", address, err)
 		}
 	}
@@ -137,8 +146,8 @@ func TestParseTargetAddress(t *testing.T) {
 
 func TestParseAuth(t *testing.T) {
 	for _, u := range []string{"https://mcp.example.com/mcp", "http://LOCALHOST:8180/", "http://[::1]:8080"} {
-		data := "listen: 0.0.0.0:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json}]\nauth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
-		if _, err := Parse([]byte(data)); err != nil {
+		data := "listen: 0.0.0.0:8080\n" + validTargets + "    workflows: [{file: workflow.json}]\nauth:\n  resource: \"" + u + "\"\n  issuer: \"" + u + "\"\n  audience: a\n  required_scopes: [Temporal.Read]\n  scopes_supported: [openid, \"api://operator/Temporal.Read\"]\n  authorization_server: \"" + u + "\"\n" + validAuthorization
+		if _, err := Parse([]byte(data), "testdata"); err != nil {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
@@ -168,7 +177,7 @@ func TestParseStdio(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseStdio([]byte(tt.yaml))
+			_, err := ParseStdio([]byte(tt.yaml), "")
 			if tt.want == nil {
 				if err != nil {
 					t.Fatal(err)
@@ -194,7 +203,7 @@ func TestParseNamesDifferingOnlyByCase(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: Prod, description: x, address: a:7233, namespace: a}\n" +
 		"  - {name: prod, description: x, address: b:7233, namespace: b}\n"
-	if _, err := Parse([]byte(data)); err != nil {
+	if _, err := Parse([]byte(data), ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -203,7 +212,7 @@ func TestParseAPIKey(t *testing.T) {
 	data := "listen: 127.0.0.1:8080\ntargets:\n" +
 		"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}}\n" +
 		"  - {name: b, description: x, address: b:7233, namespace: b, api_key: {file: /keys/b}}\n"
-	cfg, err := Parse([]byte(data))
+	cfg, err := Parse([]byte(data), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +777,7 @@ func TestParseInvalid(t *testing.T) {
 				"      - {type: W, task_queue: \" \"}\n" +
 				"      - {type: X, task_queue: q, input_schema: [{type: object}, {type: object, properties: {true: {}}}, .inf]}\n" +
 				"      - {type: OrderRefundWorkflow, task_queue: q}\n" +
-				"      - file: testdata/workflow.json\n",
+				"      - file: workflow.json\n",
 			want: []string{
 				"targets[0]: workflows[0]: type is required",
 				"targets[0]: workflows[0]: task_queue is required",
@@ -781,12 +790,12 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "workflow file with another field",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json, task_queue: orders}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: workflow.json, task_queue: orders}]\n",
 			want: []string{"targets[0]: workflows[0]: file: not allowed with other fields, which go in the file"},
 		},
 		{
 			name: "workflow file with an empty type",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow.json, type: \"\"}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: workflow.json, type: \"\"}]\n",
 			want: []string{"targets[0]: workflows[0]: file: not allowed with other fields, which go in the file"},
 		},
 		{
@@ -796,22 +805,22 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			name: "empty workflow file",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-empty.json}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: workflow-empty.json}]\n",
 			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-empty.json: workflow file is empty"},
 		},
 		{
 			name: "missing workflow file",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/missing.json}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: missing.json}]\n",
 			want: []string{"targets[0]: workflows[0]: file: open testdata/missing.json: "},
 		},
 		{
 			name: "workflow file with an unknown key",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-unknown-key.json}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: workflow-unknown-key.json}]\n",
 			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-unknown-key.json: yaml: unmarshal errors:\n  line 1: field taskQueue not found in type config.Workflow"},
 		},
 		{
 			name: "workflow file with a file key",
-			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: testdata/workflow-file-key.yaml}]\n",
+			yaml: "listen: 127.0.0.1:8080\n" + validTargets + "    workflows: [{file: workflow-file-key.yaml}]\n",
 			want: []string{"targets[0]: workflows[0]: file: testdata/workflow-file-key.yaml: file: not allowed in a workflow file"},
 		},
 		{
@@ -843,7 +852,7 @@ func TestParseInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse([]byte(tt.yaml))
+			_, err := Parse([]byte(tt.yaml), "testdata")
 			if err == nil {
 				t.Fatal("want an error")
 			}

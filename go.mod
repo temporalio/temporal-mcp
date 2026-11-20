@@ -11,7 +11,7 @@ require (
 	go.temporal.io/api v1.64.0
 	go.temporal.io/cloud-sdk v0.23.0
 	go.temporal.io/sdk v1.50.0
-	go.temporal.io/server v1.32.1
+	go.temporal.io/server v1.32.2
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/net v0.62.0
 	google.golang.org/grpc v1.85.0

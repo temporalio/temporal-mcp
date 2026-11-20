@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -57,9 +58,9 @@ func WithPlaintextCloudOpsAPI(address string) Option {
 // NewClients returns the clients for cfg's targets. Their calls carry name in
 // the client-name header, and version followed by the modes in the
 // client-version header, such as
-// "1.4.0 (transport=https; sso=true; issuer=https://id.example.com/; credential=api_key)",
+// "1.4.0 (transport=https; sso=true; issuer=id.example.com; credential=api_key)",
 // where transport is mcpTransport (stdio, http or https), sso and issuer come
-// from cfg.Auth with the issuer escaped by escapeIssuer, and credential is
+// from cfg.Auth with the issuer's host escaped by escapeIssuer, and credential is
 // api_key, mtls or none. The gRPC user agent starts with name, a slash and the
 // client-version. The clients log to logger. It fails if a client certificate
 // cannot be loaded, if a target's address cannot be parsed, or if a Cloud Ops
@@ -71,7 +72,8 @@ func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *
 	}
 	sso := "sso=false"
 	if cfg.Auth != nil {
-		sso = "sso=true; issuer=" + escapeIssuer(cfg.Auth.Issuer)
+		issuer, _ := url.Parse(cfg.Auth.Issuer)
+		sso = "sso=true; issuer=" + escapeIssuer(issuer.Hostname())
 	}
 	c := &Clients{name: name, byName: map[string]client.Client{}, cloud: map[string]*cloudclient.Client{}}
 	var errs []error

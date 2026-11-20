@@ -214,8 +214,8 @@ func TestClientIdentityHeaders(t *testing.T) {
 			"1.2.3 (transport=stdio; sso=false; credential=none)"},
 		{"http with an API key", "http", config.Config{Targets: []config.Target{{Name: "a", Address: "orders.acct1.tmprl.cloud:7233", Namespace: "orders.acct1", APIKey: &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}}}},
 			"1.2.3 (transport=http; sso=false; credential=api_key)"},
-		{"https with auth, an issuer to escape and a client certificate", "https", config.Config{Auth: &config.Auth{Issuer: "https://id.example.com/(a b;é%)/"}, Targets: []config.Target{{Name: "a", Address: secure, Namespace: "default", TLS: cert}}},
-			"1.2.3 (transport=https; sso=true; issuer=https://id.example.com/%28a%20b%3B%C3%A9%25%29/; credential=mtls)"},
+		{"https with auth, an issuer to escape and a client certificate", "https", config.Config{Auth: &config.Auth{Issuer: "https://ïd.example.com:8443/tenant-1/v2.0"}, Targets: []config.Target{{Name: "a", Address: secure, Namespace: "default", TLS: cert}}},
+			"1.2.3 (transport=https; sso=true; issuer=%C3%AFd.example.com; credential=mtls)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

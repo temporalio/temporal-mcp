@@ -5,6 +5,7 @@
 package temporal
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -45,7 +46,7 @@ type options struct {
 	cloudOpsAddress string
 }
 
-// WithRootCAs makes the clients trust only the CAs in pool, rather than the system's, when they connect to targets with a client certificate.
+// WithRootCAs makes the clients trust only the CAs in pool, rather than the system's, when they connect to targets over TLS.
 func WithRootCAs(pool *x509.CertPool) Option {
 	return func(o *options) { o.rootCAs = pool }
 }
@@ -99,7 +100,7 @@ func NewClients(cfg *config.Config, mcpTransport, name, version string, logger *
 			continue
 		}
 		c.byName[t.Name] = cl
-		if cred != nil && IsCloud(t.Address) {
+		if cred != nil && IsCloud(&t) {
 			ops, err := cloudOpsClient(t, name, clientVersion, cred, o.cloudOpsAddress)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("targets[%d]: %w", i, err))
@@ -171,14 +172,17 @@ func lazyClient(t config.Target, name, clientVersion string, cred credential, ro
 			},
 		},
 	}
+	if cred != nil || t.TLS != nil {
+		opts.ConnectionOptions.TLS = &tls.Config{RootCAs: rootCAs, ServerName: t.TLSServerName}
+	}
 	if t.TLS != nil {
-		opts.ConnectionOptions.TLS = &tls.Config{RootCAs: rootCAs, GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		opts.ConnectionOptions.TLS.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			cert, err := t.TLS.Load()
 			if err != nil {
 				logger.Error("cannot load client certificate", "target", t.Name, "error", err.Error())
 			}
 			return cert, err
-		}}
+		}
 	}
 	if cred != nil {
 		opts.Credentials = client.NewAPIKeyDynamicCredentials(func(ctx context.Context) (string, error) {
@@ -212,9 +216,10 @@ func (c *Clients) CloudOps(name string) cloudservice.CloudServiceClient {
 	return ops.CloudService()
 }
 
-// IsCloud reports whether address is a Temporal Cloud namespace or regional endpoint.
-func IsCloud(address string) bool {
-	address = strings.TrimPrefix(address, "dns:///")
+// IsCloud reports whether t's TLS server name, or the host of its address when
+// it has none, is a Temporal Cloud namespace or regional endpoint.
+func IsCloud(t *config.Target) bool {
+	address := cmp.Or(t.TLSServerName, strings.TrimPrefix(t.Address, "dns:///"))
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address

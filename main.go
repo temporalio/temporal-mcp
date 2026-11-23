@@ -112,7 +112,14 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		return fmt.Errorf("invalid config %s: error_log_file: %w", *configPath, err)
 	}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	clients, payloads, err := openTargets(cfg, logger)
+	mcpTransport := "http"
+	switch {
+	case *stdio:
+		mcpTransport = "stdio"
+	case cfg.ListenTLS != nil:
+		mcpTransport = "https"
+	}
+	clients, payloads, err := openTargets(cfg, mcpTransport, logger)
 	if err != nil {
 		return fmt.Errorf("invalid config %s: %w", *configPath, err)
 	}
@@ -134,7 +141,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		ticker := time.NewTicker(configPollInterval)
 		defer ticker.Stop()
 		read := func() ([]byte, error) { return os.ReadFile(*configPath) }
-		go watchConfig(signals, read, data, ticker.C, hup, reloadConfig(s, &current, parse, logger))
+		go watchConfig(signals, read, data, ticker.C, hup, reloadConfig(s, &current, parse, mcpTransport, logger))
 	}
 	timeout := func() time.Duration { return cmp.Or(current.Load().ShutdownTimeout, config.DefaultShutdownTimeout) }
 	if *stdio {
@@ -185,7 +192,6 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	srv.RegisterOnShutdown(func() {
 		unused.Range(func(c, _ any) bool { c.(net.Conn).Close(); return true })
 	})
-	scheme := "http"
 	if cfg.ListenTLS != nil {
 		if err := cfg.ListenTLS.Check(logger); err != nil {
 			return fmt.Errorf("invalid config %s: listen_tls: %w", *configPath, err)
@@ -197,14 +203,13 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 			}
 			return cert, err
 		}}
-		scheme = "https"
 	}
 
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, scheme, ln.Addr())
+	fmt.Fprintf(stderr, "%s: listening on %s://%s/mcp\n", name, mcpTransport, ln.Addr())
 
 	served := make(chan error, 1)
 	go func() {
@@ -246,10 +251,10 @@ func shutdown(drain func(context.Context) error, timeout time.Duration, cancelCa
 
 // openTargets checks cfg's secrets and returns the clients and the payload
 // renderer for its targets.
-func openTargets(cfg *config.Config, logger *slog.Logger) (*temporal.Clients, *payload.Renderer, error) {
+func openTargets(cfg *config.Config, mcpTransport string, logger *slog.Logger) (*temporal.Clients, *payload.Renderer, error) {
 	// Reported with NewClients' errors, so that a bad secret doesn't hide them.
 	secretsErr := cfg.CheckSecrets()
-	clients, err := temporal.NewClients(cfg.Targets, name, version, logger)
+	clients, err := temporal.NewClients(cfg, mcpTransport, name, version, logger)
 	if err != nil {
 		return nil, nil, errors.Join(secretsErr, err)
 	}

@@ -64,7 +64,7 @@ func TestAudit(t *testing.T) {
 		{Name: "ungranted", Aliases: []string{"u"}, Description: "x", Address: closed, Namespace: "b"},
 		{Name: "hanging", Description: "x", Address: hanging.Addr().String(), Namespace: "c"},
 	}
-	clients, err := temporal.NewClients(targets, "test", "0", slog.New(slog.DiscardHandler))
+	clients, err := temporal.NewClients(&config.Config{Targets: targets}, "http", "test", "0", slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

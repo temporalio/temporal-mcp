@@ -52,7 +52,7 @@ func TestSearchWorkflowsPageTokenSize(t *testing.T) {
 			ln := listen(t)
 			serve(t, ln, fake)
 			cfg := &config.Config{Targets: []config.Target{{Name: "a", Description: "x", Address: ln.Addr().String(), Namespace: "default"}}}
-			clients, err := temporal.NewClients(cfg.Targets, "test", "0", slog.New(slog.DiscardHandler))
+			clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}

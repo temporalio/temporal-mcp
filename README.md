@@ -39,16 +39,18 @@ temporal server start-dev
 Add `temporal-mcp` to your agent with `--stdio` and the absolute path of your config, since the agent starts the server from its own working directory. For Claude Code, with `--scope user` so the server is available to you in every project, instead of only in the current directory:
 
 ```sh
-claude mcp add --scope user temporal -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
+claude mcp add --scope user temporal -- temporal-mcp --stdio --watch-config --config /absolute/path/to/config.yaml
 ```
 
 For Codex:
 
 ```sh
-codex mcp add temporal -- temporal-mcp --stdio --config /absolute/path/to/config.yaml
+codex mcp add temporal -- temporal-mcp --stdio --watch-config --config /absolute/path/to/config.yaml
 ```
 
 Other agents take the same command, arguments and environment variables in their own config format.
+
+[`--watch-config`](docs/config.md#--watch-config) has the server reload the config whenever you save it, so most changes take effect without restarting your agent.
 
 ### Check
 
@@ -68,7 +70,7 @@ A self-hosted cluster needs Temporal Server 1.28 or later. Older versions are no
 
 For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first.
 
-The server reads its config when it starts, so restart your agent after you change the config, or add [`--watch-config`](docs/config.md#--watch-config) to the command to have the server reload the config when it changes. Then ask the agent to check its connection to each new target.
+With `--watch-config`, a change takes effect a few seconds after you save the config, and if the new config is invalid, the server logs why and keeps the last good one. [docs/config.md](docs/config.md#--watch-config) lists the config changes that still require a restart. Then ask the agent to check its connection to each new target.
 
 ## Run a centrally hosted server
 

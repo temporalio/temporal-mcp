@@ -1,5 +1,5 @@
-// Package fixture provides the seeded Temporal workflows that tests run
-// against a dev server.
+// Package fixture provides the dev server and the seeded Temporal workflows
+// that tests run against it.
 package fixture
 
 import (

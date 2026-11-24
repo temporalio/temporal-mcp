@@ -478,7 +478,7 @@ func TestToolsOnDevServer(t *testing.T) {
 		}
 		return p
 	}
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{ClientOptions: encoded, ExtraArgs: []string{
+	dev, err := fixture.StartDevServer(ctx, testsuite.DevServerOptions{ClientOptions: encoded, ExtraArgs: []string{
 		"--search-attribute", "OrderId=Keyword",
 		"--search-attribute", "SaInt=Int",
 		"--search-attribute", "SaDouble=Double",

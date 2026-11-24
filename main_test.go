@@ -34,6 +34,8 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/testsuite"
 	"google.golang.org/grpc"
+
+	"github.com/temporalio/temporal-mcp/internal/fixture"
 )
 
 func buildBinary(t *testing.T, buildArgs ...string) string {
@@ -303,7 +305,7 @@ func TestLogFiles(t *testing.T) {
 func TestStdio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	dev, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{})
+	dev, err := fixture.StartDevServer(ctx, testsuite.DevServerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

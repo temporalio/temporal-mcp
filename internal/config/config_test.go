@@ -20,8 +20,8 @@ targets:
 
 func TestParseValid(t *testing.T) {
 	cfg, err := Parse([]byte("listen: 127.0.0.1:8080\nshutdown_timeout: 25s\n"+validTargets+`
-  - {name: staging, description: Staging., address: "staging:7233", namespace: staging, tls: {cert_file: staging.crt, key_file: staging.key}, payload_handling: decode, codec: payments}
-  - {name: dev, description: Dev., address: "dev:7233", namespace: dev, api_key: {file: dev.key}, codec: payments}
+  - {name: staging, description: Staging., address: "staging:7233", tls_server_name: staging.example.com, namespace: staging, tls: {cert_file: staging.crt, key_file: staging.key}, payload_handling: decode, codec: payments}
+  - {name: dev, description: Dev., address: "dev:7233", tls_server_name: dev.example.com, namespace: dev, api_key: {file: dev.key}, codec: payments}
   - name: orders
     description: Orders.
     address: orders:7233
@@ -66,17 +66,19 @@ error_log_file: error.log
 			Name:            "staging",
 			Description:     "Staging.",
 			Address:         "staging:7233",
+			TLSServerName:   "staging.example.com",
 			Namespace:       "staging",
 			TLS:             &Certificate{CertFile: "testdata/staging.crt", KeyFile: "testdata/staging.key"},
 			PayloadHandling: PayloadDecode,
 			Codec:           "payments",
 		}, {
-			Name:        "dev",
-			Description: "Dev.",
-			Address:     "dev:7233",
-			Namespace:   "dev",
-			APIKey:      &Secret{File: "testdata/dev.key"},
-			Codec:       "payments",
+			Name:          "dev",
+			Description:   "Dev.",
+			Address:       "dev:7233",
+			TLSServerName: "dev.example.com",
+			Namespace:     "dev",
+			APIKey:        &Secret{File: "testdata/dev.key"},
+			Codec:         "payments",
 		}, {
 			Name:        "orders",
 			Description: "Orders.",
@@ -543,6 +545,18 @@ func TestParseInvalid(t *testing.T) {
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, namespace: a, api_key: {env: A_KEY}, tls: {cert_file: /certs/a.crt, key_file: /certs/a.key}}\n",
 			want: []string{"targets[0]: at most one of api_key or tls is allowed"},
+		},
+		{
+			name: "tls_server_name without api_key or tls, with a port, or with surrounding whitespace",
+			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
+				"  - {name: a, description: x, address: a:7233, tls_server_name: a.example.com, namespace: a}\n" +
+				"  - {name: b, description: x, address: b:7233, tls_server_name: \"b.example.com:443\", namespace: b, api_key: {env: B_KEY}}\n" +
+				"  - {name: c, description: x, address: c:7233, tls_server_name: \"c.example.com \", namespace: c, api_key: {env: C_KEY}}\n",
+			want: []string{
+				"targets[0]: tls_server_name: not allowed without api_key or tls, since with neither the server connects in plaintext",
+				`targets[1]: tls_server_name: "b.example.com:443" must be a host name without a port`,
+				`targets[2]: tls_server_name: "c.example.com " must not start or end with whitespace`,
+			},
 		},
 		{
 			name: "inline api key",

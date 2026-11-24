@@ -84,8 +84,17 @@ func TestNewClientsRejectsUnparseableAddress(t *testing.T) {
 }
 
 func TestIsCloud(t *testing.T) {
-	if !IsCloud("dns:///orders.acct1.tmprl.cloud:7233") {
-		t.Error(`IsCloud("dns:///orders.acct1.tmprl.cloud:7233") = false, want true`)
+	for _, tt := range []struct {
+		target config.Target
+		want   bool
+	}{
+		{config.Target{Address: "dns:///orders.acct1.tmprl.cloud:7233"}, true},
+		{config.Target{Address: "vpce-0a1b2c.vpce-svc-3d4e5f.us-east-1.vpce.amazonaws.com:7233", TLSServerName: "orders.acct1.tmprl.cloud"}, true},
+		{config.Target{Address: "orders.acct1.tmprl.cloud:7233", TLSServerName: "temporal.example.com"}, false},
+	} {
+		if got := IsCloud(&tt.target); got != tt.want {
+			t.Errorf("IsCloud of address %q and TLS server name %q = %v, want %v", tt.target.Address, tt.target.TLSServerName, got, tt.want)
+		}
 	}
 }
 
@@ -171,16 +180,19 @@ func newClient(t *testing.T, target config.Target) client.Client {
 	return c
 }
 
-func TestClientIdentityHeaders(t *testing.T) {
-	const apiKey = "test-api-key-value"
-	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", apiKey)
-	dir := t.TempDir()
+func newCertificate(t *testing.T, dir, host string) (*config.Certificate, *tls.Certificate, *x509.CertPool) {
+	t.Helper()
 	cert := &config.Certificate{CertFile: filepath.Join(dir, "tls.crt"), KeyFile: filepath.Join(dir, "tls.key")}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}, NotAfter: time.Now().Add(time.Hour)}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	if ip := net.ParseIP(host); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{host}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +212,14 @@ func TestClientIdentityHeaders(t *testing.T) {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(pair.Leaf)
+	return cert, pair, roots
+}
+
+func TestClientIdentityHeaders(t *testing.T) {
+	const apiKey = "test-api-key-value"
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", apiKey)
+	dir := t.TempDir()
+	cert, pair, roots := newCertificate(t, dir, "127.0.0.1")
 
 	calls := make(chan call, 10)
 	plain := serve(t, calls)
@@ -274,6 +294,51 @@ func TestClientIdentityHeaders(t *testing.T) {
 			slices.Sort(methods)
 			if !slices.Equal(methods, wantMethods) {
 				t.Errorf("methods = %v, want %v", methods, wantMethods)
+			}
+		})
+	}
+}
+
+func TestTLSServerName(t *testing.T) {
+	t.Setenv("TEMPORAL_MCP_TEST_API_KEY", "key")
+	cert, pair, roots := newCertificate(t, t.TempDir(), "orders.acct1.tmprl.cloud")
+	address := serve(t, make(chan call, 10), grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{*pair}})))
+	apiKey := &config.Secret{Env: "TEMPORAL_MCP_TEST_API_KEY"}
+	tests := []struct {
+		name       string
+		apiKey     *config.Secret
+		cert       *config.Certificate
+		serverName string
+		cloudOps   bool
+		wantErr    string
+	}{
+		{"API key and the certificate's name", apiKey, nil, "orders.acct1.tmprl.cloud", true, ""},
+		{"API key and no server name", apiKey, nil, "", false, "x509: cannot validate certificate for 127.0.0.1"},
+		{"API key and a name the certificate does not name", apiKey, nil, "other.example.com", false, "x509: certificate is valid for orders.acct1.tmprl.cloud, not other.example.com"},
+		{"client certificate and the certificate's name", nil, cert, "orders.acct1.tmprl.cloud", false, ""},
+		{"client certificate and no server name", nil, cert, "", false, "x509: cannot validate certificate for 127.0.0.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := config.Target{Name: "a", Address: address, TLSServerName: tt.serverName, Namespace: "orders.acct1", APIKey: tt.apiKey, TLS: tt.cert}
+			clients, err := NewClients(&config.Config{Targets: []config.Target{target}}, "http", "temporal-mcp", "1.2.3", slog.New(slog.DiscardHandler), WithRootCAs(roots))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(clients.Close)
+			if got := clients.CloudOps("a") != nil; got != tt.cloudOps {
+				t.Errorf("has a Cloud Ops API client = %v, want %v", got, tt.cloudOps)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			ctx = WithTool(ctx, "t", []string{workflowservice.WorkflowService_GetSystemInfo_FullMethodName}, []string{"a"})
+			_, err = clients.Client("a").WorkflowService().GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("GetSystemInfo = %v, want success", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("GetSystemInfo = %v, want an error containing %q", err, tt.wantErr)
 			}
 		})
 	}

@@ -131,7 +131,12 @@ type Target struct {
 	Aliases     []string `yaml:"aliases"`
 	Description string   `yaml:"description"`
 	Address     string   `yaml:"address"`
-	Namespace   string   `yaml:"namespace"`
+	// TLSServerName, when set, replaces Address's host as the name the server
+	// asks for in the TLS handshake and checks the target's certificate against,
+	// for an Address whose host the certificate does not name, such as a private
+	// endpoint. It requires APIKey or TLS.
+	TLSServerName string `yaml:"tls_server_name"`
+	Namespace     string `yaml:"namespace"`
 	// APIKey says where to read the target's API key.
 	APIKey *Secret `yaml:"api_key"`
 	// TLS is the client certificate the server presents to the target instead of
@@ -605,6 +610,15 @@ func (c *Config) validateTargets() error {
 		}
 		if t.APIKey != nil && t.TLS != nil {
 			errs = append(errs, fmt.Errorf("%s: at most one of api_key or tls is allowed", label))
+		}
+		if t.TLSServerName != "" && t.APIKey == nil && t.TLS == nil {
+			errs = append(errs, fmt.Errorf("%s: tls_server_name: not allowed without api_key or tls, since with neither the server connects in plaintext", label))
+		}
+		if strings.TrimSpace(t.TLSServerName) != t.TLSServerName {
+			errs = append(errs, fmt.Errorf("%s: tls_server_name: %q must not start or end with whitespace", label, t.TLSServerName))
+		}
+		if _, _, err := net.SplitHostPort(t.TLSServerName); err == nil {
+			errs = append(errs, fmt.Errorf("%s: tls_server_name: %q must be a host name without a port", label, t.TLSServerName))
 		}
 		switch t.PayloadHandling {
 		case "", PayloadOmit, PayloadPassthrough, PayloadDecode:

@@ -614,8 +614,8 @@ func (c *Config) validateTargets() error {
 		if t.TLSServerName != "" && t.APIKey == nil && t.TLS == nil {
 			errs = append(errs, fmt.Errorf("%s: tls_server_name: not allowed without api_key or tls, since with neither the server connects in plaintext", label))
 		}
-		if t.TLSServerName != "" && strings.TrimSpace(t.TLSServerName) == "" {
-			errs = append(errs, fmt.Errorf("%s: tls_server_name is empty; leave it out to use the address host", label))
+		if strings.TrimSpace(t.TLSServerName) != t.TLSServerName {
+			errs = append(errs, fmt.Errorf("%s: tls_server_name: %q must not start or end with whitespace", label, t.TLSServerName))
 		}
 		if _, _, err := net.SplitHostPort(t.TLSServerName); err == nil {
 			errs = append(errs, fmt.Errorf("%s: tls_server_name: %q must be a host name without a port", label, t.TLSServerName))

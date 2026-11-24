@@ -547,15 +547,15 @@ func TestParseInvalid(t *testing.T) {
 			want: []string{"targets[0]: at most one of api_key or tls is allowed"},
 		},
 		{
-			name: "tls_server_name without api_key or tls, with a port, or blank",
+			name: "tls_server_name without api_key or tls, with a port, or with surrounding whitespace",
 			yaml: "listen: 127.0.0.1:8080\ntargets:\n" +
 				"  - {name: a, description: x, address: a:7233, tls_server_name: a.example.com, namespace: a}\n" +
 				"  - {name: b, description: x, address: b:7233, tls_server_name: \"b.example.com:443\", namespace: b, api_key: {env: B_KEY}}\n" +
-				"  - {name: c, description: x, address: c:7233, tls_server_name: \" \", namespace: c, api_key: {env: C_KEY}}\n",
+				"  - {name: c, description: x, address: c:7233, tls_server_name: \"c.example.com \", namespace: c, api_key: {env: C_KEY}}\n",
 			want: []string{
 				"targets[0]: tls_server_name: not allowed without api_key or tls, since with neither the server connects in plaintext",
 				`targets[1]: tls_server_name: "b.example.com:443" must be a host name without a port`,
-				"targets[2]: tls_server_name is empty; leave it out to use the address host",
+				`targets[2]: tls_server_name: "c.example.com " must not start or end with whitespace`,
 			},
 		},
 		{

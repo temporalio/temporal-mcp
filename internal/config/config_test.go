@@ -742,6 +742,7 @@ func TestParseInvalid(t *testing.T) {
       tools_deny:
       targets: [prod]
     empty-deny: {tools_deny: [], targets: [prod]}
+    writes: {allow_writes: true, targets: [prod]}
   rules:
     - {claim_name: groups, profile: empty}
     - {claim_name: " ", claim_value: a, profile: empty}
@@ -760,6 +761,7 @@ func TestParseInvalid(t *testing.T) {
 				`authorization: profiles: "empty-tools": tools: at least one tool is required`,
 				`authorization: profiles: "blank-deny": tools_deny: at least one tool is required`,
 				`authorization: profiles: "empty-deny": tools_deny: at least one tool is required`,
+				`authorization: profiles: "writes": allow_writes: not allowed without allow_writes at the top level`,
 				"authorization: rules[0]: claim_value is required",
 				"authorization: rules[1]: claim_name is required",
 				`authorization: rules[2]: profile "missing" is not one of authorization: profiles`,

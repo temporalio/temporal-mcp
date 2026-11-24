@@ -642,6 +642,7 @@ func TestToolsOnDevServer(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\n"+
+		"allow_writes: true\n"+
 		"codecs:\n"+
 		"  test: {endpoint: %[1]q, authorization_header: {file: %[2]q}}\n"+
 		"  unauthorized: {endpoint: %[1]q}\n"+
@@ -2561,14 +2562,15 @@ func TestToolsOnDevServer(t *testing.T) {
 	t.Run("workflows by profile", func(t *testing.T) {
 		issuer, sign := newTestIssuer(t)
 		authCfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
+			"allow_writes: true\n"+
 			"targets:\n"+
 			"  - {name: orders, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-orders-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-orders-waitForSignal}]}\n"+
 			"  - {name: signals, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-signals-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-signals-waitForSignal}]}\n"+
 			"auth: {resource: https://mcp.example.com/mcp, issuer: %[2]q, audience: operator, required_scopes: [temporal.read]}\n"+
 			"authorization:\n"+
 			"  profiles:\n"+
-			"    orders: {tools: [start_workflow], workflows: [OrderWorkflow], targets: [orders]}\n"+
-			"    signals: {tools: [start_workflow], workflows: [waitForSignal], targets: [orders, signals]}\n"+
+			"    orders: {tools: [start_workflow], workflows: [OrderWorkflow], targets: [orders], allow_writes: true}\n"+
+			"    signals: {tools: [start_workflow], workflows: [waitForSignal], targets: [orders, signals], allow_writes: true}\n"+
 			"    readers: {targets: [orders, signals]}\n"+
 			"  rules:\n"+
 			"    - {claim_name: groups, claim_value: orders, profile: orders}\n"+

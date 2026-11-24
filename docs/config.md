@@ -39,6 +39,8 @@ targets:
 [ error_log_file: <filename> ]
 [ shutdown_timeout: <duration> | default = 8s ]
 
+[ allow_writes: <boolean> | default = false ]
+
 # HTTP mode only.
 listen: <host:port>
 
@@ -64,6 +66,7 @@ listen: <host:port>
         [ tools_deny: [ <string>, ... ] ]
         targets: [ <string>, ... ]
         [ workflows: [ <string>, ... ] ]
+        [ allow_writes: <boolean> | default = false ]
     rules:
       - claim_name: <string>
         claim_value: <string>
@@ -87,7 +90,7 @@ Required in both modes, with at least one entry. Each target is one Temporal nam
   - `key_file` (filename, required): Path of the certificate's PEM private key.
 - `payload_handling` (string, default `omit`): How tool responses show the target's payloads, one of `omit`, `passthrough` or `decode`, described under [Payloads and `codecs`](#payloads-and-codecs).
 - `codec` (string, required with `payload_handling: decode`): The name of the target's codec server in `codecs`. When set, it must be a key of `codecs`. With `payload_handling: decode` it decodes the target's payloads, and with any `payload_handling` it encodes the input of the runs that `start_workflow` starts. A target whose payloads are encrypted needs a `codec` even without `payload_handling: decode`, or that input is stored unencrypted.
-- `workflows` (list, optional): The workflows that agents may start on the target with `start_workflow`, which starts no others. Without `auth`, agents may start every one, and with it, only those that the caller's [profiles](#authorization) give. The `list_startable_workflows` tool shows agents the ones they may start.
+- `workflows` (list, optional): The workflows that agents may start on the target with `start_workflow` when [`allow_writes`](#allow_writes) is `true`, and `start_workflow` starts no others. Without `auth`, agents may start every one, and with it, only those that the caller's [profiles](#authorization) give. The `list_startable_workflows` tool shows agents the ones they may start.
   - `type` (string, required): The workflow type, such as `OrderBackfillWorkflow`. Types must be unique within the target and are compared exactly.
   - `task_queue` (string, required): The task queue that `start_workflow` starts the workflow's runs on.
   - `description` (string, optional): What the workflow does, shown to agents.
@@ -137,7 +140,7 @@ The server creates each file with mode 0600 if it does not exist, and does not s
 
 These say where and how the server serves MCP in HTTP mode, and are not allowed in `--stdio` mode.
 
-- `listen` (host:port, required in HTTP mode): The address the server binds to. MCP is served at the path `/mcp`. Without an `auth` section, the host must be a loopback IP address such as `127.0.0.1` or `::1`, because without auth anyone who can reach the port can use every tool on every target; a hostname such as `localhost`, an empty host such as `:8080`, and `0.0.0.0` are rejected. Requests must then also name a loopback host (`localhost`, `127.0.0.1` or `::1`) in their `Host` header, or they get a 403. With `auth`, any `host:port` is allowed, including `0.0.0.0:8443` or `:8443`.
+- `listen` (host:port, required in HTTP mode): The address the server binds to. MCP is served at the path `/mcp`. Without an `auth` section, the host must be a loopback IP address such as `127.0.0.1` or `::1`, because without auth anyone who can reach the port can use every tool the server offers on every target; a hostname such as `localhost`, an empty host such as `:8080`, and `0.0.0.0` are rejected. Requests must then also name a loopback host (`localhost`, `127.0.0.1` or `::1`) in their `Host` header, or they get a 403. With `auth`, any `host:port` is allowed, including `0.0.0.0:8443` or `:8443`.
 - `listen_tls` (optional): With this section, the server serves HTTPS on `listen`. Without it, the server serves plain HTTP, for running behind a reverse proxy or load balancer that terminates TLS. `listen_tls:` with no value is an error.
   - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
   - `key_file` (filename, required): Path of the certificate's PEM private key.
@@ -147,6 +150,14 @@ The server does not start if it cannot load the certificate and key, and starts 
 ## `shutdown_timeout`
 
 Optional in both modes, default `8s`; zero uses the default and negative values are rejected. After SIGINT or SIGTERM, or stdin closing in `--stdio` mode, the server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. See [Shutdown](../README.md#shutdown).
+
+## `allow_writes`
+
+Optional in both modes, default `false`. Unless it is `true`, the server is read-only. Agents do not see the tools that write, such as `start_workflow`, and a call to one gets the same error as a call to a tool that does not exist. `list_startable_workflows` comes with `start_workflow`, so the same goes for it.
+
+With `allow_writes: true` and no `auth`, every caller may use the tools that write. With `auth`, a caller may use one only through a [profile](#authorization) that lists it in `tools` and has its own `allow_writes: true`.
+
+To turn writes off on a server with `auth`, make all of these changes in one edit. Set the top-level `allow_writes` to `false`, remove each profile's `allow_writes` and `workflows`, and take the tools that write out of its `tools`. Delete each profile whose `tools` this leaves empty, and the rules that name it. Deleting only its `tools` key instead leaves a valid config that a reload accepts, but the profile then gives every read-only tool. If no rule is left, stop the server instead, since a config with `auth` needs at least one. With the top-level flag `false`, a config is invalid if a profile still has `allow_writes`, `workflows`, a tool that writes or an empty `tools`, or if a rule names a deleted profile. A [`--watch-config`](#--watch-config) reload of such a config is refused and leaves the server writing, and a restart with it fails.
 
 ## `auth`
 
@@ -169,13 +180,14 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target, and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target except those that need [`allow_writes: true`](#allow_writes). With `allow_writes: true`, every caller may use them as well, and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Every tool is read-only except `start_workflow`, which a profile gives only when its `tools` lists it, and which brings `list_startable_workflows` with it; no other profile gives that tool. Without `tools`, a profile gives every other read-only tool not in `tools_deny`, including those that later versions of the server add, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_workflow_history_summary`, `get_task_queues`, `search_workflows`, `count_workflows`, `list_search_attributes` and `start_workflow`. Any other name is an error.
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
   - `workflows` (list of strings, required with `start_workflow`): The workflow types the profile lets a caller start, each on every one of its `targets` that has that type in its `workflows`. It is not allowed without `start_workflow`, and each type must be in the `workflows` of at least one of the profile's `targets`.
+  - `allow_writes` (boolean, default `false`): Lets the profile's `tools` list the tools that write, such as `start_workflow`. Listing one without it is an error, and so is `allow_writes: true` unless the top-level [`allow_writes`](#allow_writes) is also `true`. A profile without `tools` gives only read-only tools, whatever its `allow_writes` says.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.
   - `claim_value` (string, required): The value the claim must equal, or one entry of it when the claim is a list. It must be a YAML string, so an unquoted number or boolean such as `42` or `true` is rejected; quote it (`"42"`) to match the string. A `scope` or `scp` claim that is a string counts as a list of its space-separated entries, so a value matching one of them must not contain a space, and each scope needs its own rule.
@@ -187,7 +199,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs, and they can start only the workflows in the targets' `workflows`. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout` and `allow_writes`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. With `allow_writes: true` the developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## `--watch-config`
 

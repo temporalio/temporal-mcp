@@ -309,7 +309,7 @@ func TestStdio(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dev.Stop() })
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default, workflows: [{type: Declared, task_queue: q}]}\n", dev.FrontendHostPort())
+	config := fmt.Sprintf("allow_writes: true\ntargets:\n  - {name: dev, description: x, address: %q, namespace: default, workflows: [{type: Declared, task_queue: q}]}\n", dev.FrontendHostPort())
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +447,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unknown tool in a profile's tools_deny", []string{"--config", unknownTool}, 1, `authorization: profiles: "q": tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 		{"tools_deny that leaves a profile no tools", []string{"--config", unknownTool}, 1, `authorization: profiles: "r": tools_deny: leaves the profile no tools`},
 		{"start_workflow without workflows", []string{"--config", workflows}, 1, `authorization: profiles: "s": workflows: required with start_workflow in tools`},
+		{"start_workflow without allow_writes", []string{"--config", workflows}, 1, `authorization: profiles: "s": allow_writes: required with start_workflow in tools, along with allow_writes at the top level`},
 		{"workflows without start_workflow", []string{"--config", workflows}, 1, `authorization: profiles: "w": workflows: not allowed without start_workflow in tools`},
 		{"workflows in a profile without tools", []string{"--config", workflows}, 1, `authorization: profiles: "d": workflows: not allowed without start_workflow in tools`},
 		{"list_startable_workflows in a profile's tools", []string{"--config", workflows}, 1, `authorization: profiles: "l": tools[1]: list_startable_workflows comes with start_workflow, so profiles do not list it`},

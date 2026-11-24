@@ -24,40 +24,53 @@ type targetsKey struct{}
 // answers a call to one as the SDK answers a call to an unknown tool, and gives
 // every other tool call the targets its caller may use the tool on, or, for
 // list_available_targets, the targets its caller may use any tool on, under the
-// config of the snapshot that pin gave the request. Without auth, every caller
-// may use every tool on every target.
-func authorize() mcp.Middleware {
+// config of the snapshot that pin gave the request. access maps each tool to
+// "read" or "write". Without auth, every caller may use every tool on every
+// target if the config allows writes, and otherwise every read-only tool other
+// than list_startable_workflows.
+func authorize(access map[string]string) mcp.Middleware {
+	callerGrants := func(sn *snapshot, req mcp.Request) map[string][]string {
+		if sn.cfg.Auth != nil {
+			return grants(sn.cfg.Authorization, req)
+		}
+		g := map[string][]string{}
+		for tool := range access {
+			if sn.cfg.AllowWrites || offeredWithoutWrites(access, tool) {
+				g[tool] = sn.targets
+			}
+		}
+		return g
+	}
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			switch r := req.(type) {
 			case *mcp.ListToolsRequest:
 				res, err := next(ctx, method, req)
-				sn := snapshotFrom(ctx)
-				if sn.cfg.Auth == nil || err != nil {
+				if err != nil {
 					return res, err
 				}
 				list, ok := res.(*mcp.ListToolsResult)
 				if !ok || list == nil {
 					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "internal error"}
 				}
-				g := grants(sn.cfg.Authorization, req)
+				sn := snapshotFrom(ctx)
+				g := callerGrants(sn, req)
 				list.Tools = slices.DeleteFunc(list.Tools, func(t *mcp.Tool) bool { return t == nil || len(g[t.Name]) == 0 })
-				list.CacheScope = "private"
+				if sn.cfg.Auth != nil {
+					list.CacheScope = "private"
+				}
 				return list, err
 			case *mcp.CallToolRequest:
-				sn := snapshotFrom(ctx)
-				targets := sn.targets
-				if sn.cfg.Auth != nil {
-					g := grants(sn.cfg.Authorization, req)
-					if targets = g[r.Params.Name]; len(targets) == 0 {
-						if rec := auditRecordFrom(ctx); rec != nil {
-							rec.denied = true
-						}
-						return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", r.Params.Name)}
+				g := callerGrants(snapshotFrom(ctx), req)
+				targets := g[r.Params.Name]
+				if len(targets) == 0 {
+					if rec := auditRecordFrom(ctx); rec != nil {
+						rec.denied = true
 					}
-					if r.Params.Name == "list_available_targets" {
-						targets = slices.Concat(slices.Collect(maps.Values(g))...)
-					}
+					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: fmt.Sprintf("unknown tool %q", r.Params.Name)}
+				}
+				if r.Params.Name == "list_available_targets" {
+					targets = slices.Concat(slices.Collect(maps.Values(g))...)
 				}
 				ctx = context.WithValue(ctx, targetsKey{}, targets)
 			}
@@ -137,7 +150,13 @@ func matches(r config.Rule, caller *identity.Caller) bool {
 	return false
 }
 
-func resolveProfileTools(a *config.Authorization, tools []string, access map[string]string) error {
+// offeredWithoutWrites reports whether tool only reads and does not come with start_workflow.
+func offeredWithoutWrites(access map[string]string, tool string) bool {
+	return access[tool] == "read" && tool != "list_startable_workflows"
+}
+
+func resolveProfileTools(cfg *config.Config, tools []string, access map[string]string) error {
+	a := cfg.Authorization
 	if a == nil {
 		return nil
 	}
@@ -155,11 +174,17 @@ func resolveProfileTools(a *config.Authorization, tools []string, access map[str
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: list_startable_workflows comes with start_workflow, so profiles do not list it", name, f.key, k))
 				case !slices.Contains(tools, tool):
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
+				case f.key == "tools" && access[tool] == "write" && !p.AllowWrites:
+					topLevel := ""
+					if !cfg.AllowWrites {
+						topLevel = ", along with allow_writes at the top level"
+					}
+					errs = append(errs, fmt.Errorf("authorization: profiles: %q: allow_writes: required with %s in tools%s", name, tool, topLevel))
 				}
 			}
 		}
 		if p.Tools == nil {
-			p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return access[t] != "read" || slices.Contains(p.ToolsDeny, t) })
+			p.Tools = slices.DeleteFunc(slices.Clone(tools), func(t string) bool { return !offeredWithoutWrites(access, t) || slices.Contains(p.ToolsDeny, t) })
 			if len(p.Tools) == 0 {
 				errs = append(errs, fmt.Errorf("authorization: profiles: %q: tools_deny: leaves the profile no tools", name))
 			}

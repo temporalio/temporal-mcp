@@ -231,8 +231,10 @@ type Server struct {
 
 // NewServer returns the MCP server for the given configuration, making
 // Temporal calls through clients and rendering the payloads in tool responses
-// with payloads. Without auth, every caller may use every tool on every target;
-// with it, each caller may use only what cfg's authorization gives it.
+// with payloads. Without auth, every caller may use every tool on every target
+// if cfg allows writes, and otherwise every read-only tool other than
+// list_startable_workflows; with auth, each caller may use only what cfg's
+// authorization gives it.
 // records gets an audit record of each tool call, as a line of JSON; a call
 // whose record cannot be written fails. logger gets the cause of each internal
 // error.
@@ -242,9 +244,10 @@ type Server struct {
 // outcome cancelled.
 // It fails if cfg has an auth section but no authorization, if an
 // authorization profile names a tool the server does not have or
-// list_startable_workflows, if a profile's ToolsDeny leaves it no tools, or if a
+// list_startable_workflows, if a profile's ToolsDeny leaves it no tools, if a
 // profile has Workflows without start_workflow or start_workflow without
-// Workflows. It sets the Tools of each authorization profile without them to the
+// Workflows, or if a profile's Tools has a tool that writes without
+// AllowWrites. It sets the Tools of each authorization profile without them to the
 // server's read-only tools other than list_startable_workflows and those in the
 // profile's ToolsDeny.
 func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*Server, error) {
@@ -276,7 +279,7 @@ func (s *Server) resolveAuthorization(cfg *config.Config) error {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return errors.New("authorization: required with an auth section")
 	}
-	return resolveProfileTools(cfg.Authorization, s.tools, s.access)
+	return resolveProfileTools(cfg, s.tools, s.access)
 }
 
 // NewMux returns an HTTP handler that serves s, the Server field of a
@@ -315,7 +318,7 @@ func newHandler(s *mcp.Server, cfg *config.Config) http.Handler {
 // newServer returns the MCP server, which cancels its requests once ctx is done, and the names of its tools.
 func newServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*toolServer, []string) {
 	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil), access: map[string]string{}, inputs: map[string]*jsonschema.Schema{}, current: newSnapshot(cfg, clients, payloads)}
-	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), pin(s), audit(records, logger, s.access), normalizeToolCalls(s.inputs), authorize())
+	s.AddReceivingMiddleware(recoverPanics(logger), cancelWith(ctx, subscriptions), pin(s), audit(records, logger, s.access), normalizeToolCalls(s.inputs), authorize(s.access))
 	return s, addTools(s)
 }
 

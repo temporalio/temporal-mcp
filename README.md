@@ -68,7 +68,7 @@ To use your Temporal Cloud or self-hosted namespaces, add a target for each one 
 
 A self-hosted cluster needs Temporal Server 1.28 or later. Older versions are not supported.
 
-For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first. Then restart your agent, since the server it already started keeps its old command and environment.
+For each environment variable your config reads with `env:`, add `-e KEY=value` (Claude Code) or `--env KEY=value` (Codex) just before the `--`. To change the command, run it again: `codex mcp add` replaces the server of the same name, but for Claude Code, run `claude mcp remove temporal` first. Then restart your agent.
 
 With `--watch-config`, a change takes effect a few seconds after you save the config, and if the new config is invalid, the server logs why and keeps the last good one. [docs/config.md](docs/config.md#--watch-config) lists the config changes that still require a restart. Then ask the agent to check its connection to each new target.
 

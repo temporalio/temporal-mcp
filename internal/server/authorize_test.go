@@ -368,6 +368,8 @@ authorization:
 			{"enabled", "allow_writes_in_profiles: true\n", true, true, 0},
 			{"profile false", "allow_writes_in_profiles: true\n", false, false, 0},
 			{"disabled again", "allow_writes_in_profiles: false\n", true, false, 2},
+			{"unauthenticated flag only", "allow_unauthenticated_writes: true\n", true, false, 2},
+			{"unauthenticated flag with read-only profile", "allow_unauthenticated_writes: true\nallow_writes_in_profiles: true\n", false, false, 0},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				data := strings.NewReplacer(
@@ -445,11 +447,11 @@ func (fakeOperatorService) ListSearchAttributes(context.Context, *operatorservic
 	return &operatorservice.ListSearchAttributesResponse{CustomAttributes: map[string]enums.IndexedValueType{"CustomerId": enums.INDEXED_VALUE_TYPE_KEYWORD}}, nil
 }
 
-func TestNoAuthAllowsWritesWithoutProfiles(t *testing.T) {
+func TestNoAuthRequiresAllowUnauthenticatedWrites(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	load := func(allowWritesInProfiles bool) (*config.Config, *temporal.Clients) {
+	load := func(flags string) (*config.Config, *temporal.Clients) {
 		t.Helper()
-		cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\nallow_writes_in_profiles: %t\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n", allowWritesInProfiles), "")
+		cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n%stargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n", flags), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -459,19 +461,26 @@ func TestNoAuthAllowsWritesWithoutProfiles(t *testing.T) {
 		}
 		return cfg, clients
 	}
-	cfg, clients := load(false)
+	cfg, clients := load("")
 	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	session := connectTo(t, NewMux(s.Server, cfg, logger), http.DefaultTransport)
 	readTools := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}
-	for i, allowWritesInProfiles := range []bool{false, true, false} {
-		if i > 0 {
-			next, nextClients := load(allowWritesInProfiles)
-			if err := s.Reload(next, nextClients, newRenderer(t, next, logger)); err != nil {
-				t.Fatal(err)
-			}
+	for _, tt := range []struct {
+		flags      string
+		wantWrites bool
+	}{
+		{"", false},
+		{"allow_writes_in_profiles: true\n", false},
+		{"allow_unauthenticated_writes: true\n", true},
+		{"allow_unauthenticated_writes: true\nallow_writes_in_profiles: true\n", true},
+		{"allow_unauthenticated_writes: false\nallow_writes_in_profiles: true\n", false},
+	} {
+		next, nextClients := load(tt.flags)
+		if err := s.Reload(next, nextClients, newRenderer(t, next, logger)); err != nil {
+			t.Fatal(err)
 		}
 		list, err := session.ListTools(t.Context(), nil)
 		if err != nil {
@@ -481,16 +490,19 @@ func TestNoAuthAllowsWritesWithoutProfiles(t *testing.T) {
 		for _, tool := range list.Tools {
 			tools = append(tools, tool.Name)
 		}
-		want := slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow")))
+		want := readTools
+		if tt.wantWrites {
+			want = slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow")))
+		}
 		if !slices.Equal(tools, want) || list.CacheScope != "public" {
-			t.Errorf("allow_writes_in_profiles %t: tools/list = %v with cacheScope %q, want %v with cacheScope public", allowWritesInProfiles, tools, list.CacheScope, want)
+			t.Errorf("flags %q: tools/list = %v with cacheScope %q, want %v with cacheScope public", tt.flags, tools, list.CacheScope, want)
 		}
 		for name, args := range map[string]map[string]any{
 			"list_startable_workflows": {"target": "a"},
 			"start_workflow":           {"target": "a", "workflow_id": "w", "workflow_type": "V"},
 		} {
-			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args}); err != nil {
-				t.Errorf("allow_writes_in_profiles %t: calling %s: err = %v, want no protocol error", allowWritesInProfiles, name, err)
+			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args}); tt.wantWrites != (err == nil) || err != nil && !strings.Contains(err.Error(), fmt.Sprintf("unknown tool %q", name)) {
+				t.Errorf("flags %q: calling %s: err = %v, want an unknown tool error: %t", tt.flags, name, err, !tt.wantWrites)
 			}
 		}
 	}

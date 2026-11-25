@@ -39,6 +39,7 @@ targets:
 [ error_log_file: <filename> ]
 [ shutdown_timeout: <duration> | default = 8s ]
 
+[ allow_unauthenticated_writes: <boolean> | default = false ]
 [ allow_writes_in_profiles: <boolean> | default = false ]
 
 # HTTP mode only.
@@ -151,6 +152,12 @@ The server does not start if it cannot load the certificate and key, and starts 
 
 Optional in both modes, default `8s`; zero uses the default and negative values are rejected. After SIGINT or SIGTERM, or stdin closing in `--stdio` mode, the server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. See [Shutdown](../README.md#shutdown).
 
+## `allow_unauthenticated_writes`
+
+Optional in both modes, default `false`. Set it to `true` to allow tools that write in `--stdio` mode and HTTP without `auth`. Otherwise those tools, and `list_startable_workflows`, are hidden and calls to them get the same error as calls to a tool that does not exist. Read-only tools remain available.
+
+This setting has no effect with `auth`: profile writes require [`allow_writes_in_profiles`](#allow_writes_in_profiles) and the profile's own `allow_writes` to be `true`. A [`--watch-config`](#--watch-config) reload applies changes to new requests.
+
 ## `allow_writes_in_profiles`
 
 Optional, default `false`. A profile can give tools that write, such as `start_workflow`, only when both this setting and the profile's `allow_writes` are `true`. Otherwise those tools are hidden and calls to them get the same error as calls to a tool that does not exist. `list_startable_workflows` comes with `start_workflow`, so the same goes for it.
@@ -180,7 +187,7 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every read-only tool on every target. With [`allow_unauthenticated_writes: true`](#allow_unauthenticated_writes), callers may also use tools that write and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Every tool is read-only except `start_workflow`, which a profile gives only when its `tools` lists it, and which brings `list_startable_workflows` with it; no other profile gives that tool. Without `tools`, a profile gives every other read-only tool not in `tools_deny`, including those that later versions of the server add, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_workflow_history_summary`, `get_task_queues`, `search_workflows`, `count_workflows`, `list_search_attributes` and `start_workflow`. Any other name is an error.
@@ -199,7 +206,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout` and `allow_writes_in_profiles` (which has no effect without `auth`); `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. The developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout`, `allow_unauthenticated_writes` and `allow_writes_in_profiles` (which has no effect without `auth`); `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. With `allow_unauthenticated_writes: true`, the developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## `--watch-config`
 

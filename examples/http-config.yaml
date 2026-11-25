@@ -1,5 +1,5 @@
 # HTTP without auth: only a loopback IP address is allowed in listen, and every
-# caller may use every tool on every target. See docs/config.md.
+# caller may use every read-only tool on every target. See docs/config.md.
 listen: 127.0.0.1:8080
 targets:
   - name: payments-staging

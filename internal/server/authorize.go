@@ -26,7 +26,7 @@ type targetsKey struct{}
 // every other tool call the targets its caller may use the tool on, or, for
 // list_available_targets, the targets its caller may use any tool on, under the
 // config of the snapshot that pin gave the request. access maps each tool to
-// "read" or "write". Without auth, every caller may use every tool on every target.
+// "read" or "write". Without auth, tools that write require AllowUnauthenticatedWrites.
 func authorize(access map[string]string) mcp.Middleware {
 	callerGrants := func(sn *snapshot, req mcp.Request) map[string][]string {
 		if sn.cfg.Auth != nil {
@@ -34,7 +34,9 @@ func authorize(access map[string]string) mcp.Middleware {
 		}
 		g := map[string][]string{}
 		for tool := range access {
-			g[tool] = sn.targets
+			if sn.cfg.AllowUnauthenticatedWrites || offeredWithoutWrites(access, tool) {
+				g[tool] = sn.targets
+			}
 		}
 		return g
 	}

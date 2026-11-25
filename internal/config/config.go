@@ -43,6 +43,8 @@ type Config struct {
 	Auth *Auth `yaml:"auth"`
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
 	Authorization *Authorization `yaml:"authorization"`
+	// AllowUnauthenticatedWrites, when true, lets stdio and HTTP without Auth use tools that write.
+	AllowUnauthenticatedWrites bool `yaml:"allow_unauthenticated_writes"`
 	// AllowWritesInProfiles, when true, lets profiles with AllowWrites give tools that write.
 	AllowWritesInProfiles bool `yaml:"allow_writes_in_profiles"`
 	// AuditLogFile is the path of the file the server appends audit records to; stdout, or stderr over stdio, if empty.

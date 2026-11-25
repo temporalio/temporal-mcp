@@ -110,7 +110,7 @@ func TestAudit(t *testing.T) {
 		return bearer(token).RoundTrip(r)
 	}))
 	malformed.Store(true)
-	openCfg := &config.Config{Targets: targets}
+	openCfg := &config.Config{Targets: targets, AllowUnauthenticatedWrites: true}
 	open, _ := newServer(t.Context(), t.Context(), "temporal", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
 	unauthed := connectTo(t, NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {

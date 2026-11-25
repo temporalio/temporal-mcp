@@ -149,6 +149,8 @@ Every successful Temporal call must pass all of these controls:
    target's `workflows`, each on its declared task queue, and never terminates
    one. With auth, the server offers `start_workflow` only when the config
    sets [`allow_writes_in_profiles: true`](config.md#allow_writes_in_profiles).
+   Stdio and HTTP without auth require
+   [`allow_unauthenticated_writes: true`](config.md#allow_unauthenticated_writes).
 2. **The caller's MCP profile.** Authorization profiles grant specific tools on
    specific configured targets. Only a profile that lists `start_workflow`
    grants it, and only for the workflow types in the profile's `workflows`.

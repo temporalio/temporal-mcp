@@ -232,7 +232,7 @@ type Server struct {
 
 // NewServer returns the MCP server for the given configuration, making
 // Temporal calls through clients and rendering the payloads in tool responses
-// with payloads. Without auth, every caller may use every tool on every target;
+// with payloads. Without auth, tools that write require AllowUnauthenticatedWrites;
 // with auth, each caller may use only what cfg's authorization gives it.
 // records gets an audit record of each tool call, as a line of JSON; a call
 // whose record cannot be written fails. logger gets the cause of each internal

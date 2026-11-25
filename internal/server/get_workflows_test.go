@@ -641,7 +641,7 @@ func TestToolsOnDevServer(t *testing.T) {
 	ln.Close()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\n"+
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\nallow_unauthenticated_writes: true\n"+
 		"codecs:\n"+
 		"  test: {endpoint: %[1]q, authorization_header: {file: %[2]q}}\n"+
 		"  unauthorized: {endpoint: %[1]q}\n"+

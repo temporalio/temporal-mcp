@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -31,7 +32,15 @@ type targetsKey struct{}
 func authorize(access map[string]string) mcp.Middleware {
 	callerGrants := func(sn *snapshot, req mcp.Request) map[string][]string {
 		if sn.cfg.Auth != nil {
-			return grants(sn.cfg.Authorization, req)
+			g := grants(sn.cfg.Authorization, req)
+			if !sn.cfg.AllowWrites {
+				for tool := range g {
+					if !offeredWithoutWrites(access, tool) {
+						delete(g, tool)
+					}
+				}
+			}
+			return g
 		}
 		g := map[string][]string{}
 		for tool := range access {
@@ -155,7 +164,7 @@ func offeredWithoutWrites(access map[string]string, tool string) bool {
 	return access[tool] == "read" && tool != "list_startable_workflows"
 }
 
-func resolveProfileTools(cfg *config.Config, tools []string, access map[string]string) error {
+func resolveProfileTools(cfg *config.Config, tools []string, access map[string]string, logger *slog.Logger) error {
 	a := cfg.Authorization
 	if a == nil {
 		return nil
@@ -164,6 +173,9 @@ func resolveProfileTools(cfg *config.Config, tools []string, access map[string]s
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(a.Profiles)) {
 		p := a.Profiles[name]
+		if p.AllowWrites && !cfg.AllowWritesInProfiles {
+			logger.Warn("ignoring profile allow_writes because allow_writes_in_profiles is not true", "profile", name)
+		}
 		for _, f := range []struct {
 			key   string
 			tools []string
@@ -174,12 +186,8 @@ func resolveProfileTools(cfg *config.Config, tools []string, access map[string]s
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: list_startable_workflows comes with start_workflow, so profiles do not list it", name, f.key, k))
 				case !slices.Contains(tools, tool):
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
-				case f.key == "tools" && access[tool] == "write" && !p.AllowWrites:
-					topLevel := ""
-					if !cfg.AllowWrites {
-						topLevel = ", along with allow_writes at the top level"
-					}
-					errs = append(errs, fmt.Errorf("authorization: profiles: %q: allow_writes: required with %s in tools%s", name, tool, topLevel))
+				case f.key == "tools" && access[tool] == "write" && cfg.AllowWritesInProfiles && !p.AllowWrites:
+					errs = append(errs, fmt.Errorf("authorization: profiles: %q: allow_writes: required with %s in tools when allow_writes_in_profiles is true", name, tool))
 				}
 			}
 		}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -76,6 +77,7 @@ func TestAuthorization(t *testing.T) {
 
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
 allow_writes: true
+allow_writes_in_profiles: true
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
   - {name: payments-staging, description: x, address: %[3]q, namespace: b}
@@ -355,6 +357,84 @@ authorization:
 		if want := []string{"list_startable_workflows", "start_workflow"}; !slices.Equal(tools, want) || len(out.Result.Workflows) != 1 || out.Result.Workflows[0].Type != "A" {
 			t.Errorf("after the reload, dev gets tools %v and startable workflows %+v; want %v and A", tools, out.Result.Workflows, want)
 		}
+
+		for _, tt := range []struct {
+			name, optIn                 string
+			global, profile, wantWrites bool
+			wantWarnings                int
+		}{
+			{"omitted", "", true, true, true, 2},
+			{"false", "allow_writes_in_profiles: false\n", true, true, true, 2},
+			{"ignored false profile", "", true, false, true, 1},
+			{"global off", "", false, true, false, 2},
+			{"enabled", "allow_writes_in_profiles: true\n", true, true, true, 0},
+			{"global off with opt-in", "allow_writes_in_profiles: true\n", false, true, false, 0},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				data := strings.NewReplacer(
+					"allow_writes: true\nallow_writes_in_profiles: true\n", fmt.Sprintf("allow_writes: %t\n%s", tt.global, tt.optIn),
+					"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}]}",
+					"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", fmt.Sprintf("dev: {tools: [get_workflows, start_workflow], workflows: [A], targets: [orders-prod], allow_writes: %t}", tt.profile),
+				).Replace(yaml)
+				cfg, err := config.Parse([]byte(data), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var warnings bytes.Buffer
+				s.logger = slog.New(slog.NewJSONHandler(&warnings, nil))
+				if err := s.Reload(cfg, clients, newRenderer(t, cfg, logger)); err != nil {
+					t.Fatal(err)
+				}
+				lines := strings.Split(strings.TrimSpace(warnings.String()), "\n")
+				if warnings.Len() == 0 {
+					lines = nil
+				}
+				if len(lines) != tt.wantWarnings {
+					t.Fatalf("warnings = %s, want %d warnings", warnings.String(), tt.wantWarnings)
+				}
+				for i, line := range lines {
+					var record struct{ Level, Msg, Profile string }
+					if err := json.Unmarshal([]byte(line), &record); err != nil {
+						t.Fatal(err)
+					}
+					wantProfile := "all"
+					if i == 1 {
+						wantProfile = "dev"
+					}
+					if record.Level != "WARN" || record.Profile != wantProfile || !strings.Contains(record.Msg, "ignoring profile allow_writes because allow_writes_in_profiles is not true") {
+						t.Errorf("warning = %s, want WARN naming profile %q and the ignored setting", line, wantProfile)
+					}
+				}
+				list, err := session.ListTools(t.Context(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var tools []string
+				for _, tool := range list.Tools {
+					tools = append(tools, tool.Name)
+				}
+				want := []string{"get_workflows"}
+				if tt.wantWrites {
+					want = append(want, "list_startable_workflows", "start_workflow")
+				}
+				if !slices.Equal(tools, want) {
+					t.Errorf("tools/list = %v, want %v", tools, want)
+				}
+				for name, args := range map[string]map[string]any{
+					"list_startable_workflows": {"target": "orders-prod"},
+					"start_workflow":           {"target": "orders-prod", "workflow_id": "w", "workflow_type": "V"},
+				} {
+					_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+					if tt.wantWrites != (err == nil) || err != nil && !strings.Contains(err.Error(), fmt.Sprintf("unknown tool %q", name)) {
+						t.Errorf("calling %s: err = %v, want an unknown tool error: %t", name, err, !tt.wantWrites)
+					}
+				}
+			})
+		}
 	})
 }
 
@@ -436,6 +516,7 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	cfg := &config.Config{
+		AllowWrites: true,
 		Targets: []config.Target{
 			{Name: "granted", Description: "x", Address: closed, Namespace: "a"},
 			{Name: "ungranted", Description: "x", Address: closed, Namespace: "b"},

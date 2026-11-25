@@ -150,10 +150,11 @@ Every successful Temporal call must pass all of these controls:
    one. The server offers `start_workflow` only when the config sets
    [`allow_writes: true`](config.md#allow_writes).
 2. **The caller's MCP profile.** Authorization profiles grant specific tools on
-   specific configured targets. Only a profile that lists `start_workflow` and
-   sets its own `allow_writes: true` grants it, and only for the workflow types
-   in the profile's `workflows`. A valid token that matches no rule receives no
-   tools or targets.
+   specific configured targets. Only a profile that lists `start_workflow`
+   grants it, and only for the workflow types in the profile's `workflows`.
+   With `allow_writes_in_profiles: true`, the profile must also set
+   `allow_writes: true`. A valid token that matches no rule receives no tools
+   or targets.
 3. **The target credential.** Temporal accepts only the operations and
    namespaces allowed to the API key or mTLS identity used for that target.
 4. **The configured target boundary.** Tool calls cannot supply a different

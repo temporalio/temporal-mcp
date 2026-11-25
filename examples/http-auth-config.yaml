@@ -17,6 +17,7 @@ auth:
 
 # Lets a profile with its own allow_writes give start_workflow.
 allow_writes: true
+allow_writes_in_profiles: true
 
 authorization:
   profiles:

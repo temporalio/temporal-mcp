@@ -44,8 +44,10 @@ type Config struct {
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
 	Authorization *Authorization `yaml:"authorization"`
 	// AllowWrites, when true, lets the server offer and run the tools that write, such as start_workflow. With
-	// Authorization, only the profiles with their own AllowWrites give them.
+	// Authorization, profiles must list those tools explicitly.
 	AllowWrites bool `yaml:"allow_writes"`
+	// AllowWritesInProfiles, when true, also requires each profile that gives tools that write to set AllowWrites.
+	AllowWritesInProfiles bool `yaml:"allow_writes_in_profiles"`
 	// AuditLogFile is the path of the file the server appends audit records to; stdout, or stderr over stdio, if empty.
 	AuditLogFile string `yaml:"audit_log_file"`
 	// ErrorLogFile is the path of the file the server appends its logs to; stderr if empty.
@@ -95,8 +97,8 @@ type Authorization struct {
 // and to start each workflow type in Workflows on each of Targets that declares it.
 // Its tools are Tools, plus list_startable_workflows if Tools has start_workflow, or, if
 // Tools is nil, every read-only tool except list_startable_workflows and those in ToolsDeny.
-// Tools may list a tool that writes, such as start_workflow, only with AllowWrites, which
-// requires the AllowWrites of the Config.
+// When Config.AllowWritesInProfiles is true, Tools may list a tool that writes, such as
+// start_workflow, only with AllowWrites. Config.AllowWrites must also be true to run it.
 type Profile struct {
 	Tools       []string `yaml:"tools"`
 	ToolsDeny   []string `yaml:"tools_deny"`
@@ -737,9 +739,6 @@ func (a *Authorization) validate(c *Config) []error {
 			if f.tools != nil && len(f.tools) == 0 {
 				errs = append(errs, fmt.Errorf("%s: %s: at least one tool is required", label, f.name))
 			}
-		}
-		if p.AllowWrites && !c.AllowWrites {
-			errs = append(errs, fmt.Errorf("%s: allow_writes: not allowed without allow_writes at the top level", label))
 		}
 		if len(p.Targets) == 0 {
 			errs = append(errs, fmt.Errorf("%s: targets: at least one target is required", label))

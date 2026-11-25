@@ -226,7 +226,8 @@ func addTools(s *toolServer) []string {
 // A Server is an MCP server whose config Reload can replace while it serves.
 type Server struct {
 	*toolServer
-	tools []string
+	tools  []string
+	logger *slog.Logger
 }
 
 // NewServer returns the MCP server for the given configuration, making
@@ -247,12 +248,13 @@ type Server struct {
 // list_startable_workflows, if a profile's ToolsDeny leaves it no tools, if a
 // profile has Workflows without start_workflow or start_workflow without
 // Workflows, or if a profile's Tools has a tool that writes without
-// AllowWrites. It sets the Tools of each authorization profile without them to the
-// server's read-only tools other than list_startable_workflows and those in the
-// profile's ToolsDeny.
+// AllowWrites when cfg.AllowWritesInProfiles is true. It logs a warning for each
+// profile whose AllowWrites is ignored. It sets the Tools of each authorization
+// profile without them to the server's read-only tools other than
+// list_startable_workflows and those in the profile's ToolsDeny.
 func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*Server, error) {
 	ts, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
-	s := &Server{toolServer: ts, tools: tools}
+	s := &Server{toolServer: ts, tools: tools, logger: logger}
 	if err := s.resolveAuthorization(cfg); err != nil {
 		return nil, err
 	}
@@ -279,7 +281,7 @@ func (s *Server) resolveAuthorization(cfg *config.Config) error {
 	if cfg.Auth != nil && cfg.Authorization == nil {
 		return errors.New("authorization: required with an auth section")
 	}
-	return resolveProfileTools(cfg, s.tools, s.access)
+	return resolveProfileTools(cfg, s.tools, s.access, s.logger)
 }
 
 // NewMux returns an HTTP handler that serves s, the Server field of a

@@ -40,6 +40,7 @@ targets:
 [ shutdown_timeout: <duration> | default = 8s ]
 
 [ allow_writes: <boolean> | default = false ]
+[ allow_writes_in_profiles: <boolean> | default = false ]
 
 # HTTP mode only.
 listen: <host:port>
@@ -155,9 +156,15 @@ Optional in both modes, default `8s`; zero uses the default and negative values 
 
 Optional in both modes, default `false`. Unless it is `true`, the server is read-only. Agents do not see the tools that write, such as `start_workflow`, and a call to one gets the same error as a call to a tool that does not exist. `list_startable_workflows` comes with `start_workflow`, so the same goes for it.
 
-With `allow_writes: true` and no `auth`, every caller may use the tools that write. With `auth`, a caller may use one only through a [profile](#authorization) that lists it in `tools` and has its own `allow_writes: true`.
+With `allow_writes: true` and no `auth`, every caller may use the tools that write. With `auth`, a caller may use one only through a [profile](#authorization) that lists it in `tools`. If `allow_writes_in_profiles` is also `true`, that profile must set its own `allow_writes: true`.
 
-To turn writes off on a server with `auth`, make all of these changes in one edit. Set the top-level `allow_writes` to `false`, remove each profile's `allow_writes` and `workflows`, and take the tools that write out of its `tools`. Delete each profile whose `tools` this leaves empty, and the rules that name it. Deleting only its `tools` key instead leaves a valid config that a reload accepts, but the profile then gives every read-only tool. If no rule is left, stop the server instead, since a config with `auth` needs at least one. With the top-level flag `false`, a config is invalid if a profile still has `allow_writes`, `workflows`, a tool that writes or an empty `tools`, or if a rule names a deleted profile. A [`--watch-config`](#--watch-config) reload of such a config is refused and leaves the server writing, and a restart with it fails.
+To turn writes off, set the top-level `allow_writes` to `false`. Profiles may keep their write tools, `workflows` and `allow_writes` settings. A [`--watch-config`](#--watch-config) reload applies the change to new requests.
+
+## `allow_writes_in_profiles`
+
+Optional, default `false`. Unless it is `true`, profiles' `allow_writes` settings are ignored. The server logs a warning for each profile with `allow_writes: true` at startup and on config reload, naming the profile and the ignored setting.
+
+Set it to `true` to require each profile that lists a tool that writes to also set `allow_writes: true`. The top-level [`allow_writes`](#allow_writes) must still be `true` for callers to see or call those tools. This setting has no effect without `auth`.
 
 ## `auth`
 
@@ -187,7 +194,7 @@ Decides which tools each caller may use on which targets, and which of the targe
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
   - `workflows` (list of strings, required with `start_workflow`): The workflow types the profile lets a caller start, each on every one of its `targets` that has that type in its `workflows`. It is not allowed without `start_workflow`, and each type must be in the `workflows` of at least one of the profile's `targets`.
-  - `allow_writes` (boolean, default `false`): Lets the profile's `tools` list the tools that write, such as `start_workflow`. Listing one without it is an error, and so is `allow_writes: true` unless the top-level [`allow_writes`](#allow_writes) is also `true`. A profile without `tools` gives only read-only tools, whatever its `allow_writes` says.
+  - `allow_writes` (boolean, default `false`): When [`allow_writes_in_profiles`](#allow_writes_in_profiles) is `true`, lets the profile's `tools` list the tools that write, such as `start_workflow`; listing one without it is an error. Otherwise this field is ignored, with a warning when it is `true`. The top-level [`allow_writes`](#allow_writes) must be `true` for these tools to be available. A profile without `tools` gives only read-only tools, whatever its `allow_writes` says.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.
   - `claim_value` (string, required): The value the claim must equal, or one entry of it when the claim is a list. It must be a YAML string, so an unquoted number or boolean such as `42` or `true` is rejected; quote it (`"42"`) to match the string. A `scope` or `scp` claim that is a string counts as a list of its space-separated entries, so a value matching one of them must not contain a space, and each scope needs its own rule.
@@ -199,7 +206,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout` and `allow_writes`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. With `allow_writes: true` the developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout`, `allow_writes` and `allow_writes_in_profiles` (which has no effect without `auth`); `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. With `allow_writes: true` the developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## `--watch-config`
 

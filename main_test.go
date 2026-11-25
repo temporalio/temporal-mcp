@@ -393,7 +393,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}, q: {tools_deny: [terminate_workflow], targets: [a]},\n" +
 		"    r: {tools_deny: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_workflow_history_summary, get_task_queues, search_workflows, count_workflows, list_search_attributes], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
-	workflows := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n" +
+	workflows := writeConfig("listen: 127.0.0.1:0\nallow_writes_in_profiles: true\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {s: {tools: [start_workflow], targets: [a]}, w: {tools: [get_workflows], workflows: [W], targets: [a]}, d: {workflows: [W], targets: [a]},\n" +
 		"    l: {tools: [start_workflow, list_startable_workflows], workflows: [W], targets: [a]}, n: {tools_deny: [list_startable_workflows], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: s}]\n")
@@ -447,7 +447,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		{"unknown tool in a profile's tools_deny", []string{"--config", unknownTool}, 1, `authorization: profiles: "q": tools_deny[0]: unknown tool "terminate_workflow"; the tools are list_available_targets, check_connection, get_workflows`},
 		{"tools_deny that leaves a profile no tools", []string{"--config", unknownTool}, 1, `authorization: profiles: "r": tools_deny: leaves the profile no tools`},
 		{"start_workflow without workflows", []string{"--config", workflows}, 1, `authorization: profiles: "s": workflows: required with start_workflow in tools`},
-		{"start_workflow without allow_writes", []string{"--config", workflows}, 1, `authorization: profiles: "s": allow_writes: required with start_workflow in tools, along with allow_writes at the top level`},
+		{"start_workflow without allow_writes", []string{"--config", workflows}, 1, `authorization: profiles: "s": allow_writes: required with start_workflow in tools when allow_writes_in_profiles is true`},
 		{"workflows without start_workflow", []string{"--config", workflows}, 1, `authorization: profiles: "w": workflows: not allowed without start_workflow in tools`},
 		{"workflows in a profile without tools", []string{"--config", workflows}, 1, `authorization: profiles: "d": workflows: not allowed without start_workflow in tools`},
 		{"list_startable_workflows in a profile's tools", []string{"--config", workflows}, 1, `authorization: profiles: "l": tools[1]: list_startable_workflows comes with start_workflow, so profiles do not list it`},

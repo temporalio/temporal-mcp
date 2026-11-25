@@ -642,7 +642,6 @@ func TestToolsOnDevServer(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("listen: 127.0.0.1:0\n"+
-		"allow_writes: true\n"+
 		"codecs:\n"+
 		"  test: {endpoint: %[1]q, authorization_header: {file: %[2]q}}\n"+
 		"  unauthorized: {endpoint: %[1]q}\n"+
@@ -2562,7 +2561,7 @@ func TestToolsOnDevServer(t *testing.T) {
 	t.Run("workflows by profile", func(t *testing.T) {
 		issuer, sign := newTestIssuer(t)
 		authCfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n"+
-			"allow_writes: true\nallow_writes_in_profiles: true\n"+
+			"allow_writes_in_profiles: true\n"+
 			"targets:\n"+
 			"  - {name: orders, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-orders-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-orders-waitForSignal}]}\n"+
 			"  - {name: signals, description: x, address: %[1]q, namespace: default, workflows: [{type: OrderWorkflow, task_queue: by-profile-signals-OrderWorkflow}, {type: waitForSignal, task_queue: by-profile-signals-waitForSignal}]}\n"+
@@ -2571,10 +2570,12 @@ func TestToolsOnDevServer(t *testing.T) {
 			"  profiles:\n"+
 			"    orders: {tools: [start_workflow], workflows: [OrderWorkflow], targets: [orders], allow_writes: true}\n"+
 			"    signals: {tools: [start_workflow], workflows: [waitForSignal], targets: [orders, signals], allow_writes: true}\n"+
+			"    disabled: {tools: [start_workflow], workflows: [waitForSignal], targets: [orders, signals]}\n"+
 			"    readers: {targets: [orders, signals]}\n"+
 			"  rules:\n"+
 			"    - {claim_name: groups, claim_value: orders, profile: orders}\n"+
 			"    - {claim_name: groups, claim_value: signals, profile: signals}\n"+
+			"    - {claim_name: groups, claim_value: disabled, profile: disabled}\n"+
 			"    - {claim_name: groups, claim_value: readers, profile: readers}\n", dev.FrontendHostPort(), issuer), "")
 		if err != nil {
 			t.Fatal(err)
@@ -2622,6 +2623,15 @@ func TestToolsOnDevServer(t *testing.T) {
 				listed:  map[string][]any{"orders": {workflow("orders", "OrderWorkflow"), workflow("orders", "waitForSignal")}, "signals": {workflow("signals", "waitForSignal")}},
 				started: [][2]string{{"orders", "OrderWorkflow"}},
 				refused: [][2]string{{"signals", "OrderWorkflow"}},
+			},
+			{
+				groups: []any{"disabled"},
+			},
+			{
+				groups:  []any{"orders", "disabled"},
+				tools:   []string{"list_startable_workflows", "start_workflow"},
+				listed:  map[string][]any{"orders": {workflow("orders", "OrderWorkflow")}},
+				refused: [][2]string{{"orders", "waitForSignal"}},
 			},
 			{
 				groups: []any{"readers"},

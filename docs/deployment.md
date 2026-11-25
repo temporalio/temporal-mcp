@@ -147,13 +147,13 @@ Every successful Temporal call must pass all of these controls:
    operations rather than arbitrary Temporal gRPC calls. Each one only reads,
    except `start_workflow`, which starts runs only of the workflow types in the
    target's `workflows`, each on its declared task queue, and never terminates
-   one. The server offers `start_workflow` only when the config sets
-   [`allow_writes: true`](config.md#allow_writes).
+   one. With auth, the server offers `start_workflow` only when the config
+   sets [`allow_writes_in_profiles: true`](config.md#allow_writes_in_profiles).
 2. **The caller's MCP profile.** Authorization profiles grant specific tools on
    specific configured targets. Only a profile that lists `start_workflow`
    grants it, and only for the workflow types in the profile's `workflows`.
-   With `allow_writes_in_profiles: true`, the profile must also set
-   `allow_writes: true`. A valid token that matches no rule receives no tools
+   Both `allow_writes_in_profiles` and the profile's `allow_writes` must be
+   `true`. A valid token that matches no rule receives no tools
    or targets.
 3. **The target credential.** Temporal accepts only the operations and
    namespaces allowed to the API key or mTLS identity used for that target.

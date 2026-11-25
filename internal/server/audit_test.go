@@ -69,11 +69,11 @@ func TestAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	authCfg := &config.Config{
-		AllowWrites: true,
-		Targets:     targets,
-		Auth:        &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: issuer, Audience: "operator"},
+		AllowWritesInProfiles: true,
+		Targets:               targets,
+		Auth:                  &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: issuer, Audience: "operator"},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"check_connection", "start_workflow", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}, Workflows: []string{"W"}}},
+			Profiles: map[string]config.Profile{"p": {AllowWrites: true, Tools: []string{"check_connection", "start_workflow", "fail", "boom", "block", "cancel_and_panic", "deadline"}, Targets: []string{"granted"}, Workflows: []string{"W"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -110,7 +110,7 @@ func TestAudit(t *testing.T) {
 		return bearer(token).RoundTrip(r)
 	}))
 	malformed.Store(true)
-	openCfg := &config.Config{Targets: targets, AllowWrites: true}
+	openCfg := &config.Config{Targets: targets}
 	open, _ := newServer(t.Context(), t.Context(), "temporal", "0", openCfg, clients, newRenderer(t, openCfg, logger), records, logger)
 	unauthed := connectTo(t, NewMux(open.Server, openCfg, logger), http.DefaultTransport)
 	if _, err := authed.ListTools(t.Context(), nil); err != nil {

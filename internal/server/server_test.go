@@ -279,10 +279,10 @@ func TestNewMux(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	authCfg := &config.Config{
-		AllowWrites: true,
-		Auth:        &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuer: issuerURL, Audience: "operator", RequiredScopes: []string{"temporal.read"}},
+		AllowWritesInProfiles: true,
+		Auth:                  &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuer: issuerURL, Audience: "operator", RequiredScopes: []string{"temporal.read"}},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"whoami"}, Targets: []string{"prod"}}},
+			Profiles: map[string]config.Profile{"p": {AllowWrites: true, Tools: []string{"whoami"}, Targets: []string{"prod"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}

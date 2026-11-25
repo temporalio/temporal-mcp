@@ -232,10 +232,8 @@ type Server struct {
 
 // NewServer returns the MCP server for the given configuration, making
 // Temporal calls through clients and rendering the payloads in tool responses
-// with payloads. Without auth, every caller may use every tool on every target
-// if cfg allows writes, and otherwise every read-only tool other than
-// list_startable_workflows; with auth, each caller may use only what cfg's
-// authorization gives it.
+// with payloads. Without auth, every caller may use every tool on every target;
+// with auth, each caller may use only what cfg's authorization gives it.
 // records gets an audit record of each tool call, as a line of JSON; a call
 // whose record cannot be written fails. logger gets the cause of each internal
 // error.
@@ -247,11 +245,10 @@ type Server struct {
 // authorization profile names a tool the server does not have or
 // list_startable_workflows, if a profile's ToolsDeny leaves it no tools, if a
 // profile has Workflows without start_workflow or start_workflow without
-// Workflows, or if a profile's Tools has a tool that writes without
-// AllowWrites when cfg.AllowWritesInProfiles is true. It logs a warning for each
-// profile whose AllowWrites is ignored. It sets the Tools of each authorization
-// profile without them to the server's read-only tools other than
-// list_startable_workflows and those in the profile's ToolsDeny.
+// Workflows. It logs a warning for each profile whose AllowWrites is ignored.
+// It sets the Tools of each authorization profile without them to the server's
+// read-only tools other than list_startable_workflows and those in the
+// profile's ToolsDeny.
 func NewServer(ctx, subscriptions context.Context, name, version string, cfg *config.Config, clients *temporal.Clients, payloads *payload.Renderer, records io.Writer, logger *slog.Logger) (*Server, error) {
 	ts, tools := newServer(ctx, subscriptions, name, version, cfg, clients, payloads, records, logger)
 	s := &Server{toolServer: ts, tools: tools, logger: logger}

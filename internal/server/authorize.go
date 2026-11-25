@@ -26,27 +26,15 @@ type targetsKey struct{}
 // every other tool call the targets its caller may use the tool on, or, for
 // list_available_targets, the targets its caller may use any tool on, under the
 // config of the snapshot that pin gave the request. access maps each tool to
-// "read" or "write". Without auth, every caller may use every tool on every
-// target if the config allows writes, and otherwise every read-only tool other
-// than list_startable_workflows.
+// "read" or "write". Without auth, every caller may use every tool on every target.
 func authorize(access map[string]string) mcp.Middleware {
 	callerGrants := func(sn *snapshot, req mcp.Request) map[string][]string {
 		if sn.cfg.Auth != nil {
-			g := grants(sn.cfg.Authorization, req)
-			if !sn.cfg.AllowWrites {
-				for tool := range g {
-					if !offeredWithoutWrites(access, tool) {
-						delete(g, tool)
-					}
-				}
-			}
-			return g
+			return grants(sn.cfg, req, access)
 		}
 		g := map[string][]string{}
 		for tool := range access {
-			if sn.cfg.AllowWrites || offeredWithoutWrites(access, tool) {
-				g[tool] = sn.targets
-			}
+			g[tool] = sn.targets
 		}
 		return g
 	}
@@ -94,18 +82,29 @@ func toolTargets(ctx context.Context) []string {
 	return targets
 }
 
-// mayUse reports whether the caller of req may use tool on the target with the given name.
+// mayUse reports whether the caller of req may use a read-only tool on the target with the given name.
 func mayUse(cfg *config.Config, req mcp.Request, tool, target string) bool {
-	return cfg.Auth == nil || slices.Contains(grants(cfg.Authorization, req)[tool], target)
+	if cfg.Auth == nil {
+		return true
+	}
+	for _, p := range callerProfiles(cfg.Authorization, req) {
+		if slices.Contains(p.Tools, tool) && slices.Contains(p.Targets, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // grants returns, for each tool, the targets the caller of req may use it on:
 // those of every profile that gives it the tool through a rule its token matches.
 // A profile that gives start_workflow also gives list_startable_workflows.
-func grants(a *config.Authorization, req mcp.Request) map[string][]string {
+func grants(cfg *config.Config, req mcp.Request, access map[string]string) map[string][]string {
 	g := map[string][]string{}
-	for _, p := range callerProfiles(a, req) {
+	for _, p := range callerProfiles(cfg.Authorization, req) {
 		for _, tool := range p.Tools {
+			if !offeredWithoutWrites(access, tool) && !(cfg.AllowWritesInProfiles && p.AllowWrites) {
+				continue
+			}
 			g[tool] = append(g[tool], p.Targets...)
 			if tool == "start_workflow" {
 				g["list_startable_workflows"] = append(g["list_startable_workflows"], p.Targets...)
@@ -132,14 +131,14 @@ func callerProfiles(a *config.Authorization, req mcp.Request) []config.Profile {
 }
 
 // startableWorkflows returns the workflows of t that the caller of req may start: without auth, every one, and with
-// it, each one whose type is in the workflows of a caller's profile that has t in its targets.
+// it, each one whose type is in the workflows of a caller's profile that may write and has t in its targets.
 func startableWorkflows(cfg *config.Config, req mcp.Request, t *config.Target) []config.Workflow {
 	if cfg.Auth == nil {
 		return t.Workflows
 	}
 	var types []string
 	for _, p := range callerProfiles(cfg.Authorization, req) {
-		if slices.Contains(p.Targets, t.Name) {
+		if cfg.AllowWritesInProfiles && p.AllowWrites && slices.Contains(p.Targets, t.Name) {
 			types = append(types, p.Workflows...)
 		}
 	}
@@ -186,8 +185,6 @@ func resolveProfileTools(cfg *config.Config, tools []string, access map[string]s
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: list_startable_workflows comes with start_workflow, so profiles do not list it", name, f.key, k))
 				case !slices.Contains(tools, tool):
 					errs = append(errs, fmt.Errorf("authorization: profiles: %q: %s[%d]: unknown tool %q; the tools are %s", name, f.key, k, tool, strings.Join(tools, ", ")))
-				case f.key == "tools" && access[tool] == "write" && cfg.AllowWritesInProfiles && !p.AllowWrites:
-					errs = append(errs, fmt.Errorf("authorization: profiles: %q: allow_writes: required with %s in tools when allow_writes_in_profiles is true", name, tool))
 				}
 			}
 		}

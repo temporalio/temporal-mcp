@@ -76,7 +76,6 @@ func TestAuthorization(t *testing.T) {
 	t.Cleanup(gs.Stop)
 
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
-allow_writes: true
 allow_writes_in_profiles: true
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
@@ -359,20 +358,20 @@ authorization:
 		}
 
 		for _, tt := range []struct {
-			name, optIn                 string
-			global, profile, wantWrites bool
-			wantWarnings                int
+			name, optIn         string
+			profile, wantWrites bool
+			wantWarnings        int
 		}{
-			{"omitted", "", true, true, true, 2},
-			{"false", "allow_writes_in_profiles: false\n", true, true, true, 2},
-			{"ignored false profile", "", true, false, true, 1},
-			{"global off", "", false, true, false, 2},
-			{"enabled", "allow_writes_in_profiles: true\n", true, true, true, 0},
-			{"global off with opt-in", "allow_writes_in_profiles: true\n", false, true, false, 0},
+			{"omitted", "", true, false, 2},
+			{"false", "allow_writes_in_profiles: false\n", true, false, 2},
+			{"disabled profiles", "", false, false, 1},
+			{"enabled", "allow_writes_in_profiles: true\n", true, true, 0},
+			{"profile false", "allow_writes_in_profiles: true\n", false, false, 0},
+			{"disabled again", "allow_writes_in_profiles: false\n", true, false, 2},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				data := strings.NewReplacer(
-					"allow_writes: true\nallow_writes_in_profiles: true\n", fmt.Sprintf("allow_writes: %t\n%s", tt.global, tt.optIn),
+					"allow_writes_in_profiles: true\n", tt.optIn,
 					"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}]}",
 					"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", fmt.Sprintf("dev: {tools: [get_workflows, start_workflow], workflows: [A], targets: [orders-prod], allow_writes: %t}", tt.profile),
 				).Replace(yaml)
@@ -446,11 +445,11 @@ func (fakeOperatorService) ListSearchAttributes(context.Context, *operatorservic
 	return &operatorservice.ListSearchAttributesResponse{CustomAttributes: map[string]enums.IndexedValueType{"CustomerId": enums.INDEXED_VALUE_TYPE_KEYWORD}}, nil
 }
 
-func TestNoAuthAllowsWritesOnlyWithAllowWrites(t *testing.T) {
+func TestNoAuthAllowsWritesWithoutProfiles(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	load := func(allowWrites bool) (*config.Config, *temporal.Clients) {
+	load := func(allowWritesInProfiles bool) (*config.Config, *temporal.Clients) {
 		t.Helper()
-		cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\nallow_writes: %t\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n", allowWrites), "")
+		cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\nallow_writes_in_profiles: %t\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n", allowWritesInProfiles), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -467,9 +466,9 @@ func TestNoAuthAllowsWritesOnlyWithAllowWrites(t *testing.T) {
 	}
 	session := connectTo(t, NewMux(s.Server, cfg, logger), http.DefaultTransport)
 	readTools := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}
-	for i, allowWrites := range []bool{false, true, false} {
+	for i, allowWritesInProfiles := range []bool{false, true, false} {
 		if i > 0 {
-			next, nextClients := load(allowWrites)
+			next, nextClients := load(allowWritesInProfiles)
 			if err := s.Reload(next, nextClients, newRenderer(t, next, logger)); err != nil {
 				t.Fatal(err)
 			}
@@ -482,19 +481,16 @@ func TestNoAuthAllowsWritesOnlyWithAllowWrites(t *testing.T) {
 		for _, tool := range list.Tools {
 			tools = append(tools, tool.Name)
 		}
-		want := readTools
-		if allowWrites {
-			want = slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow")))
-		}
+		want := slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow")))
 		if !slices.Equal(tools, want) || list.CacheScope != "public" {
-			t.Errorf("allow_writes %t: tools/list = %v with cacheScope %q, want %v with cacheScope public", allowWrites, tools, list.CacheScope, want)
+			t.Errorf("allow_writes_in_profiles %t: tools/list = %v with cacheScope %q, want %v with cacheScope public", allowWritesInProfiles, tools, list.CacheScope, want)
 		}
 		for name, args := range map[string]map[string]any{
 			"list_startable_workflows": {"target": "a"},
 			"start_workflow":           {"target": "a", "workflow_id": "w", "workflow_type": "V"},
 		} {
-			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args}); allowWrites != (err == nil) || err != nil && !strings.Contains(err.Error(), fmt.Sprintf("unknown tool %q", name)) {
-				t.Errorf("allow_writes %t: calling %s: err = %v, want an unknown tool error: %t", allowWrites, name, err, !allowWrites)
+			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args}); err != nil {
+				t.Errorf("allow_writes_in_profiles %t: calling %s: err = %v, want no protocol error", allowWritesInProfiles, name, err)
 			}
 		}
 	}
@@ -516,14 +512,14 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	cfg := &config.Config{
-		AllowWrites: true,
+		AllowWritesInProfiles: true,
 		Targets: []config.Target{
 			{Name: "granted", Description: "x", Address: closed, Namespace: "a"},
 			{Name: "ungranted", Description: "x", Address: closed, Namespace: "b"},
 		},
 		Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: idp, Audience: "operator"},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
+			Profiles: map[string]config.Profile{"p": {AllowWrites: true, Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}

@@ -308,60 +308,78 @@ func TestStdio(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = dev.Stop() })
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	config := fmt.Sprintf("targets:\n  - {name: dev, description: x, address: %q, namespace: default, workflows: [{type: Declared, task_queue: q}]}\n", dev.FrontendHostPort())
-	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	bin := buildBinary(t)
+	for _, tt := range []struct {
+		name, flags string
+		wantWrites  bool
+	}{
+		{"default", "", false},
+		{"profiles only", "allow_writes_in_profiles: true\n", false},
+		{"unauthenticated writes", "allow_unauthenticated_writes: true\n", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			config := fmt.Sprintf("%stargets:\n  - {name: dev, description: x, address: %q, namespace: default, workflows: [{type: Declared, task_queue: q}]}\n", tt.flags, dev.FrontendHostPort())
+			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	cmd := exec.CommandContext(ctx, buildBinary(t), "--stdio", "--config", configPath)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	// The client fails on any line of stdout that is not a JSON-RPC message.
-	session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
-	if err != nil {
-		t.Fatalf("%v\nstderr:\n%s", err, &stderr)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-	if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
-		t.Errorf("protocol version = %s, want 2026-07-28", got)
-	}
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "dev"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var check struct {
-		Result struct {
-			Stages []struct{ Name, Status string }
-		}
-	}
-	b, _ := json.Marshal(res.StructuredContent)
-	if res.IsError || json.Unmarshal(b, &check) != nil {
-		t.Fatalf("check_connection = %s", b)
-	}
-	statuses := map[string]string{}
-	for _, s := range check.Result.Stages {
-		statuses[s.Name] = s.Status
-	}
-	if want := map[string]string{"server": "ok", "namespace": "ok", "codec": "skipped"}; !maps.Equal(statuses, want) {
-		t.Errorf("check_connection = %s, want stage statuses %v", b, want)
-	}
-	for workflowType, wantStarted := range map[string]bool{"Declared": true, "Undeclared": false} {
-		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "start_workflow", Arguments: map[string]any{"target": "dev", "workflow_id": "stdio-" + workflowType, "workflow_type": workflowType}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := dev.Client().DescribeWorkflowExecution(ctx, "stdio-"+workflowType, ""); res.IsError == wantStarted || (err == nil) != wantStarted {
-			t.Errorf("start_workflow of %s: isError = %v, describing the run: err = %v; want a run: %v", workflowType, res.IsError, err, wantStarted)
-		}
-	}
+			cmd := exec.CommandContext(ctx, bin, "--stdio", "--config", configPath)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			// The client fails on any line of stdout that is not a JSON-RPC message.
+			session, err := mcp.NewClient(&mcp.Implementation{Name: "e2e-test", Version: "0"}, nil).Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
+			if err != nil {
+				t.Fatalf("%v\nstderr:\n%s", err, &stderr)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+				t.Errorf("protocol version = %s, want 2026-07-28", got)
+			}
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "check_connection", Arguments: map[string]any{"target": "dev"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var check struct {
+				Result struct {
+					Stages []struct{ Name, Status string }
+				}
+			}
+			b, _ := json.Marshal(res.StructuredContent)
+			if res.IsError || json.Unmarshal(b, &check) != nil {
+				t.Fatalf("check_connection = %s", b)
+			}
+			statuses := map[string]string{}
+			for _, s := range check.Result.Stages {
+				statuses[s.Name] = s.Status
+			}
+			if want := map[string]string{"server": "ok", "namespace": "ok", "codec": "skipped"}; !maps.Equal(statuses, want) {
+				t.Errorf("check_connection = %s, want stage statuses %v", b, want)
+			}
+			for workflowType, wantStarted := range map[string]bool{"Declared": true, "Undeclared": false} {
+				res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "start_workflow", Arguments: map[string]any{"target": "dev", "workflow_id": "stdio-" + workflowType, "workflow_type": workflowType}})
+				if !tt.wantWrites {
+					if err == nil || !strings.Contains(err.Error(), `unknown tool "start_workflow"`) {
+						t.Fatalf("start_workflow error = %v, want unknown tool", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := dev.Client().DescribeWorkflowExecution(ctx, "stdio-"+workflowType, ""); res.IsError == wantStarted || (err == nil) != wantStarted {
+					t.Errorf("start_workflow of %s: isError = %v, describing the run: err = %v; want a run: %v", workflowType, res.IsError, err, wantStarted)
+				}
+			}
 
-	// Closing the session closes the server's stdin and returns the error of the server's exit.
-	if err := session.Close(); err != nil {
-		t.Fatalf("server did not exit cleanly when stdin closed: %v\nstderr:\n%s", err, &stderr)
-	}
-	if !strings.Contains(stderr.String(), `"tool":"check_connection"`) {
-		t.Errorf("stderr has no audit record of the call:\n%s", &stderr)
+			// Closing the session closes the server's stdin and returns the error of the server's exit.
+			if err := session.Close(); err != nil {
+				t.Fatalf("server did not exit cleanly when stdin closed: %v\nstderr:\n%s", err, &stderr)
+			}
+			if !strings.Contains(stderr.String(), `"tool":"check_connection"`) {
+				t.Errorf("stderr has no audit record of the call:\n%s", &stderr)
+			}
+		})
 	}
 }
 
@@ -393,7 +411,7 @@ func TestExitsWithoutServing(t *testing.T) {
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {p: {tools: [get_workflows, terminate_workflow], targets: [a]}, q: {tools_deny: [terminate_workflow], targets: [a]},\n" +
 		"    r: {tools_deny: [list_available_targets, check_connection, get_workflows, get_workflow_history, get_workflow_history_summary, get_task_queues, search_workflows, count_workflows, list_search_attributes], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: p}]\n")
-	workflows := writeConfig("listen: 127.0.0.1:0\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n" +
+	workflows := writeConfig("listen: 127.0.0.1:0\nallow_writes_in_profiles: true\ntargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n" +
 		"auth:\n  resource: https://mcp.example.com/mcp\n  issuer: https://idp.example.com\n  audience: operator\n  required_scopes: [temporal.read]\n" +
 		"authorization:\n  profiles: {s: {tools: [start_workflow], targets: [a]}, w: {tools: [get_workflows], workflows: [W], targets: [a]}, d: {workflows: [W], targets: [a]},\n" +
 		"    l: {tools: [start_workflow, list_startable_workflows], workflows: [W], targets: [a]}, n: {tools_deny: [list_startable_workflows], targets: [a]}}\n  rules: [{claim_name: sub, claim_value: alice, profile: s}]\n")

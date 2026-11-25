@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -76,6 +76,7 @@ func TestAuthorization(t *testing.T) {
 	t.Cleanup(gs.Stop)
 
 	yaml := fmt.Sprintf(`listen: 127.0.0.1:0
+allow_writes_in_profiles: true
 targets:
   - {name: payments-prod, aliases: [pp], description: x, address: %[1]q, namespace: a}
   - {name: payments-staging, description: x, address: %[3]q, namespace: b}
@@ -91,7 +92,7 @@ authorization:
     dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}
     orders: {tools: [get_workflows], targets: [orders-prod]}
     search: {tools: [search_workflows], targets: [payments-staging]}
-    all: {targets: [payments-staging]}
+    all: {targets: [payments-staging], allow_writes: true}
     no-history: {tools_deny: [get_workflow_history], targets: [payments-staging]}
   rules:
     - {claim_name: "cognito:groups", claim_value: temporal-oncall, profile: oncall}
@@ -236,7 +237,7 @@ authorization:
 			tools: []string{},
 		},
 		{
-			name:    "profile without tools or tools_deny",
+			name:    "profile without tools or tools_deny, even with allow_writes",
 			token:   sign(map[string]any{"https://acme.example/roles": []any{"Temporal.All"}}),
 			tools:   []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"},
 			targets: []string{"payments-staging"},
@@ -327,7 +328,7 @@ authorization:
 		// The reload gives dev start_workflow for A on orders-prod in place of its read-only tools on payments-staging.
 		next, err := config.Parse([]byte(strings.NewReplacer(
 			"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}, {type: B, task_queue: q}]}",
-			"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", "dev: {tools: [start_workflow], workflows: [A], targets: [orders-prod]}",
+			"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", "dev: {tools: [start_workflow], workflows: [A], targets: [orders-prod], allow_writes: true}",
 		).Replace(yaml)), "")
 		if err != nil {
 			t.Fatal(err)
@@ -355,6 +356,86 @@ authorization:
 		if want := []string{"list_startable_workflows", "start_workflow"}; !slices.Equal(tools, want) || len(out.Result.Workflows) != 1 || out.Result.Workflows[0].Type != "A" {
 			t.Errorf("after the reload, dev gets tools %v and startable workflows %+v; want %v and A", tools, out.Result.Workflows, want)
 		}
+
+		for _, tt := range []struct {
+			name, optIn         string
+			profile, wantWrites bool
+			wantWarnings        int
+		}{
+			{"omitted", "", true, false, 2},
+			{"false", "allow_writes_in_profiles: false\n", true, false, 2},
+			{"disabled profiles", "", false, false, 1},
+			{"enabled", "allow_writes_in_profiles: true\n", true, true, 0},
+			{"profile false", "allow_writes_in_profiles: true\n", false, false, 0},
+			{"disabled again", "allow_writes_in_profiles: false\n", true, false, 2},
+			{"unauthenticated flag only", "allow_unauthenticated_writes: true\n", true, false, 2},
+			{"unauthenticated flag with read-only profile", "allow_unauthenticated_writes: true\nallow_writes_in_profiles: true\n", false, false, 0},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				data := strings.NewReplacer(
+					"allow_writes_in_profiles: true\n", tt.optIn,
+					"namespace: c}", "namespace: c, workflows: [{type: A, task_queue: q}]}",
+					"dev: {tools: [list_available_targets, get_workflows, search_workflows, count_workflows, list_search_attributes], targets: [payments-staging]}", fmt.Sprintf("dev: {tools: [get_workflows, start_workflow], workflows: [A], targets: [orders-prod], allow_writes: %t}", tt.profile),
+				).Replace(yaml)
+				cfg, err := config.Parse([]byte(data), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var warnings bytes.Buffer
+				s.logger = slog.New(slog.NewJSONHandler(&warnings, nil))
+				if err := s.Reload(cfg, clients, newRenderer(t, cfg, logger)); err != nil {
+					t.Fatal(err)
+				}
+				lines := strings.Split(strings.TrimSpace(warnings.String()), "\n")
+				if warnings.Len() == 0 {
+					lines = nil
+				}
+				if len(lines) != tt.wantWarnings {
+					t.Fatalf("warnings = %s, want %d warnings", warnings.String(), tt.wantWarnings)
+				}
+				for i, line := range lines {
+					var record struct{ Level, Msg, Profile string }
+					if err := json.Unmarshal([]byte(line), &record); err != nil {
+						t.Fatal(err)
+					}
+					wantProfile := "all"
+					if i == 1 {
+						wantProfile = "dev"
+					}
+					if record.Level != "WARN" || record.Profile != wantProfile || !strings.Contains(record.Msg, "ignoring profile allow_writes because allow_writes_in_profiles is not true") {
+						t.Errorf("warning = %s, want WARN naming profile %q and the ignored setting", line, wantProfile)
+					}
+				}
+				list, err := session.ListTools(t.Context(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var tools []string
+				for _, tool := range list.Tools {
+					tools = append(tools, tool.Name)
+				}
+				want := []string{"get_workflows"}
+				if tt.wantWrites {
+					want = append(want, "list_startable_workflows", "start_workflow")
+				}
+				if !slices.Equal(tools, want) {
+					t.Errorf("tools/list = %v, want %v", tools, want)
+				}
+				for name, args := range map[string]map[string]any{
+					"list_startable_workflows": {"target": "orders-prod"},
+					"start_workflow":           {"target": "orders-prod", "workflow_id": "w", "workflow_type": "V"},
+				} {
+					_, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+					if tt.wantWrites != (err == nil) || err != nil && !strings.Contains(err.Error(), fmt.Sprintf("unknown tool %q", name)) {
+						t.Errorf("calling %s: err = %v, want an unknown tool error: %t", name, err, !tt.wantWrites)
+					}
+				}
+			})
+		}
 	})
 }
 
@@ -366,18 +447,64 @@ func (fakeOperatorService) ListSearchAttributes(context.Context, *operatorservic
 	return &operatorservice.ListSearchAttributesResponse{CustomAttributes: map[string]enums.IndexedValueType{"CustomerId": enums.INDEXED_VALUE_TYPE_KEYWORD}}, nil
 }
 
-func TestNoAuthAllowsEveryTool(t *testing.T) {
-	session := connect(t, filepath.Join("..", "..", "testdata", "config.yaml"), t.Output())
-	list, err := session.ListTools(t.Context(), nil)
+func TestNoAuthRequiresAllowUnauthenticatedWrites(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+	load := func(flags string) (*config.Config, *temporal.Clients) {
+		t.Helper()
+		cfg, err := config.Parse(fmt.Appendf(nil, "listen: 127.0.0.1:0\n%stargets:\n  - {name: a, description: x, address: \"a:7233\", namespace: default, workflows: [{type: W, task_queue: q}]}\n", flags), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients, err := temporal.NewClients(cfg, "http", "test", "0", slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, clients
+	}
+	cfg, clients := load("")
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, clients, newRenderer(t, cfg, logger), t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tools []string
-	for _, tool := range list.Tools {
-		tools = append(tools, tool.Name)
-	}
-	if want := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "list_startable_workflows", "search_workflows", "start_workflow"}; !slices.Equal(tools, want) {
-		t.Errorf("tools/list = %v, want %v", tools, want)
+	session := connectTo(t, NewMux(s.Server, cfg, logger), http.DefaultTransport)
+	readTools := []string{"check_connection", "count_workflows", "get_task_queues", "get_workflow_history", "get_workflow_history_summary", "get_workflows", "list_available_targets", "list_search_attributes", "search_workflows"}
+	for _, tt := range []struct {
+		flags      string
+		wantWrites bool
+	}{
+		{"", false},
+		{"allow_writes_in_profiles: true\n", false},
+		{"allow_unauthenticated_writes: true\n", true},
+		{"allow_unauthenticated_writes: true\nallow_writes_in_profiles: true\n", true},
+		{"allow_unauthenticated_writes: false\nallow_writes_in_profiles: true\n", false},
+	} {
+		next, nextClients := load(tt.flags)
+		if err := s.Reload(next, nextClients, newRenderer(t, next, logger)); err != nil {
+			t.Fatal(err)
+		}
+		list, err := session.ListTools(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tools []string
+		for _, tool := range list.Tools {
+			tools = append(tools, tool.Name)
+		}
+		want := readTools
+		if tt.wantWrites {
+			want = slices.Sorted(slices.Values(append(slices.Clone(readTools), "list_startable_workflows", "start_workflow")))
+		}
+		if !slices.Equal(tools, want) || list.CacheScope != "public" {
+			t.Errorf("flags %q: tools/list = %v with cacheScope %q, want %v with cacheScope public", tt.flags, tools, list.CacheScope, want)
+		}
+		for name, args := range map[string]map[string]any{
+			"list_startable_workflows": {"target": "a"},
+			"start_workflow":           {"target": "a", "workflow_id": "w", "workflow_type": "V"},
+		} {
+			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args}); tt.wantWrites != (err == nil) || err != nil && !strings.Contains(err.Error(), fmt.Sprintf("unknown tool %q", name)) {
+				t.Errorf("flags %q: calling %s: err = %v, want an unknown tool error: %t", tt.flags, name, err, !tt.wantWrites)
+			}
+		}
 	}
 }
 
@@ -397,13 +524,14 @@ func TestToolCannotReachUngrantedTarget(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	cfg := &config.Config{
+		AllowWritesInProfiles: true,
 		Targets: []config.Target{
 			{Name: "granted", Description: "x", Address: closed, Namespace: "a"},
 			{Name: "ungranted", Description: "x", Address: closed, Namespace: "b"},
 		},
 		Auth: &config.Auth{Resource: "https://mcp.example.com/mcp", Issuer: idp, Audience: "operator"},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
+			Profiles: map[string]config.Profile{"p": {AllowWrites: true, Tools: []string{"skips_lookup", "crosses_namespace", "empty_namespace"}, Targets: []string{"granted"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -466,7 +594,7 @@ func TestToolsListFailsClosedOnUnexpectedResult(t *testing.T) {
 			return result, nil
 		}
 		ctx := context.WithValue(t.Context(), snapshotKey{}, newSnapshot(cfg, nil, nil))
-		res, err := authorize()(next)(ctx, "tools/list", &mcp.ListToolsRequest{Params: &mcp.ListToolsParams{}})
+		res, err := authorize(nil)(next)(ctx, "tools/list", &mcp.ListToolsRequest{Params: &mcp.ListToolsParams{}})
 		var wire *jsonrpc.Error
 		if res != nil || !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInternalError {
 			t.Errorf("tools/list with next returning %#v = %#v, %v; want no result and an internal error", result, res, err)

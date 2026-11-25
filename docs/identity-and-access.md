@@ -92,7 +92,7 @@ The identity provider and MCP configuration answer different questions:
 | Is this token authentic and intended for the MCP API? | `auth.issuer` and `auth.audience` validate issuer, signature, time, and audience |
 | Was this token granted the MCP API's scope? | `auth.required_scopes` checks the token's `scope` or `scp` claim |
 | Which users belong to a group? | Identity-provider group membership |
-| What may that group do in MCP? | `authorization.profiles` lists tools, targets, and startable workflows |
+| What may that group do in MCP? | `authorization.profiles` lists tools, targets and startable workflows; writes require both `allow_writes_in_profiles: true` and the profile's `allow_writes: true` |
 | Which token claim grants which MCP profile? | `authorization.rules` maps a claim value to a profile |
 | What may the server do in Temporal? | The API key or mTLS identity configured on each target |
 

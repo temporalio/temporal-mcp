@@ -43,6 +43,10 @@ type Config struct {
 	Auth *Auth `yaml:"auth"`
 	// Authorization decides which tools each caller may use on which targets. It is required with Auth and not allowed without it.
 	Authorization *Authorization `yaml:"authorization"`
+	// AllowUnauthenticatedWrites, when true, lets stdio and HTTP without Auth use tools that write.
+	AllowUnauthenticatedWrites bool `yaml:"allow_unauthenticated_writes"`
+	// AllowWritesInProfiles, when true, lets profiles with AllowWrites give tools that write.
+	AllowWritesInProfiles bool `yaml:"allow_writes_in_profiles"`
 	// AuditLogFile is the path of the file the server appends audit records to; stdout, or stderr over stdio, if empty.
 	AuditLogFile string `yaml:"audit_log_file"`
 	// ErrorLogFile is the path of the file the server appends its logs to; stderr if empty.
@@ -92,11 +96,14 @@ type Authorization struct {
 // and to start each workflow type in Workflows on each of Targets that declares it.
 // Its tools are Tools, plus list_startable_workflows if Tools has start_workflow, or, if
 // Tools is nil, every read-only tool except list_startable_workflows and those in ToolsDeny.
+// A tool that writes, such as start_workflow, is available only when both
+// Config.AllowWritesInProfiles and AllowWrites are true.
 type Profile struct {
-	Tools     []string `yaml:"tools"`
-	ToolsDeny []string `yaml:"tools_deny"`
-	Targets   []string `yaml:"targets"`
-	Workflows []string `yaml:"workflows"`
+	Tools       []string `yaml:"tools"`
+	ToolsDeny   []string `yaml:"tools_deny"`
+	Targets     []string `yaml:"targets"`
+	Workflows   []string `yaml:"workflows"`
+	AllowWrites bool     `yaml:"allow_writes"`
 }
 
 // Rule gives Profile to callers whose access token has the top-level claim

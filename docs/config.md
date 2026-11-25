@@ -39,6 +39,9 @@ targets:
 [ error_log_file: <filename> ]
 [ shutdown_timeout: <duration> | default = 8s ]
 
+[ allow_unauthenticated_writes: <boolean> | default = false ]
+[ allow_writes_in_profiles: <boolean> | default = false ]
+
 # HTTP mode only.
 listen: <host:port>
 
@@ -64,6 +67,7 @@ listen: <host:port>
         [ tools_deny: [ <string>, ... ] ]
         targets: [ <string>, ... ]
         [ workflows: [ <string>, ... ] ]
+        [ allow_writes: <boolean> | default = false ]
     rules:
       - claim_name: <string>
         claim_value: <string>
@@ -137,7 +141,7 @@ The server creates each file with mode 0600 if it does not exist, and does not s
 
 These say where and how the server serves MCP in HTTP mode, and are not allowed in `--stdio` mode.
 
-- `listen` (host:port, required in HTTP mode): The address the server binds to. MCP is served at the path `/mcp`. Without an `auth` section, the host must be a loopback IP address such as `127.0.0.1` or `::1`, because without auth anyone who can reach the port can use every tool on every target; a hostname such as `localhost`, an empty host such as `:8080`, and `0.0.0.0` are rejected. Requests must then also name a loopback host (`localhost`, `127.0.0.1` or `::1`) in their `Host` header, or they get a 403. With `auth`, any `host:port` is allowed, including `0.0.0.0:8443` or `:8443`.
+- `listen` (host:port, required in HTTP mode): The address the server binds to. MCP is served at the path `/mcp`. Without an `auth` section, the host must be a loopback IP address such as `127.0.0.1` or `::1`, because without auth anyone who can reach the port can use every tool the server offers on every target; a hostname such as `localhost`, an empty host such as `:8080`, and `0.0.0.0` are rejected. Requests must then also name a loopback host (`localhost`, `127.0.0.1` or `::1`) in their `Host` header, or they get a 403. With `auth`, any `host:port` is allowed, including `0.0.0.0:8443` or `:8443`.
 - `listen_tls` (optional): With this section, the server serves HTTPS on `listen`. Without it, the server serves plain HTTP, for running behind a reverse proxy or load balancer that terminates TLS. `listen_tls:` with no value is an error.
   - `cert_file` (filename, required): Path of a PEM certificate chain, leaf first.
   - `key_file` (filename, required): Path of the certificate's PEM private key.
@@ -147,6 +151,20 @@ The server does not start if it cannot load the certificate and key, and starts 
 ## `shutdown_timeout`
 
 Optional in both modes, default `8s`; zero uses the default and negative values are rejected. After SIGINT or SIGTERM, or stdin closing in `--stdio` mode, the server waits this long for calls to finish, then cancels those still running and gives them another second to write their audit records. Set it at least a second shorter than the time your platform allows before SIGKILL. See [Shutdown](../README.md#shutdown).
+
+## `allow_unauthenticated_writes`
+
+Optional in both modes, default `false`. Set it to `true` to allow tools that write in `--stdio` mode and HTTP without `auth`. Otherwise those tools, and `list_startable_workflows`, are hidden and calls to them get the same error as calls to a tool that does not exist. Read-only tools remain available.
+
+This setting has no effect with `auth`: profile writes require [`allow_writes_in_profiles`](#allow_writes_in_profiles) and the profile's own `allow_writes` to be `true`. A [`--watch-config`](#--watch-config) reload applies changes to new requests.
+
+## `allow_writes_in_profiles`
+
+Optional, default `false`. A profile can give tools that write, such as `start_workflow`, only when both this setting and the profile's `allow_writes` are `true`. Otherwise those tools are hidden and calls to them get the same error as calls to a tool that does not exist. `list_startable_workflows` comes with `start_workflow`, so the same goes for it.
+
+Unless this setting is `true`, profiles' `allow_writes` settings are ignored. The server logs a warning for each profile with `allow_writes: true` at startup and on config reload, naming the profile and the ignored setting.
+
+To turn writes off for all profiles, set `allow_writes_in_profiles` to `false`. Profiles may keep their write tools, `workflows` and `allow_writes` settings. A [`--watch-config`](#--watch-config) reload applies the change to new requests. This setting has no effect without `auth`.
 
 ## `auth`
 
@@ -169,13 +187,14 @@ The agent also needs a client ID the provider accepts, either a URL from which t
 
 ## `authorization`
 
-Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every tool on every target, and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
+Decides which tools each caller may use on which targets, and which of the targets' `workflows` it may start. It is HTTP mode only, and is required with `auth` and not allowed without it, because its rules match claims in the access tokens that `auth` verifies. Without `auth`, every caller may use every read-only tool on every target. With [`allow_unauthenticated_writes: true`](#allow_unauthenticated_writes), callers may also use tools that write and start every workflow in a target's `workflows`. `authorization:` with no value is an error. [`examples/http-auth-config.yaml`](../examples/http-auth-config.yaml) shows a complete section.
 
 - `profiles` (map from a profile name to a profile, required): Each profile lets a caller use its tools on each of its `targets`. Every tool is read-only except `start_workflow`, which a profile gives only when its `tools` lists it, and which brings `list_startable_workflows` with it; no other profile gives that tool. Without `tools`, a profile gives every other read-only tool not in `tools_deny`, including those that later versions of the server add, while with `tools` a new tool stays unavailable until you list it. `tools:` or `tools_deny:` with no value is an error, not the same as leaving it out.
   - `tools` (list of strings, default every read-only tool not in `tools_deny`): The tools the profile gives, at least one of `list_available_targets`, `check_connection`, `get_workflows`, `get_workflow_history`, `get_workflow_history_summary`, `get_task_queues`, `search_workflows`, `count_workflows`, `list_search_attributes` and `start_workflow`. Any other name is an error.
   - `tools_deny` (list of strings, optional): The tools the profile does not give, at least one. It is not allowed with `tools`, each name must be one that `tools` accepts, and it must leave the profile at least one tool.
   - `targets` (list of strings, required): At least one target, each given by its `name`, not an alias.
   - `workflows` (list of strings, required with `start_workflow`): The workflow types the profile lets a caller start, each on every one of its `targets` that has that type in its `workflows`. It is not allowed without `start_workflow`, and each type must be in the `workflows` of at least one of the profile's `targets`.
+  - `allow_writes` (boolean, default `false`): Lets callers use the tools that write listed in the profile's `tools`, such as `start_workflow`, only when [`allow_writes_in_profiles`](#allow_writes_in_profiles) is also `true`. Otherwise those tools are hidden and calls to them are rejected. If `allow_writes_in_profiles` is not `true`, this field is ignored, with a warning when it is `true`. A profile without `tools` gives only read-only tools, whatever its `allow_writes` says.
 - `rules` (list, required): Which callers get which profile, at least one.
   - `claim_name` (string, required): The name of a top-level claim exactly as it appears in a decoded access token, so names such as `cognito:groups` or `https://example.com/roles` work as written. It must not have leading or trailing whitespace.
   - `claim_value` (string, required): The value the claim must equal, or one entry of it when the claim is a list. It must be a YAML string, so an unquoted number or boolean such as `42` or `true` is rejected; quote it (`"42"`) to match the string. A `scope` or `scp` claim that is a string counts as a list of its space-separated entries, so a value matching one of them must not contain a space, and each scope needs its own rule.
@@ -187,7 +206,7 @@ Rules should match only claims that neither the user nor the client can set, suc
 
 ## `--stdio` mode
 
-In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file` and `shutdown_timeout`; `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization: the targets' API keys and client certificates decide what the developer can read and whether they can start runs, and they can start only the workflows in the targets' `workflows`. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
+In `--stdio` mode the config has `targets` and, optionally, `codecs`, `audit_log_file`, `error_log_file`, `shutdown_timeout`, `allow_unauthenticated_writes` and `allow_writes_in_profiles` (which has no effect without `auth`); `listen`, `listen_tls`, `auth`, `authorization` and a codec's `passthrough_headers` are not allowed. Since stdout carries MCP messages, audit records go to stderr unless `audit_log_file` is set. There is no authorization, so the targets' API keys and client certificates decide what the developer can read. With `allow_unauthenticated_writes: true`, the developer can also start runs of the workflows in the targets' `workflows`, and no others, when those credentials allow it. The agent picks the directory it starts the server in, so give the `--config` path as an absolute path. The server sees only the environment the MCP client passes it, so set `SSL_CERT_FILE` and any variable an `env` secret names as literal values in the client's config, or use `file` secrets.
 
 ## `--watch-config`
 

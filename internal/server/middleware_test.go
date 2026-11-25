@@ -91,7 +91,7 @@ func TestInvalidArgumentMessages(t *testing.T) {
 	// A tool with a rule that argumentError does not know, whose message it keeps.
 	patternTool := func(s *toolServer) {
 		schema := &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"code": {Type: "string", Pattern: "^[a-z]+$"}}}
-		addTool(s, &mcp.Tool{Name: "pattern", InputSchema: schema}, nil, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, struct{}, error) {
+		addTool(s, &mcp.Tool{Name: "pattern", InputSchema: schema, Annotations: readOnlyAnnotations}, nil, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, struct{}, error) {
 			return nil, struct{}{}, nil
 		})
 	}

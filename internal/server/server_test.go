@@ -174,7 +174,7 @@ func TestListAvailableTargets(t *testing.T) {
 func TestToolCalls(t *testing.T) {
 	testTool := func(name string, err error) func(*toolServer) {
 		return func(s *toolServer) {
-			addTool(s, &mcp.Tool{Name: name}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
+			addTool(s, &mcp.Tool{Name: name, Annotations: readOnlyAnnotations}, nil, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, struct{}, error) {
 				if err == nil {
 					panic("boom-value")
 				}
@@ -229,11 +229,12 @@ func TestToolCalls(t *testing.T) {
 
 func TestToolErrorHasResultType(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", &config.Config{}, nil, nil, t.Output(), logger)
+	cfg := &config.Config{Targets: []config.Target{{Name: "a"}}}
+	s, err := NewServer(t.Context(), t.Context(), "temporal", "0", cfg, nil, nil, t.Output(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewMux(s.Server, &config.Config{}, logger))
+	srv := httptest.NewServer(NewMux(s.Server, cfg, logger))
 	t.Cleanup(srv.Close)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_connection","arguments":{"target":"nope"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`))
 	if err != nil {
@@ -278,9 +279,10 @@ func TestNewMux(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	authCfg := &config.Config{
-		Auth: &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuer: issuerURL, Audience: "operator", RequiredScopes: []string{"temporal.read"}},
+		AllowWritesInProfiles: true,
+		Auth:                  &config.Auth{Resource: "https://mcp.example.com:8443/team/mcp/", Issuer: issuerURL, Audience: "operator", RequiredScopes: []string{"temporal.read"}},
 		Authorization: &config.Authorization{
-			Profiles: map[string]config.Profile{"p": {Tools: []string{"whoami"}, Targets: []string{"prod"}}},
+			Profiles: map[string]config.Profile{"p": {AllowWrites: true, Tools: []string{"whoami"}, Targets: []string{"prod"}}},
 			Rules:    []config.Rule{{ClaimName: "sub", ClaimValue: "alice", Profile: "p"}},
 		},
 	}
@@ -406,7 +408,7 @@ func TestReload(t *testing.T) {
 	}
 	call := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "count_workflows", Arguments: json.RawMessage(`{"target":"alpha"}`)}}
 	var records bytes.Buffer
-	if _, err := pin(s.toolServer)(reload(audit(&records, logger, s.access)(authorize()(handler))))(ctx, "tools/call", call); err != nil {
+	if _, err := pin(s.toolServer)(reload(audit(&records, logger, s.access)(authorize(s.access)(handler))))(ctx, "tools/call", call); err != nil {
 		t.Fatal(err)
 	}
 	var rec struct{ Target string }
@@ -423,7 +425,7 @@ func TestReload(t *testing.T) {
 	if code := ping(ctx, badClients, "c"); code != codes.Canceled {
 		t.Errorf("the clients of the failed reload: %v, want Canceled", code)
 	}
-	if _, err := pin(s.toolServer)(authorize()(handler))(ctx, "tools/call", call); err != nil || !slices.Equal(targets, []string{"b"}) || held != codes.OK {
+	if _, err := pin(s.toolServer)(authorize(s.access)(handler))(ctx, "tools/call", call); err != nil || !slices.Equal(targets, []string{"b"}) || held != codes.OK {
 		t.Errorf("a call after the reloads = %v, with targets %v and %v from its clients; want [b] and OK", err, targets, held)
 	}
 }

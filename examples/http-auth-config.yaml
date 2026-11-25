@@ -15,6 +15,9 @@ auth:
   # The scope you gave this server's API, as access tokens carry it in their scope or scp claim.
   required_scopes: [temporal.read]
 
+# Lets a profile with its own allow_writes give start_workflow.
+allow_writes_in_profiles: true
+
 authorization:
   profiles:
     # No tools list: every read-only tool, including ones later versions add.
@@ -28,6 +31,7 @@ authorization:
       tools: [list_available_targets, get_workflows, start_workflow]
       targets: [orders-prod]
       workflows: [OrderBackfillWorkflow]
+      allow_writes: true
   rules:
     - {claim_name: groups, claim_value: temporal-oncall, profile: oncall}
     - {claim_name: groups, claim_value: payments-dev, profile: payments-dev}
